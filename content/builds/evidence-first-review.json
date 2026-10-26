@@ -33,8 +33,12 @@
     "evidence"
   ],
   "published": "2026-10-22",
-  "updated": "2026-10-25",
+  "updated": "2026-10-26",
   "changelog": [
+    {
+      "date": "2026-10-26",
+      "note": "Merge guard reads each command the way the shell splits it: quotes, backslashes, comments and here-documents. It now also blocks git push \\-f, \"git\" push -f and git -C \"my dir\" push -f, force pushes and merges inside bash -c, sh -c, eval and command substitutions or in a here-document or pipe that a shell reads, and anything nested more than three levels deep. Text that only mentions a force push, such as a quoted commit message or a here-document body, no longer blocks. The plugin manifest now links the public Build repository."
+    },
     {
       "date": "2026-10-25",
       "note": "Merge guard also blocks git push -f as the first argument, flag clusters such as -fu, --mirror, git -C <dir> push, git called by its path, and pushes or merges inside ( ) or { }. Only git's subcommand counts and each command is checked on its own, so a commit message that mentions git push --force, or a force flag on a later command (git push; rm -f x), no longer blocks."
@@ -44,7 +48,7 @@
       "note": "Season 0 release: review contract, evidence table, independent reviewer, merge guard."
     }
   ],
-  "version": "1.0.1",
+  "version": "1.0.2",
   "author": "GuildBuild",
   "license": "Apache-2.0",
   "branches": [
