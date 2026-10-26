@@ -1,0 +1,252 @@
+name: Season trial
+# Runs Season trials: one guild build from bundles/ on one trial as buildguild.gg publishes it, with the official eval
+# runner, then uploads the evidence record, the raw report, the results and the agent traces. A maintainer starts it in
+# one of two ways: merge a change to .github/trial-queue.json into main (each request in the file becomes one run; see
+# "Season trials" in README.md), or dispatch it from the Actions tab with the inputs below. Either way each run waits for
+# the owner's approval in the `trials` environment before it signs in to Azure or spends anything, and a queue with no
+# requests starts nothing. The Anthropic key is read at run time from Azure Key Vault vaultgb01 (secret
+# buildguild-anthropic-api-key) through a federated identity; no copy of the key is held on GitHub. This repository is
+# public, so each run's log and files are public: the files are scanned for the key before upload, and nothing is
+# uploaded if it appears in any of them.
+on:
+  push:
+    branches: [main]
+    paths: ['.github/trial-queue.json']
+  workflow_dispatch:
+    inputs:
+      build:
+        description: Build slug (bundles/<slug>)
+        required: true
+        default: measured-delivery
+      trial:
+        description: Trial slug, as published on buildguild.gg
+        required: true
+        default: guild-smoke-v1
+      max_cost_usd:
+        description: Cost ceiling for the run in USD
+        required: true
+        default: "5"
+      model:
+        description: Model for the agent under test (pinned so a model rollout is never mistaken for a build change)
+        required: true
+        default: claude-sonnet-5-5
+      verify_only:
+        description: Only verify the vault login and key presence; run nothing
+        required: false
+        default: "false"
+permissions:
+  contents: read
+env:
+  # A guild run uses the trial as published: the plan checks its page and the CLI downloads it from here.
+  BUILDGUILD_ORIGIN: https://buildguild.gg
+jobs:
+  plan:
+    # Outside the trials environment: it reads the queue or the inputs and needs no approval, credential or spend.
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Plan one run per request
+        id: plan
+        env:
+          BG_BUILD: ${{ inputs.build }}
+          BG_TRIAL: ${{ inputs.trial }}
+          BG_MAX_COST_USD: ${{ inputs.max_cost_usd }}
+          BG_MODEL: ${{ inputs.model }}
+          BG_VERIFY_ONLY: ${{ inputs.verify_only }}
+        # Each request is checked before anyone is asked to approve it: a build that is not in bundles/, a trial the site
+        # does not publish, or a ceiling that is not a positive number stops the plan, and with it the whole workflow.
+        run: |
+          node --input-type=module <<'JS'
+          import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+          const env = process.env;
+          const QUEUE = '.github/trial-queue.json';
+          const FIELDS = ['build', 'trial', 'max_cost_usd', 'model', 'concurrency', 'verify_only'];
+          const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+          const stop = msg => { console.log(`::error::${msg}`); process.exit(1); };
+          const dispatched = env.GITHUB_EVENT_NAME === 'workflow_dispatch';
+          const requests = dispatched
+            ? [{ build: env.BG_BUILD, trial: env.BG_TRIAL, max_cost_usd: env.BG_MAX_COST_USD, model: env.BG_MODEL, verify_only: env.BG_VERIFY_ONLY }]
+            : JSON.parse(readFileSync(QUEUE, 'utf8')).requests;
+          if (!Array.isArray(requests)) stop(`${QUEUE} needs a "requests" list`);
+          const matrix = requests.map((r, i) => {
+            const where = dispatched ? 'the dispatch inputs' : `request ${i + 1} in ${QUEUE}`;
+            if (typeof r !== 'object' || r === null || Array.isArray(r)) stop(`${where}: a request is an object`);
+            const unknown = Object.keys(r).filter(k => !FIELDS.includes(k));
+            if (unknown.length) stop(`${where}: unknown field ${unknown.join(', ')}`);
+            const m = { build: String(r.build ?? ''), trial: String(r.trial ?? ''), max_cost_usd: String(r.max_cost_usd ?? 5), model: String(r.model ?? 'claude-sonnet-5-5'), concurrency: String(r.concurrency ?? 1), verify_only: String(r.verify_only ?? false) };
+            if (!SLUG.test(m.build) || !existsSync(`bundles/${m.build}/buildguild.json`)) stop(`${where}: no build at bundles/${m.build}`);
+            if (!SLUG.test(m.trial)) stop(`${where}: the trial "${m.trial}" is not a slug`);
+            if (!/^\d+(\.\d+)?$/.test(m.max_cost_usd) || !(Number(m.max_cost_usd) > 0)) stop(`${where}: max_cost_usd must be a positive number of US dollars`);
+            if (!/^[A-Za-z0-9][A-Za-z0-9._[\]-]*$/.test(m.model)) stop(`${where}: "${m.model}" is not a model id`);
+            if (!/^[1-9]\d*$/.test(m.concurrency)) stop(`${where}: concurrency must be a whole number of at least 1`);
+            if (m.verify_only !== 'true' && m.verify_only !== 'false') stop(`${where}: verify_only must be true or false`);
+            return m;
+          });
+          // The CLI fetches the same page during the run; a page it cannot read now would fail that run after approval.
+          for (const trial of new Set(matrix.filter(m => m.verify_only === 'false').map(m => m.trial))) {
+            const url = `${env.BUILDGUILD_ORIGIN}/trials/${trial}.json`;
+            const res = await fetch(url, { headers: { accept: 'application/json', 'user-agent': 'buildguild-cli' }, signal: AbortSignal.timeout(30000) }).catch(err => ({ ok: false, status: err.message }));
+            if (!res.ok) stop(`${url} cannot be read (${res.status}); a guild run uses the published trial, so nothing was started`);
+          }
+          appendFileSync(env.GITHUB_OUTPUT, `matrix=${JSON.stringify(matrix)}\n`);
+          console.log(`matrix=${JSON.stringify(matrix)}`);
+          // The run page shows this summary where the owner approves, so each approval names what it may spend.
+          const ceiling = matrix.filter(m => m.verify_only === 'false').reduce((sum, m) => sum + Number(m.max_cost_usd), 0);
+          const summary = matrix.length
+            ? ['| Build | Trial | Model | Ceiling |', '|---|---|---|---|', ...matrix.map(m => `| ${m.build} | ${m.trial} | ${m.model} | ${m.verify_only === 'true' ? 'verify only, runs nothing' : `${m.max_cost_usd} USD`} |`), '', `Each run waits for the owner's approval in the trials environment. Ceilings total ${Math.round(ceiling * 100) / 100} USD.`]
+            : ['No requests: no trial runs and nothing waits for approval.'];
+          if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${summary.join('\n')}\n`);
+          JS
+  trial:
+    needs: plan
+    # GitHub evaluates this before it expands the matrix, so an empty plan skips the job: no approval request, no Azure
+    # sign-in, and the workflow ends green.
+    if: ${{ needs.plan.outputs.matrix != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: trials
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: ${{ matrix.build }} on ${{ matrix.trial }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Sign in to Azure with the workload identity
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Fetch the Anthropic key from Key Vault (masked, never printed)
+        run: |
+          KEY="$(az keyvault secret show --vault-name vaultgb01 --name buildguild-anthropic-api-key --query value -o tsv 2>/dev/null || true)"
+          if [ -z "$KEY" ]; then
+            echo "No key found in Key Vault vaultgb01 under buildguild-anthropic-api-key; the owner puts it there."; exit 1
+          fi
+          echo "::add-mask::$KEY"
+          echo "ANTHROPIC_API_KEY=$KEY" >> "$GITHUB_ENV"
+          echo "key present (${#KEY} characters)"
+          # An organisation-level key must name a workspace on every request; a workspace-scoped key must not.
+          # The id is kept aside and only sent if the key check below says it is needed.
+          WS="$(az keyvault secret show --vault-name vaultgb01 --name buildguild-anthropic-workspace-id --query value -o tsv 2>/dev/null || true)"
+          if [ -n "$WS" ]; then echo "::add-mask::$WS"; echo "BG_WORKSPACE_ID=$WS" >> "$GITHUB_ENV"; echo "workspace id present (sent only if the key turns out to be organisation-level)"; else echo "no workspace id in the vault"; fi
+      - name: Drop the Azure session before any agent runs
+        # The eval runner refuses Bash-granting runs while a cloud credential store it cannot read is present, and the
+        # key is already in the job environment. Nothing after this step needs Azure.
+        run: az logout 2>/dev/null || true; az account clear 2>/dev/null || true; rm -rf ~/.azure; unset AZURE_CONFIG_DIR; echo "azure session removed"
+      - name: Stop here when only verifying
+        if: ${{ matrix.verify_only == 'true' }}
+        run: echo "vault login and key presence verified; no trial run requested"
+      - name: Install Claude Code and the Linux sandbox backend it needs for Bash-granting runs
+        if: ${{ matrix.verify_only != 'true' }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap socat >/dev/null
+          # Ubuntu 24.04+ runners restrict unprivileged user namespaces through AppArmor; the sandbox needs them.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
+          npm install -g @anthropic-ai/claude-code && claude --version && bwrap --version
+      - name: Self-test the sandbox the way the runner uses it
+        if: ${{ matrix.verify_only != 'true' }}
+        run: |
+          bwrap --unshare-all --share-net --dev-bind / / --proc /proc true && echo "bwrap shared-net ok"
+          bwrap --unshare-all --dev-bind / / --proc /proc true && echo "bwrap unshared-net ok (loopback configured)"
+      - name: Check the key works with one tiny call
+        if: ${{ matrix.verify_only != 'true' }}
+        env:
+          BG_MODEL: ${{ matrix.model }}
+        # This step and the run drop the two variables a step can use to ask GitHub for a new sign-in token, which Azure
+        # accepts for this job's identity, so neither Claude Code nor the agent under test can sign in to Azure again.
+        run: |
+          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+          OUT="$(claude -p "Reply with the single word ok." --model "$BG_MODEL" --max-turns 1 2>&1 | tail -3)"
+          echo "$OUT"
+          case "$OUT" in
+            *"not scoped to a workspace"*)
+              if [ -z "${BG_WORKSPACE_ID:-}" ]; then echo "organisation-level key and no workspace id in the vault; stopping"; exit 1; fi
+              echo "organisation-level key: retrying with the workspace header"
+              export ANTHROPIC_CUSTOM_HEADERS="anthropic-workspace-id: $BG_WORKSPACE_ID"
+              OUT="$(claude -p "Reply with the single word ok." --model "$BG_MODEL" --max-turns 1 2>&1 | tail -3)"
+              echo "$OUT"
+              case "$OUT" in *"API Error"*|*"Not logged in"*) echo "the key does not work with the header either; stopping"; exit 1;; esac
+              echo "ANTHROPIC_CUSTOM_HEADERS=anthropic-workspace-id: $BG_WORKSPACE_ID" >> "$GITHUB_ENV";;
+            *"API Error"*|*"Not logged in"*) echo "the key does not work; stopping before any trial run"; exit 1;;
+          esac
+      - name: Run the trial
+        if: ${{ matrix.verify_only != 'true' }}
+        env:
+          BG_BUILD: ${{ matrix.build }}
+          BG_TRIAL: ${{ matrix.trial }}
+          BG_MAX_COST_USD: ${{ matrix.max_cost_usd }}
+          BG_MODEL: ${{ matrix.model }}
+          BG_CONCURRENCY: ${{ matrix.concurrency }}
+        # The eval creates each run's home and workspace under the system temp directory. Inside the sandbox /tmp is
+        # replaced, which left the workspace read-only on this runner, so the temp directory is moved under the runner's
+        # own work area. The CLI downloads the published trial from BUILDGUILD_ORIGIN and stops, saying so, if it cannot.
+        run: |
+          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+          mkdir -p "$RUNNER_TEMP/evaltmp" && export TMPDIR="$RUNNER_TEMP/evaltmp"
+          node cli/buildguild.mjs test "bundles/$BG_BUILD" --trial "$BG_TRIAL" --max-cost-usd "$BG_MAX_COST_USD" --model "$BG_MODEL" -j "$BG_CONCURRENCY" --runner github-actions --role guild --out "evidence-$BG_BUILD-$BG_TRIAL.json" --raw-out "raw-$BG_BUILD-$BG_TRIAL.json" --work-dir "$RUNNER_TEMP/trial-run" --keep-temp
+      - name: Gather the files to upload
+        if: ${{ always() && matrix.verify_only != 'true' }}
+        env:
+          BG_BUILD: ${{ matrix.build }}
+          BG_TRIAL: ${{ matrix.trial }}
+        # One folder holds exactly what is uploaded. Copies follow links, so the scan reads the bytes the upload sends.
+        run: |
+          OUT_DIR="$RUNNER_TEMP/upload"
+          mkdir -p "$OUT_DIR"
+          for f in "evidence-$BG_BUILD-$BG_TRIAL.json" "raw-$BG_BUILD-$BG_TRIAL.json"; do
+            if [ -f "$f" ]; then cp -L "$f" "$OUT_DIR/"; fi
+          done
+          if [ -d "$RUNNER_TEMP/trial-run/evals/results" ]; then cp -RL "$RUNNER_TEMP/trial-run/evals/results" "$OUT_DIR/results"; fi
+          for trace in "$RUNNER_TEMP"/evaltmp/claude-eval-*/out/trace.jsonl; do
+            if [ -f "$trace" ]; then
+              run_dir="$(basename "$(dirname "$(dirname "$trace")")")"
+              mkdir -p "$OUT_DIR/traces/$run_dir" && cp -L "$trace" "$OUT_DIR/traces/$run_dir/"
+            fi
+          done
+          (cd "$OUT_DIR" && find . -type f | sort)
+      - name: Scan the files for the key before anything is uploaded
+        id: scan
+        if: ${{ always() && matrix.verify_only != 'true' }}
+        # GitHub masks the key in logs but not in uploaded files, which anyone can download from a public repository. If
+        # the key or the workspace id is in any file, the job fails and nothing is uploaded; the log names the files only.
+        run: |
+          OUT_DIR="$RUNNER_TEMP/upload"
+          if [ -z "$(find "$OUT_DIR" -type f 2>/dev/null)" ]; then echo "no files to upload"; exit 0; fi
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then echo "::error::the key is not in this job, so the files cannot be checked; nothing is uploaded"; exit 1; fi
+          found=0
+          check() { # $1 names the value, $2 is the value. grep exits 0 on a match, 1 on none, 2 if a file cannot be read.
+            status=0
+            files="$(grep -rlF -e "$2" -- "$OUT_DIR")" || status=$?
+            if [ "$status" -ne 1 ]; then
+              echo "::error::$1 is in these files, or one could not be read; nothing is uploaded"
+              printf '%s\n' "$files" | sed "s|^$OUT_DIR/|  |"
+              found=1
+            fi
+          }
+          check "the key" "$ANTHROPIC_API_KEY"
+          if [ -n "${BG_WORKSPACE_ID:-}" ]; then check "the workspace id" "$BG_WORKSPACE_ID"; fi
+          if [ "$found" -ne 0 ]; then exit 1; fi
+          echo "neither the key nor the workspace id is in the files to upload"
+      - name: Upload the scanned files
+        if: ${{ always() && matrix.verify_only != 'true' && steps.scan.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidence-${{ matrix.build }}-${{ matrix.trial }}
+          path: ${{ runner.temp }}/upload/
+          if-no-files-found: warn
