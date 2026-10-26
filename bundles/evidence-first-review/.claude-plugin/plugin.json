@@ -1,0 +1,18 @@
+{
+  "name": "evidence-first-review",
+  "version": "1.0.1",
+  "description": "Author, reviewer and merger are different identities. Verdicts are reproducible findings on the exact head, every \"tested\" claim carries an evidence table, and the author cannot merge or force-push.",
+  "author": {
+    "name": "GuildBuild",
+    "url": "https://buildguild.gg"
+  },
+  "homepage": "https://buildguild.gg/builds/evidence-first-review/",
+  "repository": "https://github.com/Guild-Build/buildguild",
+  "license": "Apache-2.0",
+  "keywords": [
+    "review",
+    "github",
+    "evidence",
+    "governance"
+  ]
+}

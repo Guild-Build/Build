@@ -1,0 +1,20 @@
+{
+  "slug": "team-packets",
+  "type": "tool",
+  "name": "Team Packets",
+  "codename": "rally",
+  "summary": "Owned team rosters and duty-typed job packets that carry a piece of work from admission to closure with evidence at each step.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "teams",
+    "jobs"
+  ],
+  "category": "teams and sessions",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

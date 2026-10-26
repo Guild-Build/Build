@@ -1,0 +1,49 @@
+{
+  "slug": "measured-writing-desk",
+  "name": "Measured Writing Desk",
+  "kind": "guild",
+  "category": "knowledge",
+  "summary": "The workflow behind the guild's own measured guides: an article structure with the answer first and the method beside each number, a source ledger with no number without a row, and a read-only fact checker.",
+  "modules": [
+    "skill/measured-article",
+    "skill/source-ledger",
+    "agent/fact-checker"
+  ],
+  "agentProfiles": [
+    {
+      "role": "writer",
+      "model": "claude-opus-5-5",
+      "effort": "high",
+      "tools": "Read, Write, Edit, WebFetch",
+      "limits": "No number without a ledger row"
+    },
+    {
+      "role": "fact checker",
+      "model": "claude-sonnet-5-5",
+      "effort": "high",
+      "tools": "Read, Glob, Grep, WebFetch",
+      "limits": "Read-only; never modify files."
+    }
+  ],
+  "tags": [
+    "writing",
+    "research",
+    "evidence"
+  ],
+  "published": "2026-10-22",
+  "updated": "2026-10-22",
+  "changelog": [
+    {
+      "date": "2026-10-22",
+      "note": "Season 0 release: measured-article, source-ledger, fact-checker."
+    }
+  ],
+  "version": "1.0.0",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "trial": "guild-smoke-v1",
+  "bundle": "measured-writing-desk"
+}

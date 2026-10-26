@@ -1,0 +1,19 @@
+{
+  "slug": "memory-distiller",
+  "type": "tool",
+  "name": "Memory Distiller",
+  "codename": "stash",
+  "summary": "Imports agent memory files, has a cheap reader do the bulk pass, an advisor judge the digest, and the receiving agent file only what it keeps.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "memory"
+  ],
+  "category": "borderline",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

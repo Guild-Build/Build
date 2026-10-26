@@ -1,0 +1,23 @@
+{
+  "slug": "merge-guard",
+  "type": "hook",
+  "name": "Merge Guard",
+  "summary": "A PreToolUse hook that blocks force pushes and pull-request merges from the authoring session. The author proposes, a different identity merges.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "hooks",
+    "git",
+    "safety"
+  ],
+  "category": "review",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/evidence-first-review/"
+  },
+  "bundle": "evidence-first-review"
+}

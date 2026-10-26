@@ -1,0 +1,21 @@
+{
+  "slug": "peer-review-harness",
+  "type": "tool",
+  "name": "Peer Review Harness",
+  "codename": "ads",
+  "summary": "Author, reviewer and merger are different agents with real GitHub identities. A least-privilege launcher runs the reviewer with only the review and merge commands allowed.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "review",
+    "github",
+    "governance"
+  ],
+  "category": "coordination",
+  "lineage": "On GitHub as a private repository; CI on Linux, Windows and macOS. Release follows the scrub checklist."
+}

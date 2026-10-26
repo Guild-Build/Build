@@ -1,0 +1,21 @@
+{
+  "slug": "tool-vault",
+  "type": "tool",
+  "name": "Tool Vault",
+  "codename": "stark",
+  "summary": "Holds the source and the compiled binary of every agent tool the fleet runs, with guard policies on what each tool may touch. The weapon house behind the MCP gateway.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "tools",
+    "go",
+    "guards"
+  ],
+  "category": "modules and packaging",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

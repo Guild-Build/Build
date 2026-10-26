@@ -1,0 +1,45 @@
+{
+  "slug": "trial-runner",
+  "name": "Trial Runner",
+  "kind": "guild",
+  "category": "proving",
+  "summary": "The Proving Grounds as a build: run a season trial against any build with the official plugin eval runner, wrap the report into a BuildGuild evidence file, and author new eval cases in the same format.",
+  "modules": [
+    "skill/run-trial",
+    "skill/write-eval-case"
+  ],
+  "agentProfiles": [
+    {
+      "role": "assayer",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "tools": "Read, Bash (claude plugin eval, node cli/buildguild.mjs, gh gist)",
+      "limits": "Submits only after showing the payload"
+    }
+  ],
+  "tags": [
+    "evals",
+    "evidence",
+    "trial"
+  ],
+  "published": "2026-10-22",
+  "updated": "2026-10-25",
+  "changelog": [
+    {
+      "date": "2026-10-25",
+      "note": "1.0.1: run-trial names the model in its eval and wrap commands, which the CLI now requires."
+    },
+    {
+      "date": "2026-10-22",
+      "note": "Season 0 release: run-trial and write-eval-case skills."
+    }
+  ],
+  "version": "1.0.1",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "trial": "guild-smoke-v1",
+  "bundle": "trial-runner"
+}

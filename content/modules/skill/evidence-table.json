@@ -1,0 +1,22 @@
+{
+  "slug": "evidence-table",
+  "type": "skill",
+  "name": "Evidence Table",
+  "summary": "Every claim of \"tested\" comes with a table: scenario, setup, expected, actual, and the command or artefact that proves it. Untested scenarios are listed as untested.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "testing",
+    "evidence"
+  ],
+  "category": "review",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/evidence-first-review/"
+  },
+  "bundle": "evidence-first-review"
+}

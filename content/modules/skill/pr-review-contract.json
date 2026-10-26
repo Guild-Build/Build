@@ -1,0 +1,22 @@
+{
+  "slug": "pr-review-contract",
+  "type": "skill",
+  "name": "PR Review Contract",
+  "summary": "A reviewer verdict is a reproducible finding on the exact head: file, line, failing input, expected and actual. Speculation and taste are labelled as such and never block.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "review",
+    "github"
+  ],
+  "category": "review",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/evidence-first-review/"
+  },
+  "bundle": "evidence-first-review"
+}

@@ -1,0 +1,21 @@
+{
+  "slug": "team-runtime-codex",
+  "type": "tool",
+  "name": "Team Runtime for Codex",
+  "codename": "beast",
+  "summary": "Role homes, session-start context injection under a byte budget, handoff files and a supervisor loop for a durable multi-role Codex team.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "codex",
+    "teams",
+    "hooks"
+  ],
+  "category": "teams and sessions",
+  "lineage": "On GitHub as a private repository; 253 tests; Windows-first. Needs renaming and scrubbing before release."
+}

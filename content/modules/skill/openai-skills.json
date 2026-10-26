@@ -1,0 +1,23 @@
+{
+  "slug": "openai-skills",
+  "type": "skill",
+  "name": "OpenAI Skills Catalog",
+  "summary": "OpenAI's catalog of skills for Codex, using the same SKILL.md format as the Agent Skills specification.",
+  "status": "available",
+  "author": "OpenAI",
+  "license": "unknown",
+  "branches": [
+    "codex"
+  ],
+  "tags": [
+    "skills",
+    "codex",
+    "reference"
+  ],
+  "category": "reference",
+  "source": {
+    "kind": "github",
+    "url": "https://github.com/openai/skills"
+  },
+  "stars": 28235
+}

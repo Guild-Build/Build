@@ -1,0 +1,20 @@
+{
+  "slug": "profile-composer",
+  "type": "tool",
+  "name": "Profile Composer",
+  "codename": "gestalt",
+  "summary": "Converges agent profiles from registry rows and pinned shelves into generated configuration, one source for what every seat is.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "config",
+    "fleet"
+  ],
+  "category": "modules and packaging",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

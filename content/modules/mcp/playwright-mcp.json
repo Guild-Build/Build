@@ -1,0 +1,24 @@
+{
+  "slug": "playwright-mcp",
+  "type": "mcp",
+  "name": "Playwright MCP",
+  "summary": "Microsoft's Playwright MCP server gives an agent a real browser through accessibility snapshots rather than screenshots, for testing and web tasks.",
+  "status": "available",
+  "author": "Microsoft",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "mcp",
+    "browser",
+    "testing"
+  ],
+  "category": "reference",
+  "source": {
+    "kind": "github",
+    "url": "https://github.com/microsoft/playwright-mcp"
+  },
+  "stars": 38485
+}

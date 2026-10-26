@@ -1,0 +1,20 @@
+{
+  "slug": "agent-registry",
+  "type": "tool",
+  "name": "Agent Registry",
+  "codename": "squad",
+  "summary": "The fleet register: who is seated, their lineage and their recorded acts, with a read-only door for other tools to ask who is who.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "registry",
+    "fleet"
+  ],
+  "category": "teams and sessions",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

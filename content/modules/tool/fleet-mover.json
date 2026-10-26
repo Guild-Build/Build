@@ -1,0 +1,19 @@
+{
+  "slug": "fleet-mover",
+  "type": "tool",
+  "name": "Fleet Mover",
+  "codename": "fieldtrip",
+  "summary": "Moves a whole fleet, its homes and its configuration onto another machine. Requirement stage; the repository is an empty scaffold today.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "migration"
+  ],
+  "category": "borderline",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

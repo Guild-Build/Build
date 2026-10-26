@@ -1,0 +1,22 @@
+{
+  "slug": "independent-reviewer",
+  "type": "agent",
+  "name": "Independent Reviewer",
+  "summary": "A subagent that reviews a diff it did not write, with the author's reasoning withheld. It reports reproducible defects first, questions second, and never approves its own session's work.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "review",
+    "independence"
+  ],
+  "category": "review",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/evidence-first-review/"
+  },
+  "bundle": "evidence-first-review"
+}

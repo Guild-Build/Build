@@ -1,0 +1,20 @@
+{
+  "slug": "skill-author",
+  "type": "tool",
+  "name": "Skill Author",
+  "codename": "forge",
+  "summary": "Writes one skill or one agent card from frozen inputs with provenance, validation and separate evidence, owner and runtime gates.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "skills",
+    "authoring"
+  ],
+  "category": "borderline",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

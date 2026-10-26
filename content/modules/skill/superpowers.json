@@ -1,0 +1,24 @@
+{
+  "slug": "superpowers",
+  "type": "skill",
+  "name": "Superpowers",
+  "summary": "An agentic skills framework and software development methodology by Jesse Vincent, composed of many small skills that call each other. The most-starred community plugin as of October 2026.",
+  "status": "available",
+  "author": "obra",
+  "license": "MIT",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "methodology",
+    "skills"
+  ],
+  "category": "reference",
+  "source": {
+    "kind": "github",
+    "url": "https://github.com/obra/superpowers"
+  },
+  "stars": 303241,
+  "install": "claude plugin marketplace add obra/superpowers"
+}

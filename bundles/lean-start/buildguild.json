@@ -1,0 +1,26 @@
+{
+  "schema": "buildguild.build.v1",
+  "slug": "lean-start",
+  "version": "1.0.0",
+  "branches": [
+    "claude-code"
+  ],
+  "category": "cost",
+  "modules": [
+    "playbook/lean-start-playbook",
+    "skill/context-budget"
+  ],
+  "trial": "guild-smoke-v1",
+  "agentProfiles": [
+    {
+      "role": "lean seat",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "tools": "Only what the job needs",
+      "limits": "Deny list for unused built-in tools"
+    }
+  ],
+  "name": "Lean Start",
+  "summary": "Pay the smallest harness tax. A playbook for what to deny and what to keep, and a skill that measures a session start under the six conditions that make a token number comparable. No hooks on purpose.",
+  "license": "Apache-2.0"
+}

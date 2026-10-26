@@ -1,0 +1,20 @@
+{
+  "slug": "review-gate",
+  "type": "tool",
+  "name": "Review Gate",
+  "codename": "lifeguard",
+  "summary": "Portable, pinned code-review contracts with an immutable verdict record and a merge-gate evaluation that does not accept a cold context as independence.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "review",
+    "contracts"
+  ],
+  "category": "coordination",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

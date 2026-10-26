@@ -1,0 +1,20 @@
+{
+  "slug": "database-facade",
+  "type": "tool",
+  "name": "Database Facade",
+  "codename": "spongebob",
+  "summary": "One Python API over DuckDB, PostgreSQL, SQL Server and a CSV folder, with sessions, batch upserts, forward-only migrations and append-only table enforcement.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "python",
+    "database"
+  ],
+  "category": "data",
+  "lineage": "On GitHub as a private repository, MIT, 206 tests. Nearest to a public release."
+}

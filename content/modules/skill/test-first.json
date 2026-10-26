@@ -1,0 +1,22 @@
+{
+  "slug": "test-first",
+  "type": "skill",
+  "name": "Test First",
+  "summary": "Before changing behaviour, write or find the test that fails, run it, make it pass, run it again. The skill refuses to call work done while a relevant test is red or unrun.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "testing",
+    "delivery"
+  ],
+  "category": "delivery",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/measured-delivery/"
+  },
+  "bundle": "measured-delivery"
+}

@@ -1,0 +1,18 @@
+{
+  "name": "lean-start",
+  "version": "1.0.0",
+  "description": "Pay the smallest harness tax: a playbook for what to deny and keep, and a skill that measures a session start under the six conditions that make a token number comparable.",
+  "author": {
+    "name": "GuildBuild",
+    "url": "https://buildguild.gg"
+  },
+  "homepage": "https://buildguild.gg/builds/lean-start/",
+  "repository": "https://github.com/Guild-Build/buildguild",
+  "license": "Apache-2.0",
+  "keywords": [
+    "cost",
+    "context",
+    "tokens",
+    "settings"
+  ]
+}

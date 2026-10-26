@@ -1,0 +1,23 @@
+{
+  "slug": "agent-skills-spec",
+  "type": "playbook",
+  "name": "Agent Skills Specification",
+  "summary": "The open specification for the SKILL.md folder format: required name and description, optional license, compatibility and metadata, with scripts, references and assets folders.",
+  "status": "available",
+  "author": "agentskills.io",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "specification",
+    "skills"
+  ],
+  "category": "reference",
+  "source": {
+    "kind": "github",
+    "url": "https://github.com/agentskills/agentskills"
+  },
+  "stars": 26366
+}

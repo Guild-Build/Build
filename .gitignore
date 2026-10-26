@@ -1,0 +1,5 @@
+# Written by the CLI and the eval runner, never by the site: the npm package staging folder, eval results inside a
+# bundle, and the CLI's trial downloads and lock file. Local evidence and eval runs never belong in the repository.
+cli/dist/
+bundles/*/evals/results/
+.buildguild/

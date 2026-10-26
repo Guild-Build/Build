@@ -1,0 +1,22 @@
+{
+  "slug": "write-eval-case",
+  "type": "skill",
+  "name": "Write Eval Case",
+  "summary": "Authors one eval case in the plugin eval format: a prompt a stranger can run, deterministic graders first, the dimension it measures in its tags, and a scaffold script that builds the fixture.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "evals",
+    "authoring"
+  ],
+  "category": "proving",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/trial-runner/"
+  },
+  "bundle": "trial-runner"
+}

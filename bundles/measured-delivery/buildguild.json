@@ -1,0 +1,36 @@
+{
+  "schema": "buildguild.build.v1",
+  "slug": "measured-delivery",
+  "version": "1.0.0",
+  "branches": [
+    "claude-code"
+  ],
+  "category": "delivery",
+  "modules": [
+    "skill/commit-discipline",
+    "skill/test-first",
+    "skill/handoff-note",
+    "agent/scout",
+    "hook/uncommitted-work-check"
+  ],
+  "trial": "guild-smoke-v1",
+  "agentProfiles": [
+    {
+      "role": "builder",
+      "model": "claude-opus-5-5",
+      "effort": "high",
+      "tools": "Read, Glob, Grep, Edit, Write, Bash",
+      "limits": "commit-discipline asks for a branch and forbids force pushes; no hook enforces it in this build"
+    },
+    {
+      "role": "scout",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "tools": "Read, Glob, Grep, git log, git blame",
+      "limits": "Read-only; never modify files."
+    }
+  ],
+  "name": "Measured Delivery",
+  "summary": "The daily driver for repository work: test first, commit with discipline, leave a handoff a human can act on, and scout before you edit. Three skills, one read-only agent, one Stop hook.",
+  "license": "Apache-2.0"
+}

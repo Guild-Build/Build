@@ -1,0 +1,19 @@
+{
+  "slug": "skill-pack",
+  "type": "skill",
+  "name": "Skill Pack",
+  "codename": "ruck",
+  "summary": "What an agent carries: skills and scripts that run as they are, installed into the agent home without a compile step. Thirty-six fleet skills are queued for release.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "skills"
+  ],
+  "category": "modules and packaging",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

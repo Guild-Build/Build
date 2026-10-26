@@ -1,0 +1,21 @@
+{
+  "slug": "token-ledger",
+  "type": "tool",
+  "name": "Token Ledger",
+  "codename": "tyrael",
+  "summary": "Audits Claude Code and Codex session logs into per-call usage tables without reading message text, so a team sees where tokens go per project, per session and per compaction.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "cost",
+    "tokens",
+    "privacy"
+  ],
+  "category": "observation and knowledge",
+  "lineage": "On GitHub as a private repository; demonstrated on 107,000 calls. Release follows the scrub checklist."
+}

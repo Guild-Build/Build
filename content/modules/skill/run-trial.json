@@ -1,0 +1,22 @@
+{
+  "slug": "run-trial",
+  "type": "skill",
+  "name": "Run Trial",
+  "summary": "Runs a season trial against a build with the official plugin eval runner, wraps the report into a BuildGuild evidence file with the environment fingerprint, and prepares the submission.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "evals",
+    "evidence"
+  ],
+  "category": "proving",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/trial-runner/"
+  },
+  "bundle": "trial-runner"
+}

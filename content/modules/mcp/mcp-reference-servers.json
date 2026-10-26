@@ -1,0 +1,23 @@
+{
+  "slug": "mcp-reference-servers",
+  "type": "mcp",
+  "name": "MCP Reference Servers",
+  "summary": "The Model Context Protocol project's reference servers: filesystem, fetch, git, memory, sequential thinking and more, maintained alongside the protocol.",
+  "status": "available",
+  "author": "Model Context Protocol",
+  "license": "unknown",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "mcp",
+    "reference"
+  ],
+  "category": "reference",
+  "source": {
+    "kind": "github",
+    "url": "https://github.com/modelcontextprotocol/servers"
+  },
+  "stars": 91466
+}

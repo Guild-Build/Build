@@ -1,0 +1,22 @@
+{
+  "slug": "source-ledger",
+  "type": "skill",
+  "name": "Source Ledger",
+  "summary": "Keeps a ledger of every source a document cites: URL or file, the exact claim it supports, the date read, and whether a second source agrees. Refuses a number with no row.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "writing",
+    "sources"
+  ],
+  "category": "knowledge",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/measured-writing-desk/"
+  },
+  "bundle": "measured-writing-desk"
+}

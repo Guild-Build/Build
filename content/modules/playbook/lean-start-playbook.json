@@ -1,0 +1,22 @@
+{
+  "slug": "lean-start-playbook",
+  "type": "playbook",
+  "name": "Lean Start Playbook",
+  "summary": "The instruction text for a session that pays the smallest possible harness tax: what to deny, what to keep, how to measure a start, and the six conditions that make a token number comparable.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "cost",
+    "context"
+  ],
+  "category": "cost",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/lean-start/"
+  },
+  "bundle": "lean-start"
+}

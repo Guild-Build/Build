@@ -1,0 +1,20 @@
+{
+  "slug": "request-log",
+  "type": "tool",
+  "name": "Request Log",
+  "codename": "streetcop",
+  "summary": "A request logger and IP-and-time grouped traffic page for the Tool Vault. More police than army, as its author says.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "logging",
+    "traffic"
+  ],
+  "category": "borderline",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

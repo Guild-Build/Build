@@ -1,0 +1,22 @@
+{
+  "slug": "commit-discipline",
+  "type": "skill",
+  "name": "Commit Discipline",
+  "summary": "Commits describe observable behaviour, one change per commit, never on the default branch, never with secrets. The skill makes the agent check all four before every commit.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "git",
+    "delivery"
+  ],
+  "category": "delivery",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/measured-delivery/"
+  },
+  "bundle": "measured-delivery"
+}

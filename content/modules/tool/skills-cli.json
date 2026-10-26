@@ -1,0 +1,24 @@
+{
+  "slug": "skills-cli",
+  "type": "tool",
+  "name": "skills CLI",
+  "summary": "Vercel Labs' cross-agent installer for skills: one command copies a skill from a repository into the folders Claude Code, Codex and other agents read.",
+  "status": "available",
+  "author": "Vercel Labs",
+  "license": "MIT",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "installer",
+    "skills"
+  ],
+  "category": "reference",
+  "source": {
+    "kind": "github",
+    "url": "https://github.com/vercel-labs/skills"
+  },
+  "stars": 36010,
+  "install": "npx skills add <owner/repo>"
+}

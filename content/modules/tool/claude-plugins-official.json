@@ -1,0 +1,24 @@
+{
+  "slug": "claude-plugins-official",
+  "type": "tool",
+  "name": "Claude Plugins Official",
+  "summary": "Anthropic's managed directory of Claude Code plugins, registered automatically in Claude Code: code review, feature development, commit commands, hookify, LSP servers and vendor integrations.",
+  "status": "available",
+  "author": "Anthropic",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "plugins",
+    "marketplace",
+    "reference"
+  ],
+  "category": "reference",
+  "source": {
+    "kind": "github",
+    "url": "https://github.com/anthropics/claude-plugins-official"
+  },
+  "stars": 43696,
+  "install": "claude plugin install code-review@claude-plugins-official"
+}

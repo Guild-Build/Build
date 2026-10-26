@@ -1,0 +1,22 @@
+{
+  "slug": "claude-code-templates",
+  "type": "tool",
+  "name": "Claude Code Templates",
+  "summary": "A CLI and web catalog by David Avila for configuring and monitoring Claude Code with more than a thousand community components.",
+  "status": "available",
+  "author": "davila7",
+  "license": "MIT",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "templates",
+    "catalog"
+  ],
+  "category": "reference",
+  "source": {
+    "kind": "github",
+    "url": "https://github.com/davila7/claude-code-templates"
+  },
+  "stars": 32821
+}

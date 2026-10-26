@@ -1,0 +1,22 @@
+{
+  "slug": "scout",
+  "type": "agent",
+  "name": "Scout",
+  "summary": "A read-only subagent that maps a repository or a question before anyone edits: files to read first, owners, tests, risks. It cannot write, so its report is safe to run on a stranger's code.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "exploration",
+    "read-only"
+  ],
+  "category": "delivery",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/measured-delivery/"
+  },
+  "bundle": "measured-delivery"
+}

@@ -1,0 +1,25 @@
+{
+  "slug": "anthropic-agent-skills",
+  "type": "skill",
+  "name": "Anthropic Agent Skills",
+  "summary": "Anthropic's public repository of reference skills, including the document skills for Word, PDF, PowerPoint and Excel files and the skill-creator skill.",
+  "status": "available",
+  "author": "Anthropic",
+  "license": "unknown",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "skills",
+    "documents",
+    "reference"
+  ],
+  "category": "reference",
+  "source": {
+    "kind": "github",
+    "url": "https://github.com/anthropics/skills"
+  },
+  "stars": 182816,
+  "install": "claude plugin marketplace add anthropics/skills"
+}

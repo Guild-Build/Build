@@ -1,0 +1,22 @@
+{
+  "slug": "fact-checker",
+  "type": "agent",
+  "name": "Fact Checker",
+  "summary": "A read-only subagent that takes a draft and its source ledger and reports every claim it could not trace, every number without a method, and every place two sources disagree.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "writing",
+    "review"
+  ],
+  "category": "knowledge",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/measured-writing-desk/"
+  },
+  "bundle": "measured-writing-desk"
+}

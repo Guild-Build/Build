@@ -1,0 +1,18 @@
+{
+  "name": "measured-writing-desk",
+  "version": "1.0.0",
+  "description": "Write knowledge articles where every number traces to an openable source, the method sits beside the result, and a fact checker reports what it could not trace.",
+  "author": {
+    "name": "GuildBuild",
+    "url": "https://buildguild.gg"
+  },
+  "homepage": "https://buildguild.gg/builds/measured-writing-desk/",
+  "repository": "https://github.com/Guild-Build/buildguild",
+  "license": "Apache-2.0",
+  "keywords": [
+    "writing",
+    "research",
+    "evidence",
+    "documentation"
+  ]
+}

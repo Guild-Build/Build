@@ -1,0 +1,22 @@
+{
+  "slug": "measured-article",
+  "type": "skill",
+  "name": "Measured Article",
+  "summary": "Writes a knowledge article where every number traces to an openable source, the method sits beside the result, and a \"how we know\" section states the sample and its limits.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "writing",
+    "evidence"
+  ],
+  "category": "knowledge",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/measured-writing-desk/"
+  },
+  "bundle": "measured-writing-desk"
+}

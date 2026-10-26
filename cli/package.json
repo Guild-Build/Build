@@ -1,0 +1,25 @@
+{
+  "name": "buildguild",
+  "version": "0.1.0",
+  "description": "The BuildGuild companion: install agent builds from buildguild.gg, run season trials, publish evidence.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "buildguild": "./dist/cli/buildguild.mjs"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Guild-Build/Build.git"
+  },
+  "homepage": "https://buildguild.gg/",
+  "scripts": {
+    "prepack": "node pack.mjs"
+  }
+}

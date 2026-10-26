@@ -1,0 +1,23 @@
+{
+  "slug": "github-mcp-server",
+  "type": "mcp",
+  "name": "GitHub MCP Server",
+  "summary": "GitHub's official Model Context Protocol server: issues, pull requests, code search and repository management as tools for any MCP client.",
+  "status": "available",
+  "author": "GitHub",
+  "license": "MIT",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "mcp",
+    "github"
+  ],
+  "category": "reference",
+  "source": {
+    "kind": "github",
+    "url": "https://github.com/github/github-mcp-server"
+  },
+  "stars": 33837
+}

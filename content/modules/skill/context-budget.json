@@ -1,0 +1,22 @@
+{
+  "slug": "context-budget",
+  "type": "skill",
+  "name": "Context Budget",
+  "summary": "Measures what a session start costs, records the six measurement conditions beside the number, and proposes the deny list that would lower it without losing the tools the job needs.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "cost",
+    "measurement"
+  ],
+  "category": "cost",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/lean-start/"
+  },
+  "bundle": "lean-start"
+}

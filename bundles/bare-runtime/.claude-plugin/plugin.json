@@ -1,0 +1,15 @@
+{
+  "name": "bare-runtime",
+  "version": "1.0.0",
+  "description": "The baseline: Claude Code with no modules at all. Listed every season so each tier shows what a build adds over nothing.",
+  "author": {
+    "name": "GuildBuild",
+    "url": "https://buildguild.gg"
+  },
+  "homepage": "https://buildguild.gg/builds/bare-runtime/",
+  "repository": "https://github.com/Guild-Build/buildguild",
+  "license": "Apache-2.0",
+  "keywords": [
+    "baseline"
+  ]
+}

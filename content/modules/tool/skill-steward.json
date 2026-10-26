@@ -1,0 +1,20 @@
+{
+  "slug": "skill-steward",
+  "type": "tool",
+  "name": "Skill Steward",
+  "codename": "ymir",
+  "summary": "Project-scoped stewardship of skills: gathers evidence, refines through a teacher loop and delivers bounded skill updates to the agents that use them.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "skills",
+    "stewardship"
+  ],
+  "category": "modules and packaging",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

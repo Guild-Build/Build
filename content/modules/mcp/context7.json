@@ -1,0 +1,23 @@
+{
+  "slug": "context7",
+  "type": "mcp",
+  "name": "Context7",
+  "summary": "Upstash's MCP server that serves current, version-specific library documentation into the agent's context so it stops guessing APIs from training data.",
+  "status": "available",
+  "author": "Upstash",
+  "license": "MIT",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "mcp",
+    "documentation"
+  ],
+  "category": "reference",
+  "source": {
+    "kind": "github",
+    "url": "https://github.com/upstash/context7"
+  },
+  "stars": 63457
+}

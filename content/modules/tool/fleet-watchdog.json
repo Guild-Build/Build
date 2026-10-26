@@ -1,0 +1,20 @@
+{
+  "slug": "fleet-watchdog",
+  "type": "tool",
+  "name": "Fleet Watchdog",
+  "codename": "sentry",
+  "summary": "A monitor with no model in the loop that watches typed agent states and raises a flag when a seat stalls, loops or exceeds its cap. The picket line.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "monitoring",
+    "no-llm"
+  ],
+  "category": "observation and knowledge",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

@@ -1,0 +1,22 @@
+{
+  "slug": "agent-settings-compiler",
+  "type": "tool",
+  "name": "Agent Settings Compiler",
+  "codename": "imperius",
+  "summary": "Compiles a plain JSON file into a validated Claude Code settings file or Codex config, checking every key against the vendor documentation, with a drift diff when the docs change.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "settings",
+    "validation",
+    "claude-code",
+    "codex"
+  ],
+  "category": "modules and packaging",
+  "lineage": "On GitHub as a private repository; 30 tests; stdlib only. Release follows the scrub checklist."
+}

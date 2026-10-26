@@ -1,0 +1,20 @@
+{
+  "slug": "transcript-renderer",
+  "type": "tool",
+  "name": "Transcript Renderer",
+  "codename": "hansard",
+  "summary": "Renders agent transcripts and memory files to static pages and offers an inspection CLI for what an agent read, wrote and remembered.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "transcripts",
+    "inspection"
+  ],
+  "category": "observation and knowledge",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

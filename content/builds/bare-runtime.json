@@ -1,0 +1,36 @@
+{
+  "slug": "bare-runtime",
+  "name": "Bare Runtime",
+  "kind": "baseline",
+  "category": "baseline",
+  "summary": "The baseline: Claude Code with no modules at all. Listed every season so each tier shows what a build adds over nothing. Not for installing; for reading its evidence next to every other build.",
+  "modules": [],
+  "agentProfiles": [
+    {
+      "role": "default",
+      "model": "claude-opus-5-5",
+      "effort": "default",
+      "tools": "All built-in tools",
+      "limits": "None beyond the runtime defaults"
+    }
+  ],
+  "tags": [
+    "baseline"
+  ],
+  "published": "2026-10-22",
+  "updated": "2026-10-22",
+  "changelog": [
+    {
+      "date": "2026-10-22",
+      "note": "Season 0 baseline."
+    }
+  ],
+  "version": "1.0.0",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "trial": "guild-smoke-v1",
+  "bundle": "bare-runtime"
+}

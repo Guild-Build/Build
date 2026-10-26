@@ -1,0 +1,20 @@
+{
+  "slug": "governance-charter",
+  "type": "playbook",
+  "name": "Governance Charter",
+  "codename": "yorha",
+  "summary": "A versioned constitution for an agent family: articles, derived law and playbooks that two harnesses can read and sign. Version 10 ratified in October 2026.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "governance",
+    "rules"
+  ],
+  "category": "observation and knowledge",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

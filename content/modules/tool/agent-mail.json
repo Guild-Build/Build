@@ -1,0 +1,20 @@
+{
+  "slug": "agent-mail",
+  "type": "tool",
+  "name": "Agent Mail",
+  "codename": "radio",
+  "summary": "A message bus between agents with receiver-side timed receipts and a path-authorised store. Built and tested locally; cross-machine delivery is not yet live.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "messaging",
+    "coordination"
+  ],
+  "category": "coordination",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

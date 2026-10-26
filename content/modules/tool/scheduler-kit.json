@@ -1,0 +1,21 @@
+{
+  "slug": "scheduler-kit",
+  "type": "tool",
+  "name": "Scheduler Kit",
+  "codename": "archer",
+  "summary": "A local Apache Airflow on Docker with pinned images, a dead-job watchdog that alerts named agents, and a verifier that proves the running image matches the pinned source.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "airflow",
+    "scheduling",
+    "attestation"
+  ],
+  "category": "coordination",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

@@ -1,0 +1,21 @@
+{
+  "slug": "context-cost-profiler",
+  "type": "tool",
+  "name": "Context Cost Profiler",
+  "codename": "ration",
+  "summary": "Renders an agent profile and measures what every session start costs in tokens, so a team can see the harness tax of each seat before paying it a thousand times.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "cost",
+    "tokens",
+    "measurement"
+  ],
+  "category": "modules and packaging",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

@@ -1,0 +1,21 @@
+{
+  "slug": "knowledge-catalogue",
+  "type": "tool",
+  "name": "Knowledge Catalogue",
+  "codename": "bunker",
+  "summary": "A versioned product catalogue and a workshop for measured knowledge articles, promoted bronze to silver to gold with a script that refuses unrecorded edits.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "knowledge",
+    "docs",
+    "publishing"
+  ],
+  "category": "observation and knowledge",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

@@ -1,0 +1,28 @@
+{
+  "slug": "season-0",
+  "name": "Season 0 \u00b7 First Fire",
+  "start": "2026-10-22",
+  "end": "2027-01-21",
+  "branches": [
+    "claude-code"
+  ],
+  "triggers": [
+    {
+      "name": "Claude 5 model family (Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.1)",
+      "note": "The current generation Claude Code ships with; the trial pins the model in each evidence record."
+    },
+    {
+      "name": "Claude Code plugin evals generally available",
+      "note": "claude plugin eval (2.1.269 and later) is the runner every tier depends on."
+    },
+    {
+      "name": "Archive plugin sources (Claude Code 2.1.224)",
+      "note": "Lets the guild serve builds as pinned zip archives from the site."
+    }
+  ],
+  "notes": "Season 0 is a free trial: every member has every membership perk free until it ends, and members who join during it are founding members. Season 0 opens one branch, Claude Code, because that is the only runtime with a trial runner the guild can verify. Two trials are ranked this season: the Guild Smoke Trial and the Calibration Shell Trial. Every other trial is a custom game with its own leaderboard that feeds a build's profile but not its season rank. Codex opens in Season 1 once the trial format is runner-neutral. Mid-season changes are patch notes; evidence carries into Season 1 with a re-verified-on flag.",
+  "rankedTrials": [
+    "guild-smoke-v1",
+    "calibration-shell-v1"
+  ]
+}

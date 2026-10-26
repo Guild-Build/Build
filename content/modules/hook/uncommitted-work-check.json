@@ -1,0 +1,22 @@
+{
+  "slug": "uncommitted-work-check",
+  "type": "hook",
+  "name": "Uncommitted Work Check",
+  "summary": "A Stop hook that looks for uncommitted changes when the agent finishes and tells it to either commit or say in the handoff why the work is left dirty.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "hooks",
+    "git"
+  ],
+  "category": "delivery",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/measured-delivery/"
+  },
+  "bundle": "measured-delivery"
+}

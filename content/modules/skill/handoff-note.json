@@ -1,0 +1,22 @@
+{
+  "slug": "handoff-note",
+  "type": "skill",
+  "name": "Handoff Note",
+  "summary": "Ends every piece of work with a note a human can act on: what changed, what was verified and how, what was not verified, and the one next step. Five lines, no narration.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "handoff",
+    "communication"
+  ],
+  "category": "delivery",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/measured-delivery/"
+  },
+  "bundle": "measured-delivery"
+}

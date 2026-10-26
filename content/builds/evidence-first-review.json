@@ -1,0 +1,55 @@
+{
+  "slug": "evidence-first-review",
+  "name": "Evidence-First Review",
+  "kind": "guild",
+  "category": "review",
+  "summary": "Author, reviewer and merger are different identities. Verdicts are reproducible findings on the exact head, every tested claim carries an evidence table, and a hook stops the author from merging or force-pushing.",
+  "modules": [
+    "skill/pr-review-contract",
+    "skill/evidence-table",
+    "agent/independent-reviewer",
+    "hook/merge-guard"
+  ],
+  "agentProfiles": [
+    {
+      "role": "author",
+      "model": "claude-opus-5-5",
+      "effort": "high",
+      "tools": "Read, Glob, Grep, Edit, Write, Bash",
+      "limits": "Cannot merge or force-push (merge-guard hook)"
+    },
+    {
+      "role": "independent reviewer",
+      "model": "claude-opus-5-5",
+      "effort": "high",
+      "tools": "Read, git diff, git show, gh pr view",
+      "limits": "Cannot edit or merge; never reviews its own session"
+    }
+  ],
+  "tags": [
+    "review",
+    "github",
+    "governance",
+    "evidence"
+  ],
+  "published": "2026-10-22",
+  "updated": "2026-10-25",
+  "changelog": [
+    {
+      "date": "2026-10-25",
+      "note": "Merge guard also blocks git push -f as the first argument, flag clusters such as -fu, --mirror, git -C <dir> push, git called by its path, and pushes or merges inside ( ) or { }. Only git's subcommand counts and each command is checked on its own, so a commit message that mentions git push --force, or a force flag on a later command (git push; rm -f x), no longer blocks."
+    },
+    {
+      "date": "2026-10-22",
+      "note": "Season 0 release: review contract, evidence table, independent reviewer, merge guard."
+    }
+  ],
+  "version": "1.0.1",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "trial": "guild-smoke-v1",
+  "bundle": "evidence-first-review"
+}

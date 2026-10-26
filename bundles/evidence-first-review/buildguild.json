@@ -1,0 +1,35 @@
+{
+  "schema": "buildguild.build.v1",
+  "slug": "evidence-first-review",
+  "version": "1.0.1",
+  "branches": [
+    "claude-code"
+  ],
+  "category": "review",
+  "modules": [
+    "skill/pr-review-contract",
+    "skill/evidence-table",
+    "agent/independent-reviewer",
+    "hook/merge-guard"
+  ],
+  "trial": "guild-smoke-v1",
+  "agentProfiles": [
+    {
+      "role": "author",
+      "model": "claude-opus-5-5",
+      "effort": "high",
+      "tools": "Read, Glob, Grep, Edit, Write, Bash",
+      "limits": "Cannot merge or force-push (merge-guard hook)"
+    },
+    {
+      "role": "independent reviewer",
+      "model": "claude-opus-5-5",
+      "effort": "high",
+      "tools": "Read, git diff, git show, gh pr view",
+      "limits": "Cannot edit or merge; never reviews its own session"
+    }
+  ],
+  "name": "Evidence-First Review",
+  "summary": "Author, reviewer and merger are different identities. Verdicts are reproducible findings on the exact head, every tested claim carries an evidence table, and a hook stops the author from merging or force-pushing.",
+  "license": "Apache-2.0"
+}

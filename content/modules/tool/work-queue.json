@@ -1,0 +1,20 @@
+{
+  "slug": "work-queue",
+  "type": "tool",
+  "name": "Work Queue",
+  "codename": "tower",
+  "summary": "Turns a request into a work order and then into role-qualified task rows, with evidence attached and no self-assignment.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "queue",
+    "tasks"
+  ],
+  "category": "coordination",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}

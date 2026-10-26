@@ -1,0 +1,21 @@
+{
+  "slug": "agent-config-builder",
+  "type": "tool",
+  "name": "Agent Config Builder",
+  "codename": "kit",
+  "summary": "Builds a complete Claude Code or Codex configuration from a job specification, previews the result, and applies it with a guarded, reversible write.",
+  "status": "coming",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code",
+    "codex"
+  ],
+  "tags": [
+    "config",
+    "claude-code",
+    "codex"
+  ],
+  "category": "modules and packaging",
+  "lineage": "Built for the GuildBuild fleet; public release follows the scrub checklist."
+}
