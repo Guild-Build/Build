@@ -14,6 +14,7 @@ deterministic graders. An evidence record is one run of a build on a trial.
 | `content/seasons/` | Season records: dates and the ranked trials. |
 | `content/evidence/<build>/` | Accepted evidence records. Tiers are computed from them; no record carries a tier. |
 | `content/modules/<type>/` | One record per module. Third-party modules are linked to their own repositories, never copied here. |
+| `.github/` | The Season trial workflow (`workflows/trial.yml`) and its queue (`trial-queue.json`); see [Season trials](#season-trials). |
 
 ## Run the CLI from a checkout
 
@@ -50,6 +51,24 @@ The last check applies to any bundle you add or change. A maintainer runs the sa
 build or trial starts at Declared. You can also send one from [buildguild.gg/submit](https://buildguild.gg/submit/) or
 with `node cli/buildguild.mjs publish <folder>`; a maintainer who accepts it opens the pull request.
 [`CONTRIBUTING.md`](CONTRIBUTING.md) says where evidence comes from.
+
+## Season trials
+
+Guild-run evidence comes from the Season trial workflow in this repository,
+[`.github/workflows/trial.yml`](.github/workflows/trial.yml). Each run tests one build from `bundles/` on one trial as
+buildguild.gg publishes it, with the official eval runner, one agent at a time and a cost ceiling.
+
+A maintainer queues runs with a pull request that changes [`.github/trial-queue.json`](.github/trial-queue.json):
+increase `run` by one and list the requests, each naming a `build`, a `trial`, a `max_cost_usd` ceiling and a pinned
+`model`. When it merges into `main`, the workflow plans one run per request; a request for a build that is not in
+`bundles/`, or for a trial buildguild.gg does not publish, stops the plan. A maintainer can also start a single run from
+the Actions tab with the same fields. Either way the project owner approves each run in the `trials` environment before
+it reads the key or spends anything, and an empty queue starts nothing.
+
+A guild record's attestation is the public URL of the run that produced it,
+`https://github.com/Guild-Build/Build/actions/runs/<run id>`. Anyone can read the run's log there, and anyone signed in
+to GitHub can download its files: the evidence record, the raw report, the results and the agent traces, all scanned
+for the key before upload.
 
 [buildguild.gg](https://buildguild.gg/) is built from these records and bundles. Licensed under the Apache License 2.0
 ([`LICENSE`](LICENSE)).

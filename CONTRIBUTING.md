@@ -14,8 +14,8 @@
    validation applies to any bundle you add or change and needs Claude Code.
 4. Evidence comes only from the trial workflow: `node cli/buildguild.mjs test` runs a published trial and writes the
    record, `node cli/buildguild.mjs submit` sends it, and a maintainer accepts it into `content/evidence/`. Guild runs
-   come from the guild's hosted trial runner. Do not add or edit an evidence file in a pull request; a wrong record is
-   withdrawn, never edited.
+   come from this repository's [Season trial workflow](README.md#season-trials). Do not add or edit an evidence file in
+   a pull request; a wrong record is withdrawn, never edited.
 5. Never type a tier, a medal or a score into a file. The site computes tiers and medals from the evidence, and every
    score comes from a trial run.
 
