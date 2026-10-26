@@ -6,8 +6,8 @@ name: Season trial
 # the owner's approval in the `trials` environment before it signs in to Azure or spends anything, and a queue with no
 # requests starts nothing. The Anthropic key is read at run time from Azure Key Vault vaultgb01 (secret
 # buildguild-anthropic-api-key) through a federated identity; no copy of the key is held on GitHub. This repository is
-# public, so each run's log and files are public: the files are scanned for the key before upload, and nothing is
-# uploaded if it appears in any of them.
+# public, so anyone signed in to GitHub can read each run's log and download its files: the files are scanned for the
+# key before upload, and nothing is uploaded if it appears in any of them.
 on:
   push:
     branches: [main]
@@ -223,8 +223,9 @@ jobs:
       - name: Scan the files for the key before anything is uploaded
         id: scan
         if: ${{ always() && matrix.verify_only != 'true' }}
-        # GitHub masks the key in logs but not in uploaded files, which anyone can download from a public repository. If
-        # the key or the workspace id is in any file, the job fails and nothing is uploaded; the log names the files only.
+        # GitHub masks the key in logs but not in uploaded files, which anyone signed in to GitHub can download from a
+        # public repository. If the key or the workspace id is in any file, the job fails and nothing is uploaded; the
+        # log names the files only.
         run: |
           OUT_DIR="$RUNNER_TEMP/upload"
           if [ -z "$(find "$OUT_DIR" -type f 2>/dev/null)" ]; then echo "no files to upload"; exit 0; fi

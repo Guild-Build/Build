@@ -66,9 +66,9 @@ the Actions tab with the same fields. Either way the project owner approves each
 it reads the key or spends anything, and an empty queue starts nothing.
 
 A guild record's attestation is the public URL of the run that produced it,
-`https://github.com/Guild-Build/Build/actions/runs/<run id>`. Anyone can read the run's log there, and anyone signed in
-to GitHub can download its files: the evidence record, the raw report, the results and the agent traces, all scanned
-for the key before upload.
+`https://github.com/Guild-Build/Build/actions/runs/<run id>`. Anyone signed in to GitHub can read the run's log there
+and download its files. The files are the evidence record, the raw report, the results and the agent traces, all
+scanned for the key before upload.
 
 [buildguild.gg](https://buildguild.gg/) is built from these records and bundles. Licensed under the Apache License 2.0
 ([`LICENSE`](LICENSE)).
