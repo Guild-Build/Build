@@ -56,7 +56,7 @@ with `node cli/buildguild.mjs publish <folder>`; a maintainer who accepts it ope
 
 Guild-run evidence comes from the Season trial workflow in this repository,
 [`.github/workflows/trial.yml`](.github/workflows/trial.yml). Each run tests one build from `bundles/` on one trial as
-buildguild.gg publishes it, with the official eval runner, one agent at a time and a cost ceiling.
+buildguild.gg publishes it, with the official eval runner, one run at a time and a cost ceiling.
 
 A maintainer queues runs with a pull request that changes [`.github/trial-queue.json`](.github/trial-queue.json):
 increase `run` by one and list the requests, each naming a `build`, a `trial`, a `max_cost_usd` ceiling and a pinned
