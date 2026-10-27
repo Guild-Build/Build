@@ -1,0 +1,5 @@
+{
+  "run": 15,
+  "note": "Merging a change to this file into main plans one Season trial run per request below, and each run waits for the owner's approval in the trials environment. Increase run by one with each new set of requests. A request names a build in bundles/, a trial published on buildguild.gg, a cost ceiling in USD (max_cost_usd) and a pinned model; concurrency (default 1) and verify_only are optional.",
+  "requests": []
+}
