@@ -170,10 +170,15 @@ jobs:
         if: ${{ matrix.verify_only != 'true' }}
         env:
           BG_MODEL: ${{ matrix.model }}
-        # This step and the run drop the two variables a step can use to ask GitHub for a new sign-in token, which Azure
-        # accepts for this job's identity, so neither Claude Code nor the agent under test can sign in to Azure again.
+        # The runner gives every run step of this job ACTIONS_ID_TOKEN_REQUEST_TOKEN, the job's own access token, and
+        # ACTIONS_ID_TOKEN_REQUEST_URL; together they get a new sign-in token that Azure accepts for this job's
+        # identity. This step and the run start their shell through env -u, which drops both before the shell starts,
+        # so neither the shell nor anything it starts (Claude Code, the agent under test, the build's hooks and tools)
+        # holds them, in its own environment or in the starting environment another process can read. Not prevented:
+        # code that uses the runner's passwordless sudo can read them from the runner's memory, and later steps
+        # receive them again. Otherwise the shell is GitHub's default, bash -e, so each step fails as before.
+        shell: env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL bash -e {0}
         run: |
-          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
           OUT="$(claude -p "Reply with the single word ok." --model "$BG_MODEL" --max-turns 1 2>&1 | tail -3)"
           echo "$OUT"
           case "$OUT" in
@@ -198,8 +203,9 @@ jobs:
         # The eval creates each run's home and workspace under the system temp directory. Inside the sandbox /tmp is
         # replaced, which left the workspace read-only on this runner, so the temp directory is moved under the runner's
         # own work area. The CLI downloads the published trial from BUILDGUILD_ORIGIN and stops, saying so, if it cannot.
+        # The shell starts without the two token variables, as the key check above explains.
+        shell: env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL bash -e {0}
         run: |
-          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
           mkdir -p "$RUNNER_TEMP/evaltmp" && export TMPDIR="$RUNNER_TEMP/evaltmp"
           node cli/buildguild.mjs test "bundles/$BG_BUILD" --trial "$BG_TRIAL" --max-cost-usd "$BG_MAX_COST_USD" --model "$BG_MODEL" -j "$BG_CONCURRENCY" --runner github-actions --role guild --out "evidence-$BG_BUILD-$BG_TRIAL.json" --raw-out "raw-$BG_BUILD-$BG_TRIAL.json" --work-dir "$RUNNER_TEMP/trial-run" --keep-temp
       - name: Gather the files to upload
