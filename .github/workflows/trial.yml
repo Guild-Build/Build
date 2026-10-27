@@ -6,8 +6,10 @@ name: Season trial
 # the owner's approval in the `trials` environment before it signs in to Azure or spends anything, and a queue with no
 # requests starts nothing. The Anthropic key is read at run time from Azure Key Vault vaultgb01 (secret
 # buildguild-anthropic-api-key) through a federated identity; no copy of the key is held on GitHub. This repository is
-# public, so anyone signed in to GitHub can read each run's log and download its files: the files are scanned for the
-# key before upload, and nothing is uploaded if it appears in any of them.
+# public, so anyone signed in to GitHub can read each run's log and download its files. Before upload the files are
+# scanned: nothing is uploaded if the key or the workspace id appears in a file or in a file or folder name, or if the
+# upload folder holds anything but regular files and folders. The scan looks for each value as one unbroken string
+# within a line, so a value split across lines, or encoded (base64, for example), would pass it.
 on:
   push:
     branches: [main]
@@ -205,9 +207,11 @@ jobs:
         env:
           BG_BUILD: ${{ matrix.build }}
           BG_TRIAL: ${{ matrix.trial }}
-        # One folder holds exactly what is uploaded. Copies follow links, so the scan reads the bytes the upload sends.
+        # One folder holds exactly what is uploaded. It starts empty, and copies follow links, so the scan reads the
+        # bytes the upload sends.
         run: |
           OUT_DIR="$RUNNER_TEMP/upload"
+          rm -rf "$OUT_DIR"
           mkdir -p "$OUT_DIR"
           for f in "evidence-$BG_BUILD-$BG_TRIAL.json" "raw-$BG_BUILD-$BG_TRIAL.json"; do
             if [ -f "$f" ]; then cp -L "$f" "$OUT_DIR/"; fi
@@ -224,26 +228,44 @@ jobs:
         id: scan
         if: ${{ always() && matrix.verify_only != 'true' }}
         # GitHub masks the key in logs but not in uploaded files, which anyone signed in to GitHub can download from a
-        # public repository. If the key or the workspace id is in any file, the job fails and nothing is uploaded; the
-        # log names the files only.
+        # public repository. The job fails and nothing is uploaded if the folder holds anything but regular files and
+        # folders (the upload follows links; grep reads regular files only), or if the key or the workspace id is in a
+        # file or in a file or folder name. The log names the paths, with those values blanked out.
         run: |
           OUT_DIR="$RUNNER_TEMP/upload"
-          if [ -z "$(find "$OUT_DIR" -type f 2>/dev/null)" ]; then echo "no files to upload"; exit 0; fi
+          if [ -z "$(find "$OUT_DIR" -mindepth 1 2>/dev/null)" ]; then echo "no files to upload"; exit 0; fi
           if [ -z "${ANTHROPIC_API_KEY:-}" ]; then echo "::error::the key is not in this job, so the files cannot be checked; nothing is uploaded"; exit 1; fi
           found=0
-          check() { # $1 names the value, $2 is the value. grep exits 0 on a match, 1 on none, 2 if a file cannot be read.
-            status=0
+          report() { # $1 says what failed; the rest are the paths behind it
+            local path
+            echo "::error::$1; nothing is uploaded"
+            shift
+            for path in "$@"; do
+              path="${path#"$OUT_DIR"/}"
+              path="${path//"$ANTHROPIC_API_KEY"/[key]}"
+              if [ -n "${BG_WORKSPACE_ID:-}" ]; then path="${path//"$BG_WORKSPACE_ID"/[workspace id]}"; fi
+              printf '  %s\n' "$path"
+            done
+            found=1
+          }
+          mapfile -d '' others < <(find "$OUT_DIR" -mindepth 1 ! -type f ! -type d -print0)
+          if [ "${#others[@]}" -gt 0 ]; then report "these are neither regular files nor folders" "${others[@]}"; exit 1; fi
+          mapfile -d '' entries < <(find "$OUT_DIR" -mindepth 1 -print0)
+          check() { # $1 names the value, $2 is the value
+            local entry named=() files paths=() status=0
+            for entry in "${entries[@]}"; do
+              if [[ "${entry#"$OUT_DIR"/}" == *"$2"* ]]; then named+=("$entry"); fi
+            done
+            if [ "${#named[@]}" -gt 0 ]; then report "$1 is in these file or folder names" "${named[@]}"; fi
+            # grep exits 0 on a match, 1 on none, 2 if a file cannot be read.
             files="$(grep -rlF -e "$2" -- "$OUT_DIR")" || status=$?
-            if [ "$status" -ne 1 ]; then
-              echo "::error::$1 is in these files, or one could not be read; nothing is uploaded"
-              printf '%s\n' "$files" | sed "s|^$OUT_DIR/|  |"
-              found=1
-            fi
+            if [ -n "$files" ]; then mapfile -t paths <<< "$files"; fi
+            if [ "$status" -ne 1 ]; then report "$1 is in these files, or one could not be read" "${paths[@]}"; fi
           }
           check "the key" "$ANTHROPIC_API_KEY"
           if [ -n "${BG_WORKSPACE_ID:-}" ]; then check "the workspace id" "$BG_WORKSPACE_ID"; fi
           if [ "$found" -ne 0 ]; then exit 1; fi
-          echo "neither the key nor the workspace id is in the files to upload"
+          echo "only regular files and folders, and neither the key nor the workspace id in any name or file"
       - name: Upload the scanned files
         if: ${{ always() && matrix.verify_only != 'true' && steps.scan.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
