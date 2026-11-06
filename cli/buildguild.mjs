@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { homedir, platform, release, tmpdir } from 'node:os';
 import { inflateRawSync } from 'node:zlib';
-import { validateManifest, LICENSES } from './manifest.mjs';
+import { validateManifest, LICENSES, MODULE_TYPES } from './manifest.mjs';
 import { compare } from './compare.mjs';
 import { prepareComparison } from './comparison-preparation.mjs';
 
@@ -22,9 +22,9 @@ const slugOf = (s, what) => { if (typeof s !== 'string' || !SLUG.test(s)) die(`$
 const out = (...a) => console.log(...a);
 const die = (msg, code = 1) => { console.error(`buildguild: ${msg}`); process.exit(code); };
 
-async function fetchJson(path) {
-  const res = await fetch(`${ORIGIN}${path}`, { headers: { accept: 'application/json', 'user-agent': 'buildguild-cli' } });
-  if (!res.ok) die(`${path} returned ${res.status}`);
+async function fetchJson(path, signal) {
+  const res = await fetch(`${ORIGIN}${path}`, { signal, headers: { accept: 'application/json', 'user-agent': 'buildguild-cli' } });
+  if (!res.ok) throw new Error(`${path} returned ${res.status}`);
   return res.json();
 }
 // Records carry absolute production URLs; a BUILDGUILD_ORIGIN override (local preview, staging) must apply to them too.
@@ -231,10 +231,45 @@ function fingerprint() {
   return { os: `${platform()} ${release()}`, claudeCode: cv, model: modelId(), effort: flag('effort', 'default'), node: process.version };
 }
 
+async function modulePins(bundleDir) {
+  let refs = [];
+  try {
+    const manifest = JSON.parse(readFileSync(join(bundleDir, 'buildguild.json'), 'utf8'));
+    if (Array.isArray(manifest.modules)) refs = manifest.modules;
+  } catch {}
+  // Local builds need not have passed check; keep even malformed manifests within the evidence API's contract.
+  const modules = refs.filter(ref => {
+    const parts = typeof ref === 'string' ? ref.split('/') : [];
+    return parts.length === 2 && MODULE_TYPES.includes(parts[0]) && SLUG.test(parts[1]);
+  }).slice(0, 60).map(ref => ({ ref, sha: null }));
+  let sources = new Map();
+  try {
+    const index = await fetchJson('/modules/index.json', AbortSignal.timeout(15000));
+    sources = new Map(index.modules.map(m => [`${m.type}/${m.slug}`, m.source]));
+  } catch {}
+  for (const pin of modules) {
+    const source = sources.get(pin.ref);
+    if (source?.kind !== 'github' || typeof source.url !== 'string') continue;
+    // This parser supports single-segment branch names only in GitHub tree URLs.
+    const match = source.url.match(/^(https:\/\/github\.com\/[^/]+\/[^/?#]+)(?:\/tree\/([^/?#]+)(?:\/[^?#]*)?)?\/?$/);
+    if (!match) continue;
+    try {
+      const output = execFileSync('git', ['ls-remote', match[1], match[2] ? `refs/heads/${match[2]}` : 'HEAD'], {
+        encoding: 'utf8', timeout: 15000, killSignal: 'SIGKILL', stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      });
+      const sha = output.trim().split(/\s+/)[0];
+      if (/^[0-9a-f]{40}$/.test(sha)) pin.sha = sha;
+    } catch {}
+  }
+  out(`pinned ${modules.filter(m => m.sha).length} of ${modules.length} modules`);
+  return modules;
+}
+
 // Each case's dimension comes from the trial record; the eval report itself carries no tags. Every record names the trial
 // version it ran, which the tier rules count by; a run on a local trial folder is also marked trialSource "local", so
 // submit can refuse it.
-function wrap(rawPath, { build, buildVersion, trialRecord, local = false, sha256, role, runner, reliabilityCase = 'fix-the-failing-test' }) {
+function wrap(rawPath, { build, buildVersion, trialRecord, local = false, sha256, role, runner, modules = [], reliabilityCase = 'fix-the-failing-test' }) {
   const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
   const dimensionOf = name => trialRecord.cases.find(c => c.name === name)?.dimension || null;
   const dims = {};
@@ -254,7 +289,7 @@ function wrap(rawPath, { build, buildVersion, trialRecord, local = false, sha256
   return {
     schema: 'buildguild.evidence.v1', id: `${new Date().toISOString().slice(0, 10)}-${runner}-${Math.random().toString(36).slice(2, 8)}`,
     build, buildVersion, archiveSha256: sha256 || null, trial: trialRecord.slug, trialVersion: trialRecord.version, ...(local ? { trialSource: 'local' } : {}), date: new Date().toISOString().slice(0, 10), runner, role, gist: null,
-    environment: { ...fingerprint(), claudeCode: raw.claudeVersion || fingerprint().claudeCode },
+    environment: { ...fingerprint(), claudeCode: raw.claudeVersion || fingerprint().claudeCode, modules },
     results: { overallScore: raw.aggregates?.overallScore ?? 0, casesPassed: passed, casesTotal: raw.aggregates?.casesTotal ?? 0, meanDelta: raw.aggregates?.meanDelta ?? null, dimensions: dims, partial: !!raw.partial, cases: (raw.cases || []).map(c => ({ name: c.name, score: c.aggregates?.score ?? null, delta: c.aggregates?.delta ?? null })) },
     cost: typeof raw.costUsd === 'number' ? { usd: Number(raw.costUsd.toFixed(4)) } : null,
     durationSeconds: raw.durationSeconds ?? null,
@@ -285,6 +320,7 @@ async function test(slug) {
     for (const e of unzip(zip)) { const rel = stripTop(e.name); const p = safeJoin(bundleDir, rel); mkdirSync(dirname(p), { recursive: true }); writeFileSync(p, e.data, { mode: modeFor(rel) }); }
     meta = { version: b.version, sha256: sha };
   }
+  const modules = await modulePins(bundleDir);
   const { root: trialDir, record: trialRecord } = local || await trial(trialSlug);
   if (local) out(`local trial ${trialRecord.name} v${trialRecord.version}: ${trialRecord.cases.length} cases from ${trialDir}; a run on it is for its author, not evidence`);
   const evalDir = join(bundleDir, 'evals');
@@ -314,7 +350,7 @@ async function test(slug) {
   const errors = arms.map(a => a.error).filter(Boolean);
   if (arms.length && errors.length === arms.length) die(`every agent run ended in an error, so no evidence file was written. First error: ${errors[0]}${rawCheck.partialReason ? ` (partial: ${rawCheck.partialReason})` : ''}`, 2);
   if (errors.length) console.error(`note: ${errors.length} of ${arms.length} agent runs ended in an error; first: ${errors[0]}`);
-  const ev = wrap(rawPath, { build: !existsSync(slug) ? slug : JSON.parse(readFileSync(join(bundleDir, 'buildguild.json'), 'utf8')).slug, buildVersion: meta.version, trialRecord, local: !!local, sha256: meta.sha256, role: flag('role', 'author'), runner });
+  const ev = wrap(rawPath, { build: !existsSync(slug) ? slug : JSON.parse(readFileSync(join(bundleDir, 'buildguild.json'), 'utf8')).slug, buildVersion: meta.version, trialRecord, local: !!local, sha256: meta.sha256, role: flag('role', 'author'), runner, modules });
   const outPath = resolve(String(flag('out', local ? 'local-run.json' : 'evidence.json')));
   writeFileSync(outPath, JSON.stringify(ev, null, 2) + '\n');
   const result = `  overall ${Math.round(ev.results.overallScore * 100)}%${typeof ev.results.meanDelta === 'number' ? `, ${vsBare(ev.results.meanDelta)}` : ''}, ${ev.results.casesPassed}/${ev.results.casesTotal} cases${ev.cost ? `, est. $${ev.cost.usd}` : ''}${ev.results.partial ? ' (PARTIAL: cost ceiling hit)' : ''}`;
@@ -591,6 +627,7 @@ Run from a checkout of the Build repository; the buildguild npm package is not p
   node cli/buildguild.mjs test <slug|path> --model <id> [--trial slug|path] [--max-cost-usd 5] [--runs n] [-j n] [--out evidence.json] [--raw-out raw.json] [--work-dir dir]
                                         run a published trial (default guild-smoke-v1) with claude plugin eval (Claude Code 2.1.269+) in a temp copy,
                                         write an evidence file. A trial folder of your own is checked first; its run goes to local-run.json, not evidence.
+                                        environment.modules records each module ref and its GitHub commit SHA at run time, or null when unavailable.
                                         --model names the model it runs on (the hosted season trial: claude-sonnet-5-5); ANTHROPIC_MODEL may stand in
                                         --work-dir is deleted first, so it may not be /, home, the current directory or above, or in or around the build or trial folder
   node cli/buildguild.mjs wrap <aggregate.json> --build <slug> --trial <slug|path> --model <id> [--build-version v] [--runner login]
