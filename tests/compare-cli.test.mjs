@@ -43,7 +43,7 @@ const report = {
   suite: { root: process.cwd(), ablation: value('--ablation'), modelOverride: value('--model'),
     concurrency: Number(value('-j')), plugins: [plugin] },
   costUsd: partial ? 0.75 : 0.1, durationSeconds: 5,
-  cases: [{ name: 'case-name', runsPerCase: Number(value('--runs')), graders: [grader],
+  cases: [{ name: 'case-name', runsPerCase: 1, graders: [grader],
     arms: { with: Array.from({ length: partial ? 1 : Number(value('--runs')) }, () => arm) } }],
 };
 writeFileSync(value('--json'), JSON.stringify(report));

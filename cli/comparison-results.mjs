@@ -75,7 +75,11 @@ export function normalizeRun(raw, { cases, runs, exitCode, runnerVersion, plugin
     const row = observed.get(name);
     const arms = row?.arms?.with;
     const hasUnexpectedArms = Array.isArray(row?.arms?.without) && row.arms.without.length > 0;
-    if (row && (!Array.isArray(arms) || arms.length > runs || row.runsPerCase !== runs || hasUnexpectedArms)) {
+    // Claude reports the case's declared count even when --runs overrides it.
+    // The returned attempts, not the declaration, must match the plan.
+    const declaredRunsPerCase = Number.isInteger(row?.runsPerCase) && row.runsPerCase > 0 ? row.runsPerCase : null;
+    if (row && declaredRunsPerCase === null) issues.push(`Runner reported an invalid declared attempt count for ${name}`);
+    if (row && (!Array.isArray(arms) || arms.length !== runs || hasUnexpectedArms)) {
       issues.push(`Runner attempt layout differs from plan for ${name}`);
     }
     const graderNames = names(row?.graders);
@@ -94,7 +98,7 @@ export function normalizeRun(raw, { cases, runs, exitCode, runnerVersion, plugin
       if (attempt.status === 'accepted') accepted++;
       counts[attempt.status === 'error' ? 'errors' : attempt.status]++;
     }
-    return { name, dimension, accepted, attempts };
+    return { name, dimension, declaredRunsPerCase, accepted, attempts };
   });
   if (counts.missing || counts.errors || counts.ungraded) issues.push('Some planned attempts lack a valid grade');
   // Claude uses exit 1 for a completed run below the configured threshold.

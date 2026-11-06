@@ -55,7 +55,9 @@ The command snapshots both builds and the trial, hashes file paths, normalized
 executable modes and contents, then runs each build on the same trial. It uses
 `--ablation none`, an explicit `--eval-dir evals`, and three attempts per case
 (`--runs N` overrides this, up to 100). The current build runs first; the candidate
-runs second. These are descriptive repeated measurements, not a randomized or
+runs second. The actual returned attempt roster is checked against this explicit
+repeat plan; the raw runner report may retain the case's original `runsPerCase`
+value, which is recorded separately as `declaredRunsPerCase`. These are descriptive repeated measurements, not a randomized or
 statistically paired experiment. A single attempt is reported as inconclusive.
 
 The named model overrides case models as supported by the runner. The report

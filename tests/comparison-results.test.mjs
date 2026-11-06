@@ -145,3 +145,23 @@ test('classifies an aborted attempt as a runner error despite its full score', (
   assert.equal(result.counts.accepted, 1);
   assert.equal(result.complete, false);
 });
+
+test('checks returned attempts against the repeat override, keeping declared counts for audit', () => {
+  const options = { ...runOptions, runs: 3 };
+  const reportFor = count => {
+    const raw = runnerReport(Array.from({ length: count }, () => arm()));
+    raw.cases[0].runsPerCase = 1;
+    return raw;
+  };
+  const complete = normalizeRun(reportFor(3), options);
+  assert.equal(complete.complete, true);
+  assert.equal(complete.cases[0].declaredRunsPerCase, 1);
+  assert.equal(complete.counts.accepted, 3);
+
+  const short = normalizeRun(reportFor(2), options);
+  assert.equal(short.complete, false);
+  assert.equal(short.counts.missing, 1);
+  const extra = normalizeRun(reportFor(4), options);
+  assert.equal(extra.complete, false);
+  assert.match(extra.issues.join(' '), /attempt layout differs from plan/);
+});
