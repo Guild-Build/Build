@@ -31,3 +31,83 @@ node cli/buildguild.mjs submit evidence.json
 `check` uses the same build manifest rules as the planner and draft API. Build manifests include name, summary and licence as well as profiles and modules; each profile has a one-line limits statement of at least ten characters. Private checks and exports do not require listing consent. The internal `bundles/bare-runtime` trial control intentionally has no modules and uses the baseline category; it is not an authorable build and does not pass these checks.
 
 `npm pack` stages the CLI and the shared validator together without adding dependencies.
+
+## Compare two local builds privately
+
+Compare your current build with a candidate on tasks you own:
+
+```sh
+node cli/buildguild.mjs compare ./current-build ./candidate-build \
+  --trial ./team-tasks --model <explicit-model-id> \
+  --max-cost-usd 2 --out ./comparison-001
+```
+
+The output directory must be new, its parent must exist, and it must not overlap
+an input folder. Inputs are ordinary build folders with `buildguild.json` and
+`.claude-plugin/plugin.json`, and a local trial folder with `trial.json` and
+`cases/` (use `new build` / `new trial` to start). The command checks these
+structures without executing fixtures. Only deterministic `regex`, `file_exists`
+and `tool_used` graders are supported. Every listed grader must complete and pass
+for an attempt to be accepted; a high average does not compensate for a failed
+check. Use checks that express the task's actual acceptance criteria.
+
+The command snapshots both builds and the trial, hashes file paths, normalized
+executable modes and contents, then runs each build on the same trial. It uses
+`--ablation none`, an explicit `--eval-dir evals`, and three attempts per case
+(`--runs N` overrides this, up to 100). The current build runs first; the candidate
+runs second. These are descriptive repeated measurements, not a randomized or
+statistically paired experiment. A single attempt is reported as inconclusive.
+
+The named model overrides case models as supported by the runner. The report
+records the requested model, observed runner version, input hashes, and exact
+invocations. A complete report requires the runner to confirm the staged plugin
+identity, successful loading, requested model, evaluation mode and concurrency.
+Aborted attempts are errors even when a grader reports a pass. Effective effort is unknown: `plugin eval` does not expose it.
+`--effort` is rejected by `compare`, `test` and `wrap` rather than recording a
+setting that was never applied. Model aliases and external services can change;
+local content hashes alone do not guarantee deterministic reproduction.
+
+The requested total budget is split equally. If the first run's reported cost is
+unknown, or leaves less than the same allocation for the second, the second is
+not started. The runner checks its cap before launching each attempt; an in-flight
+attempt can exceed it. This is not a strict billing guarantee. No extra run is
+started to retry a failure. Exit 0 means both arms have complete, interpretable
+results, not that the candidate passed every task. Exit 2 means inconclusive;
+exit 1 reports an invalid request or preflight failure.
+
+Open `report.html` in a browser. `comparison.json` holds the corresponding
+`buildguild.comparison.v1` record, including every planned attempt, acceptance
+failures, missing/ungraded results, known cost/time and descriptive case changes.
+`plan.json` is written before execution. `inputs/` contains rerunnable snapshots;
+`work/` contains each evaluated copy; `runs/` contains invocations and fresh raw
+reports outside the evaluated input tree.
+Saved input hashes are rechecked around execution. A change invalidates the
+comparison and skips further runs; the original source folders are not restored
+or modified. An incomplete report is saved after the first arm. Existing output is never
+overwritten. The rerun command uses the saved inputs and a new output directory.
+
+Private means no public upload: this schema cannot be submitted as season
+evidence. Output is owner-only on POSIX systems (directory mode 0700); the HTML has
+no external assets or scripts. Raw reports and snapshots can contain sensitive
+source, so retain them only in an approved local location and do not commit them.
+The model provider still processes trial inputs. Fixtures and hooks run as your
+user: fresh working copies are not a security sandbox. Run only trusted inputs;
+validate your provider and customer data-handling requirements first. Input links,
+special files and known credential filenames are rejected; this is not a general
+secret scanner. Root `.git` and existing build `evals/` directories are excluded
+from snapshots. User inputs themselves are not edited.
+
+## CLI release checks
+
+```sh
+node --check cli/buildguild.mjs
+node --check cli/manifest.mjs
+node --check cli/compare.mjs
+node --check cli/comparison-results.mjs
+node --check cli/pack.mjs
+node --test tests/*.test.mjs
+```
+
+The tests use synthetic inputs and a stubbed runner; they require no model credit
+or credentials. They validate the comparison contract and packaging, not live
+model performance. Legacy public evidence records and season scores are unchanged.

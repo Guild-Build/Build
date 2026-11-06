@@ -29,7 +29,17 @@ node cli/buildguild.mjs add measured-delivery --scope project
 node cli/buildguild.mjs test measured-delivery --model claude-sonnet-5-5 --max-cost-usd 5
 ```
 
-[`cli/README.md`](cli/README.md) describes every command.
+[`cli/README.md`](cli/README.md) describes every command, including private comparisons:
+
+```sh
+node cli/buildguild.mjs compare ./current-build ./candidate-build --trial ./team-tasks \
+  --model <explicit-model-id> --max-cost-usd 2 --out ./comparison-001
+```
+
+This produces a local HTML report and JSON record from repeated runs of both builds
+on the same tasks. It preserves missing and failed attempts, records content hashes,
+and never submits the comparison to the public leaderboard. See the CLI guide for
+runner trust, provider processing, budget limits and acceptance rules.
 
 ## How a build or a trial gets in
 

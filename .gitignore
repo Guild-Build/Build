@@ -3,3 +3,6 @@
 cli/dist/
 bundles/*/evals/results/
 .buildguild/
+
+# Private comparison directories (default naming suggested by the CLI guide).
+comparison-*/

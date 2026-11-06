@@ -8,6 +8,7 @@ import { spawnSync, execFileSync } from 'node:child_process';
 import { homedir, platform, release, tmpdir } from 'node:os';
 import { inflateRawSync } from 'node:zlib';
 import { validateManifest, LICENSES } from './manifest.mjs';
+import { compare } from './compare.mjs';
 
 const ORIGIN = process.env.BUILDGUILD_ORIGIN || 'https://buildguild.gg';
 const args = process.argv.slice(2);
@@ -424,7 +425,7 @@ function checkGrader(text, where, problems) {
   if (type === 'llm') problems.push(`${where}: llm graders are not accepted in Season 0 (deterministic graders only)`);
 }
 
-function checkTrial(root, problems) {
+function checkTrial(root, problems, options = {}) {
   const tj = JSON.parse(readFileSync(join(root, 'trial.json'), 'utf8'));
   if (!SLUG.test(tj.slug || '')) problems.push('trial.json: slug must be kebab-case');
   if (!TRIAL_KINDS.includes(tj.kind)) problems.push(`trial.json: kind must be one of ${TRIAL_KINDS.join(', ')}`);
@@ -471,7 +472,7 @@ function checkTrial(root, problems) {
         const src = readFileSync(fpath, 'utf8');
         // A fixture flagged for network use is reported, not run.
         if (/curl |wget |npm install|pip install|git clone http/.test(src)) problems.push(`cases/${c}/${fixture}: fixtures must not reach the network`);
-        else if (!flag('no-fixtures')) {
+        else if (!options.structuralOnly && !flag('no-fixtures')) {
           const tmp = mkdtempSync(join(tmpdir(), 'bg-fixture-'));
           const r = spawnSync('bash', ['-e', fpath], { cwd: tmp, encoding: 'utf8', timeout: 60000, env: { ...process.env, HOME: tmp } });
           if (r.status !== 0) problems.push(`cases/${c}/${fixture}: exited ${r.status}${r.stderr ? ': ' + r.stderr.trim().split('\n').pop() : ''}`);
@@ -482,7 +483,7 @@ function checkTrial(root, problems) {
   }
 }
 
-function checkBuild(root, problems) {
+function checkBuild(root, problems, options = {}) {
   const pj = JSON.parse(readFileSync(join(root, '.claude-plugin/plugin.json'), 'utf8'));
   if (!pj.name || !SLUG.test(pj.name)) problems.push('plugin.json: name must be kebab-case');
   if (!pj.version) problems.push('plugin.json: version is missing (users then track commits)');
@@ -503,22 +504,22 @@ function checkBuild(root, problems) {
       if (m && !/^bash /.test(h.command)) problems.push(`hooks.json (${ev}): invoke scripts through "bash" so a lost executable bit cannot disable the hook`);
     }
   }
-  if (existsSync(join(root, 'evals'))) for (const c of readdirSync(join(root, 'evals')).filter(n => n !== 'results')) { const gdir = join(root, 'evals', c, 'graders'); if (existsSync(gdir)) for (const g of readdirSync(gdir)) checkGrader(readFileSync(join(gdir, g), 'utf8'), `evals/${c}/graders/${g}`, problems); }
+  if (!options.ignoreEvals && existsSync(join(root, 'evals'))) for (const c of readdirSync(join(root, 'evals')).filter(n => n !== 'results')) { const gdir = join(root, 'evals', c, 'graders'); if (existsSync(gdir)) for (const g of readdirSync(gdir)) checkGrader(readFileSync(join(gdir, g), 'utf8'), `evals/${c}/graders/${g}`, problems); }
   const claude = which('claude');
-  if (claude && !flag('no-validator')) {
+  if (claude && !options.structuralOnly && !flag('no-validator')) {
     const r = spawnSync(claude, ['plugin', 'validate', root, '--strict'], { encoding: 'utf8', timeout: 60000 });
     if (r.status !== 0) problems.push(`claude plugin validate --strict failed:\n    ${(r.stdout + r.stderr).trim().split('\n').slice(-6).join('\n    ')}`);
   } else if (!claude) out('note: claude is not installed, skipped claude plugin validate');
 }
 
 // Every check `check` runs on a build or trial folder; any problem is listed and exits 1. A --trial folder gets it too.
-function checkFolder(root, kind) {
+function checkFolder(root, kind, options = {}) {
   const problems = [];
   if (!existsSync(join(root, 'README.md'))) problems.push('README.md is missing');
   else if (words(readFileSync(join(root, 'README.md'), 'utf8')) < 40) problems.push('README.md needs at least forty words');
   if (!existsSync(join(root, 'LICENSE'))) problems.push('LICENSE is missing');
   for (const n of ['.env', '.env.local', 'id_rsa', 'credentials.json']) if (existsSync(join(root, n))) problems.push(`${n} must not ship in a submission`);
-  if (kind === 'trial') checkTrial(root, problems); else checkBuild(root, problems);
+  if (kind === 'trial') checkTrial(root, problems, options); else checkBuild(root, problems, options);
   if (problems.length) { console.error(`${kind} ${root}: ${problems.length} problem(s)\n  - ${problems.join('\n  - ')}`); process.exit(1); }
 }
 
@@ -573,6 +574,8 @@ Run from a checkout of the Build repository; the buildguild npm package is not p
                                         download, verify SHA-256, unpack, record in .buildguild/lock.json
   node cli/buildguild.mjs remove <slug> reverse an add
   node cli/buildguild.mjs doctor        which runtimes are installed, what the lock says
+  node cli/buildguild.mjs compare <current-folder> <candidate-folder> --trial <folder> --model <id> --max-cost-usd <total> --out <new-directory> [--runs 3]
+                                        private local comparison; writes comparison.json and report.html, never submits
   node cli/buildguild.mjs new build <name> | new trial <name> [--author login] [--license id]
                                         scaffold a build (plugin + buildguild.json) or a trial (trial.json + one case) that passes check
   node cli/buildguild.mjs check [path]  manifest, skills, agents, hooks and the plugin validator for a build; manifest, cases,
@@ -592,8 +595,10 @@ Run from a checkout of the Build repository; the buildguild npm package is not p
 `;
 
 (async () => {
+  if (['compare', 'test', 'wrap'].includes(cmd) && flag('effort') !== undefined) die('--effort is not supported by claude plugin eval; no run was started or evidence written');
   if (cmd === 'wrap') modelId(); // its case fetches the trial record first; a missing model is refused before any request
   switch (cmd) {
+    case 'compare': return compare(args.slice(1), { checkFolder });
     case 'list': return list();
     case 'show': return show(positional[0]);
     case 'add': return add(positional[0]);
