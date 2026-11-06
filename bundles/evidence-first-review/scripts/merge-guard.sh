@@ -469,6 +469,8 @@ check_simple() {
   sh_i=-1; ev_i=-1; any=0; prev=''; k=0
   while [ "$k" -lt "$n" ]; do
     w=${words[k]}
+    # A group boundary starts a command even after wrapper flags such as xargs -I{}.
+    [ "${cpos[k]:-}" = 1 ] && { any=0; take=0; operand=0; }
     if [ "$any" = 1 ]; then
       if [ "$take" = 1 ]; then take=0; k=$((k + 1)); continue; fi
       case $w in
