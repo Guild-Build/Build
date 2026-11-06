@@ -24,6 +24,8 @@ node cli/buildguild.mjs submit evidence.json
 
 `environment.modules` records each module's `ref` and GitHub commit `sha` at run time, with `sha: null` for non-GitHub sources or unavailable lookups.
 
+After guarding `--work-dir`, `test` checks that Claude Code is installed before resetting the work directory or downloading anything. It then stages the bundle and resolves module pins before starting `claude plugin eval`. The `pinned <n> of <m> modules` summary counts the valid refs recorded, up to 60 entries.
+
 `--trial <path>` runs a trial folder of your own instead, such as one made by `new trial`. A value that starts with `.` or holds a slash is a path; a bare name is a folder only when it holds `trial.json`, so an unrelated folder never hides a published slug. `test` first runs the trial checks `check` runs and stops on any problem, before it looks for Claude Code or downloads anything, then writes the folder's `cases/` into `evals/` the way a published trial is unpacked: the same layout, `.sh` files executable and the rest not. The run is for you, the author: it is written to `local-run.json`, marked `"trialSource": "local"` with the slug and version from the folder's `trial.json`, and `submit` refuses it. The raw report (`--raw-out`) carries the same marker, and `wrap` refuses a marked report for a published slug. Evidence comes only from a run on a published trial. `wrap --trial <path>` marks its record the same way.
 
 `--work-dir <dir>` is deleted before the run, so `test` refuses, before deleting anything, one that is the filesystem root, your home directory, the current directory or one of its ancestors, or the build or trial folder, a folder inside either (one not created yet included), or a folder that holds either.

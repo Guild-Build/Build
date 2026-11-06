@@ -249,6 +249,7 @@ async function modulePins(bundleDir) {
   for (const pin of modules) {
     const source = sources.get(pin.ref);
     if (source?.kind !== 'github' || typeof source.url !== 'string') continue;
+    // This parser supports single-segment branch names only in GitHub tree URLs.
     const match = source.url.match(/^(https:\/\/github\.com\/[^/]+\/[^/?#]+)(?:\/tree\/([^/?#]+)(?:\/[^?#]*)?)?\/?$/);
     if (!match) continue;
     try {
@@ -260,7 +261,7 @@ async function modulePins(bundleDir) {
       if (/^[0-9a-f]{40}$/.test(sha)) pin.sha = sha;
     } catch {}
   }
-  out(`pinned ${modules.filter(m => m.sha).length} of ${refs.length} modules`);
+  out(`pinned ${modules.filter(m => m.sha).length} of ${modules.length} modules`);
   return modules;
 }
 
@@ -303,6 +304,7 @@ async function test(slug) {
   const buildDir = existsSync(slug) && statSync(slug).isDirectory() ? resolve(slug) : null;
   const workDir = flag('work-dir') && flag('work-dir') !== true ? resolve(String(flag('work-dir'))) : null;
   if (workDir) guardWorkDir(workDir, { build: buildDir, trial: local?.root });
+  const claude = which('claude'); if (!claude) die('claude is not installed; install Claude Code 2.1.269 or later');
   let meta = { version: 'local', sha256: null };
   // The run always happens in a fresh temporary copy, so a local bundle's own evals/ is never touched.
   const bundleDir = workDir ? (rmSync(workDir, { recursive: true, force: true }), mkdirSync(workDir, { recursive: true }), workDir) : mkdtempSync(join(tmpdir(), `buildguild-${existsSync(slug) ? 'local' : slug}-`));
@@ -318,7 +320,6 @@ async function test(slug) {
     meta = { version: b.version, sha256: sha };
   }
   const modules = await modulePins(bundleDir);
-  const claude = which('claude'); if (!claude) die('claude is not installed; install Claude Code 2.1.269 or later');
   const { root: trialDir, record: trialRecord } = local || await trial(trialSlug);
   if (local) out(`local trial ${trialRecord.name} v${trialRecord.version}: ${trialRecord.cases.length} cases from ${trialDir}; a run on it is for its author, not evidence`);
   const evalDir = join(bundleDir, 'evals');

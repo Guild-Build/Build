@@ -90,17 +90,34 @@ async function setup(t, options = {}) {
   };
 }
 
-function expectPins(result, count, total = 3, status = 0) {
-  assert.equal(result.status, status, result.stderr + result.stdout);
+function expectPins(result, count, total = 3) {
+  assert.equal(result.status, 0, result.stderr + result.stdout);
   assert.deepEqual(result.stdout.match(/^pinned .*$/gm), [`pinned ${count} of ${total} modules`]);
-  assert.equal(result.stderr, status === 0 ? '' : 'buildguild: claude is not installed; install Claude Code 2.1.269 or later\n');
+  assert.equal(result.stderr, '');
 }
 
-test('resolves modules before the missing-Claude check', async t => {
+test('resolves modules before running Claude and records the pins', async t => {
   const f = await setup(t);
-  expectPins(await f.run(), 1, 3, 1);
+  f.runner();
+  const result = await f.run();
+  expectPins(result, 1);
+  assert.ok(result.stdout.indexOf('pinned 1 of 3 modules') < result.stdout.indexOf('running: claude'));
+  assert.deepEqual(f.record().environment.modules, expected);
   assert.deepEqual(f.gitCalls(), [['ls-remote', 'https://github.com/example/module', 'HEAD']]);
   assert.deepEqual(f.requests, ['GET /modules/index.json']);
+});
+
+test('missing Claude preserves the work directory and makes no downloads', async t => {
+  const f = await setup(t);
+  f.write('work/sentinel.txt', 'keep me');
+  const result = await f.invoke(['test', 'published-build', '--trial', 'sample-trial',
+    '--model', 'claude-sonnet-5-5', '--work-dir', './work']);
+  assert.equal(result.status, 1);
+  assert.equal(result.stderr, 'buildguild: claude is not installed; install Claude Code 2.1.269 or later\n');
+  assert.equal(readFileSync(join(f.root, 'work/sentinel.txt'), 'utf8'), 'keep me');
+  assert.doesNotMatch(result.stdout, /pinned /);
+  assert.deepEqual(f.requests, []);
+  assert.deepEqual(f.gitCalls(), []);
 });
 
 for (const published of [false, true]) test(`writes ordered pins in ${published ? 'published evidence' : 'local records'}`, async t => {
@@ -115,9 +132,8 @@ for (const published of [false, true]) test(`writes ordered pins in ${published 
   assert.equal(f.gitCalls().length, 1);
 });
 
-test('missing git produces nulls and still reaches the Claude check and record writer', async t => {
+test('missing git produces nulls and still runs Claude and writes the record', async t => {
   const f = await setup(t, { git: false });
-  expectPins(await f.run(), 0, 3, 1);
   f.runner();
   expectPins(await f.run(), 0);
   assert.deepEqual(f.record().environment.modules, refs.map(ref => ({ ref, sha: null })));
@@ -127,7 +143,8 @@ for (const suffix of ['/tree/release', '/tree/release/skills/example']) test(`re
   const sourceIndex = structuredClone(index);
   sourceIndex.modules[0].source.url += suffix;
   const f = await setup(t, { index: sourceIndex });
-  expectPins(await f.run(), 1, 3, 1);
+  f.runner();
+  expectPins(await f.run(), 1);
   assert.deepEqual(f.gitCalls(), [['ls-remote', 'https://github.com/example/module', 'refs/heads/release']]);
 });
 
@@ -152,7 +169,6 @@ for (const [name, options] of [
   ['invalid index shape', { index: {} }],
 ]) test(`${name} records nulls and emits only the pin summary`, async t => {
   const f = await setup(t, options);
-  expectPins(await f.run(), 0, 3, 1);
   f.runner();
   expectPins(await f.run(), 0);
   assert.deepEqual(f.record().environment.modules, refs.map(ref => ({ ref, sha: null })));
@@ -173,7 +189,7 @@ test('only emits valid refs and no more than 60 entries from an unchecked local 
   const valid = Array.from({ length: 61 }, (_, i) => `skill/module-${i}`);
   const f = await setup(t, { refs: [null, 5, {}, 'invalid/slug', 'skill/Bad', 'skill/too/many', ...valid] });
   f.runner();
-  expectPins(await f.run(), 0, 67);
+  expectPins(await f.run(), 0, 60);
   assert.deepEqual(f.record().environment.modules, valid.slice(0, 60).map(ref => ({ ref, sha: null })));
 });
 
