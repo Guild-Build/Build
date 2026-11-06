@@ -1,0 +1,19 @@
+{
+  "id": "blocked-handoff",
+  "name": "Handoff after a blocked test run",
+  "version": "1.0.0",
+  "summary": "Check a documentation update, an attempted test run, and a structured report of a dependency blocker.",
+  "categories": [
+    "delivery"
+  ],
+  "measures": [
+    "handoff"
+  ],
+  "cases": [
+    {
+      "name": "report-blocked-tests",
+      "dimension": "handoff",
+      "runs": 1
+    }
+  ]
+}

@@ -10,6 +10,8 @@ import { inflateRawSync } from 'node:zlib';
 import { validateManifest, LICENSES, MODULE_TYPES } from './manifest.mjs';
 import { compare } from './compare.mjs';
 import { prepareComparison } from './comparison-preparation.mjs';
+import { trialTemplateFiles } from './trial-templates.mjs';
+import { checkExamples } from './grader-examples.mjs';
 
 const ORIGIN = process.env.BUILDGUILD_ORIGIN || 'https://buildguild.gg';
 const args = process.argv.slice(2);
@@ -418,23 +420,28 @@ function newBuild(name) {
 
 function newTrial(name) {
   const slug = slugOf(name, 'trial name');
+  if (slug.length < 3 || slug.length > 48) die('trial name must be a kebab-case slug, 3 to 48 characters');
   const root = resolve(slug);
   if (existsSync(root)) die(`${root} already exists`);
-  const author = flag('author', (version('gh', ['api', 'user', '--jq', '.login']) || process.env.USER || 'your-login').trim());
+  // Trial authoring must work offline, even when gh is installed and signed in.
+  const author = flag('author', process.env.USER || 'your-login');
+  if (typeof author !== 'string' || !author.trim()) die('--author needs a nonempty name');
   const license = flag('license', 'Apache-2.0');
-  const title = slug.split('-').map(w => w[0].toUpperCase() + w.slice(1)).join(' ');
-  writeTree(root, {
-    'trial.json': JSON.stringify({ schema: 'buildguild.trial.v1', slug, name: title, version: '0.1.0', kind: 'community', author, license, summary: 'What this trial measures and for whom, in at least forty characters, written for a stranger.', categories: ['delivery'], measures: ['quality'], cases: [{ name: 'example-case', dimension: 'quality', runs: 1 }], tolerance: { overall: 0.10, dimension: 0.25 }, hiddenSlice: { count: 0, published: null }, runner: 'claude plugin eval' }, null, 2) + '\n',
-    'cases/example-case/prompt.md': `---\ntags: [quality]\nruns: 1\nmax_turns: 15\ntimeout_seconds: 240\nallowed_tools: [Read, Glob, Grep, Edit, Write, Bash]\n---\n\nThe test in this directory fails. Fix the code, not the test, run \`node --test\`, and write the word done into DONE.txt only if the tests pass.\n`,
-    'cases/example-case/case.yaml': 'schema_version: "1.1"\nname: example-case\ncontext:\n  scaffold_script: fixture.sh\n',
-    'cases/example-case/fixture.sh': `#!/usr/bin/env bash\n# Builds the workspace for this case. No network. Runs only with --scaffold.\nset -eu\nmkdir -p src test\nprintf '{ "name": "fixture", "type": "module", "scripts": { "test": "node --test" } }\\n' > package.json\nprintf 'export const double = x => x + x + 1;\\n' > src/double.mjs\nprintf 'import test from "node:test";\\nimport assert from "node:assert/strict";\\nimport { double } from "../src/double.mjs";\\ntest("doubles", () => { assert.equal(double(2), 4); });\\n' > test/double.test.mjs\ngit init -q -b main && git add -f -A && git -c user.name=fixture -c user.email=fixture@example.invalid commit -qm fixture\n`,
-    'cases/example-case/graders/done-file.md': "---\ntype: regex\npattern: '^done\\s*$'\ntarget:\n  source: file\n  path: DONE.txt\nweight: 2\n---\n",
-    'cases/example-case/graders/ran-tests.md': "---\ntype: tool_used\ntool: Bash\ninput_match: 'node --test|npm test'\nmin: 1\nweight: 1\n---\n",
-    'cases/example-case/graders/did-not-edit-test.md': "---\ntype: tool_used\ntool: Edit\ninput_match: 'test/'\nmin: 0\nmax: 0\nweight: 1\n---\n",
-    'README.md': `# ${title}\n\nSay what this trial measures, for which kind of build, and why a build that passes it is better than one that does not. A maintainer needs at least forty words here before the trial can be listed as Declared. Each case names one dimension, uses deterministic graders, and builds its own workspace with a fixture script that never reaches the network.\n\n## Cases\n\n- example-case (quality): replace with the real list.\n\n## Check and run\n\n\`\`\`\nnode cli/buildguild.mjs check ./${slug}\nnode cli/buildguild.mjs test <build> --trial ./${slug}\n\`\`\`\n\nA run on this local folder is for you, the author: it writes \`local-run.json\`, which \`submit\` refuses. Evidence comes from a run on the published trial, after the guild lists it.\n`,
-    'LICENSE': license === 'Apache-2.0' ? 'Apache License 2.0. See https://www.apache.org/licenses/LICENSE-2.0 for the full text.\n' : `${license}\n`,
-  });
-  out(`new trial at ${root}\nnext: write the real cases, then: node cli/buildguild.mjs check ${slug}`);
+  if (!LICENSES.includes(license)) die(`license must be one of ${LICENSES.join(', ')}`);
+  const template = flag('template', 'scoped-config-change');
+  const files = trialTemplateFiles({ slug, author: author.trim(), license, template });
+  mkdirSync(root, { mode: 0o700 }); // Refuse a racing creation instead of overwriting it.
+  writeTree(root, files);
+  out(`new trial at ${root} (template: ${template})\nnext: node cli/buildguild.mjs check-examples ./${slug}\nThis checks synthetic examples offline; it does not run a model or prove model quality.`);
+}
+
+function checkTrialExamples(target) {
+  if (!target) die('usage: buildguild check-examples <trial-folder>');
+  const result = checkExamples(target);
+  out(`${result.cases} case(s), ${result.examples} reference examples, ${result.assertions}/${result.plannedAssertions} grader assertions checked`);
+  for (const failure of result.failures) console.error(`  - ${failure}`);
+  out(result.ok ? 'Reference examples passed. No fixtures, commands or models were run.' : 'Reference example checks failed. No model evidence was produced.');
+  process.exitCode = result.ok ? 0 : 1;
 }
 
 // Grader front matter rules: the runner's YAML parser rejects what these catch, and it skips the case silently.
@@ -617,8 +624,12 @@ Run from a checkout of the Build repository; the buildguild npm package is not p
                                         execute the reviewed preparation after verifying its settings and frozen input hashes
   node cli/buildguild.mjs compare <current-folder> <candidate-folder> --trial <folder> --model <id> --max-cost-usd <total> --out <new-directory> [--runs 3]
                                         private local comparison; writes comparison.json and report.html, never submits
-  node cli/buildguild.mjs new build <name> | new trial <name> [--author login] [--license id]
-                                        scaffold a build (plugin + buildguild.json) or a trial (trial.json + one case) that passes check
+  node cli/buildguild.mjs new build <name> [--author login] [--license id]
+                                        scaffold a build (plugin + buildguild.json)
+  node cli/buildguild.mjs new trial <name> [--template scoped-config-change|blocked-handoff] [--author name] [--license id]
+                                        offline task template with tested reference examples; default scoped-config-change
+  node cli/buildguild.mjs check-examples <trial-folder>
+                                        test actual deterministic graders against synthetic good/bad/boundary examples; no model or fixture calls
   node cli/buildguild.mjs check [path]  manifest, skills, agents, hooks and the plugin validator for a build; manifest, cases,
                                         grader front matter and fixture scripts for a trial. Run this before anything else
   node cli/buildguild.mjs publish [path] [--repo url] [--github login] [--email a] [--summary s] [--yes]
@@ -648,6 +659,7 @@ Run from a checkout of the Build repository; the buildguild npm package is not p
     case 'remove': return remove(positional[0]);
     case 'doctor': return doctor();
     case 'new': return positional[0] === 'build' ? newBuild(positional[1]) : positional[0] === 'trial' ? newTrial(positional[1]) : die('usage: buildguild new build <name> | new trial <name>');
+    case 'check-examples': return checkTrialExamples(positional[0]);
     case 'check': return check(positional[0]);
     case 'publish': return publish(positional[0]);
     case 'trial': return trial(positional[0]);

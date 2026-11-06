@@ -53,6 +53,12 @@ By pull request, one build or one trial each. A guild build is a plugin folder i
 its record, which names that repository and carries the author's opt-in. `node cli/buildguild.mjs new build <slug>` and
 `new trial <slug>` scaffold a folder that already passes `check`.
 
+Trial authors can start with `--template blocked-handoff` or the default
+`--template scoped-config-change`. Each includes synthetic good, bad and boundary
+examples outside its task workspace. Run `node cli/buildguild.mjs check-examples
+./<slug>` to test those examples against the actual grader definitions offline.
+This checks selected grading rules; it does not execute a model or create evidence.
+
 Before you open the pull request, run from the repository root:
 
 ```

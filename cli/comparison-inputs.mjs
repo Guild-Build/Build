@@ -67,7 +67,7 @@ export function treeHash(root) {
 // Comparison supports the small scaffold-metadata format used by the local
 // authoring template. Consuming every line prevents hidden inline graders or
 // YAML merge/alias rules from changing the reviewed acceptance checks.
-function comparisonCase(caseDir, name) {
+export function validateComparisonCase(caseDir, name) {
   if (!existsSync(join(caseDir, 'prompt.md'))) throw Error(`${name}: comparison requires prompt.md; put task execution settings there and graders in graders/*.md.`);
   const yamlPath = join(caseDir, 'case.yaml');
   if (!existsSync(yamlPath)) return;
@@ -106,7 +106,7 @@ function deterministicCases(root, trial) {
     seen.add(c.name);
     if (c.acceptanceThreshold !== undefined && c.acceptanceThreshold !== 1) throw Error('compare requires all deterministic graders to pass (acceptanceThreshold 1)');
     const caseDir = join(root, 'cases', c.name);
-    comparisonCase(caseDir, c.name);
+    validateComparisonCase(caseDir, c.name);
     const graders = readdirSync(join(caseDir, 'graders')).filter(n => n.endsWith('.md')).sort().map(name => {
       const src = readFileSync(join(caseDir, 'graders', name), 'utf8');
       const type = src.match(/^type:\s*(\S+)\s*$/m)?.[1];
