@@ -5,7 +5,9 @@ The command-line companion to [buildguild.gg](https://buildguild.gg/). Node 22 o
 Run from a checkout of the Build repository; the `buildguild` npm package is not published yet, so do not run it with `npx`.
 
 ```
-node cli/buildguild.mjs new build my-desk      # or: new trial my-tasks
+node cli/buildguild.mjs new build my-desk
+node cli/buildguild.mjs new trial my-tasks --template scoped-config-change
+node cli/buildguild.mjs check-examples ./my-tasks
 node cli/buildguild.mjs check my-desk
 node cli/buildguild.mjs publish my-desk
 node cli/buildguild.mjs list
@@ -35,6 +37,69 @@ After guarding `--work-dir`, `test` checks that Claude Code is installed before 
 `check` uses the same build manifest rules as the planner and draft API. Build manifests include name, summary and licence as well as profiles and modules; each profile has a one-line limits statement of at least ten characters. Private checks and exports do not require listing consent. The internal `bundles/bare-runtime` trial control intentionally has no modules and uses the baseline category; it is not an authorable build and does not pass these checks.
 
 `npm pack` stages the CLI and the shared validator together without adding dependencies.
+
+## Start a trial and test its graders offline
+
+```sh
+node cli/buildguild.mjs new trial my-handoff --template blocked-handoff --author my-name
+node cli/buildguild.mjs check-examples ./my-handoff
+```
+
+Choose `blocked-handoff` to check a documentation edit, a matching test command
+and a structured dependency-blocker report. Choose `scoped-config-change` to check
+a requested configuration value and preservation of a protected file. Omitting
+`--template` selects `scoped-config-change`; the old placeholder DONE-file task is
+replaced. Trial creation uses `--author`, otherwise the local `USER` value or
+`your-login`. It never looks up a GitHub identity. Template provenance and the
+Apache-2.0 source licence are retained alongside the new trial's declared licence.
+
+Each template includes 11 synthetic passing, failing and boundary outcomes in
+`reference-examples.json`. `check-examples` reads the actual grader Markdown files
+and compares their decisions with the expected results. A missing case, grader
+expectation, positive/negative coverage, or boundary example fails the check.
+Changing a grader without updating its known outcomes can fail the check too.
+Exit 0 means the examples matched; exit 1 means a mismatch or unsupported input.
+This command needs only Node. It executes no fixtures, tool calls, models or
+network requests and writes no model evidence.
+
+The examples stay at the trial root, outside `cases/`. Comparison snapshots retain
+them for authors, but only `cases/` is staged into the evaluated build. Do not copy
+answer examples into a fixture workspace. Inspect fixtures before running the
+separate `check` command, which can execute them. Edit the task, grader and reference
+outcomes together; version semantic changes before comparing real results.
+
+The reference schema is `buildguild.grader-examples.v1`. It has a `cases` array;
+each case has `name` and `examples`. Every example has:
+
+- A unique `id`, `description`, and `category`: `pass`, `fail` or `boundary`.
+- `lastMessage`, hypothetical final `files` keyed by relative literal paths, and
+  `changedFiles`, the separate list of changed-file paths.
+- `toolCalls`, each with a tool `name` and JSON-serialized input object in `inputText`.
+- `expected`, a boolean for every actual grader name (its filename without `.md`).
+
+The supported checker semantics were inspected in Claude Code 2.1.314. This is a
+narrow reference checker, not a replacement eval runner:
+
+| Grader | Supported reference input |
+| --- | --- |
+| `regex` | `last_message` or one literal file; JavaScript regex flags; `contains` or `not_contains`. A missing file fails either mode. |
+| `file_exists` | One literal path in `changedFiles`, with `exists: true` by default. The runner checks its changed-file list, not all files already in the workspace. |
+| `tool_used` | Exact tool name, optional regex over serialized `inputText`, and integer `min`/`max` bounds. Default minimum is one. |
+
+Front matter supports plain keys, single-line quoted strings, a file `target`
+mapping, optional positive `weight`, and optional `arm: both`. Duplicate keys,
+unknown fields, advanced YAML, glob paths, trace targets, count-mode regexes and
+other grader types are rejected rather than approximated. References are for one
+supplied outcome; they do not simulate ablation or compute weighted model scores.
+Numbers and booleans must be unquoted; patterns and other text remain strings.
+Literal paths cannot contain line breaks or leading/trailing whitespace. Cases
+use the same bounded `prompt.md`/`case.yaml` format as private comparison below;
+inline YAML graders are rejected so additional checks cannot escape coverage.
+
+These tests show that selected rules distinguish known examples. They do not prove
+model quality, general grader correctness, or that a tool call actually succeeded.
+Free prose rejected by the handoff format is not evidence of dishonesty. The scoped
+configuration checks cover two file states, not every edit in a workspace.
 
 ## Compare two local builds privately
 
@@ -178,6 +243,8 @@ node --check cli/comparison-preparation.mjs
 node --check cli/comparison-review.mjs
 node --check cli/comparison-results.mjs
 node --check cli/comparison-responses.mjs
+node --check cli/grader-examples.mjs
+node --check cli/trial-templates.mjs
 node --check cli/pack.mjs
 node --test tests/*.test.mjs
 ```

@@ -1,0 +1,19 @@
+{
+  "id": "scoped-config-change",
+  "name": "Scoped configuration change",
+  "version": "1.0.0",
+  "summary": "Check a narrow service configuration change while preserving the timeout and protected notice.",
+  "categories": [
+    "delivery"
+  ],
+  "measures": [
+    "scope"
+  ],
+  "cases": [
+    {
+      "name": "update-retry-limit",
+      "dimension": "scope",
+      "runs": 1
+    }
+  ]
+}
