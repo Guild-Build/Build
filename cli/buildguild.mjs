@@ -9,6 +9,7 @@ import { homedir, platform, release, tmpdir } from 'node:os';
 import { inflateRawSync } from 'node:zlib';
 import { validateManifest, LICENSES } from './manifest.mjs';
 import { compare } from './compare.mjs';
+import { prepareComparison } from './comparison-preparation.mjs';
 
 const ORIGIN = process.env.BUILDGUILD_ORIGIN || 'https://buildguild.gg';
 const args = process.argv.slice(2);
@@ -505,11 +506,11 @@ function checkBuild(root, problems, options = {}) {
     }
   }
   if (!options.ignoreEvals && existsSync(join(root, 'evals'))) for (const c of readdirSync(join(root, 'evals')).filter(n => n !== 'results')) { const gdir = join(root, 'evals', c, 'graders'); if (existsSync(gdir)) for (const g of readdirSync(gdir)) checkGrader(readFileSync(join(gdir, g), 'utf8'), `evals/${c}/graders/${g}`, problems); }
-  const claude = which('claude');
+  const claude = options.structuralOnly ? null : which('claude');
   if (claude && !options.structuralOnly && !flag('no-validator')) {
     const r = spawnSync(claude, ['plugin', 'validate', root, '--strict'], { encoding: 'utf8', timeout: 60000 });
     if (r.status !== 0) problems.push(`claude plugin validate --strict failed:\n    ${(r.stdout + r.stderr).trim().split('\n').slice(-6).join('\n    ')}`);
-  } else if (!claude) out('note: claude is not installed, skipped claude plugin validate');
+  } else if (!claude && !options.structuralOnly) out('note: claude is not installed, skipped claude plugin validate');
 }
 
 // Every check `check` runs on a build or trial folder; any problem is listed and exits 1. A --trial folder gets it too.
@@ -574,6 +575,10 @@ Run from a checkout of the Build repository; the buildguild npm package is not p
                                         download, verify SHA-256, unpack, record in .buildguild/lock.json
   node cli/buildguild.mjs remove <slug> reverse an add
   node cli/buildguild.mjs doctor        which runtimes are installed, what the lock says
+  node cli/buildguild.mjs prepare <current-folder> <candidate-folder> --trial <folder> --model <id> --max-cost-usd <total> --out <new-directory> [--runs 3]
+                                        freeze a private comparison and write review.html; offline, no model or fixture execution
+  node cli/buildguild.mjs compare --plan <plan.json> --plan-sha256 <reviewed-sha256> --out <new-directory>
+                                        execute the reviewed preparation after verifying its settings and frozen input hashes
   node cli/buildguild.mjs compare <current-folder> <candidate-folder> --trial <folder> --model <id> --max-cost-usd <total> --out <new-directory> [--runs 3]
                                         private local comparison; writes comparison.json and report.html, never submits
   node cli/buildguild.mjs new build <name> | new trial <name> [--author login] [--license id]
@@ -595,9 +600,10 @@ Run from a checkout of the Build repository; the buildguild npm package is not p
 `;
 
 (async () => {
-  if (['compare', 'test', 'wrap'].includes(cmd) && flag('effort') !== undefined) die('--effort is not supported by claude plugin eval; no run was started or evidence written');
+  if (['prepare', 'compare', 'test', 'wrap'].includes(cmd) && flag('effort') !== undefined) die('--effort is not supported by claude plugin eval; no run was started or evidence written');
   if (cmd === 'wrap') modelId(); // its case fetches the trial record first; a missing model is refused before any request
   switch (cmd) {
+    case 'prepare': return prepareComparison(args.slice(1), { checkFolder });
     case 'compare': return compare(args.slice(1), { checkFolder });
     case 'list': return list();
     case 'show': return show(positional[0]);

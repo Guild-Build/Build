@@ -29,17 +29,21 @@ node cli/buildguild.mjs add measured-delivery --scope project
 node cli/buildguild.mjs test measured-delivery --model claude-sonnet-5-5 --max-cost-usd 5
 ```
 
-[`cli/README.md`](cli/README.md) describes every command, including private comparisons:
+[`cli/README.md`](cli/README.md) describes every command. Start a private comparison
+by preparing it offline:
 
 ```sh
-node cli/buildguild.mjs compare ./current-build ./candidate-build --trial ./team-tasks \
-  --model <explicit-model-id> --max-cost-usd 2 --out ./comparison-001
+node cli/buildguild.mjs prepare ./current-build ./candidate-build --trial ./team-tasks \
+  --model <explicit-model-id> --max-cost-usd 2 --out ./comparison-review
 ```
 
-This produces a local HTML report and JSON record from repeated runs of both builds
-on the same tasks. It preserves missing and failed attempts, records content hashes,
-and never submits the comparison to the public leaderboard. See the CLI guide for
-runner trust, provider processing, budget limits and acceptance rules.
+Open `comparison-review/review.html` to inspect the frozen tasks, acceptance checks,
+builds and budget. Preparation requires no Claude installation or credentials and
+runs no fixtures or models. The page supplies an explicit execution command tied
+to the reviewed plan's hash. Running that command later incurs model usage and
+produces a private HTML result and JSON record, preserving errors and missing
+attempts. It never submits to the public leaderboard. See the CLI guide for runner
+trust, provider processing, budget limits and acceptance rules.
 
 ## How a build or a trial gets in
 
