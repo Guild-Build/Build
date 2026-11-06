@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { createComparison, normalizeRun, renderComparison } from '../cli/comparison-results.mjs';
 
 const cases = [{ name: 'detect-bug', dimension: 'quality', graderNames: ['finding'] }];
-const runOptions = { cases, runs: 2, exitCode: 0, runnerVersion: '2.1.309 (Claude Code)' };
+const plugin = { name: 'current', version: '1.0.0', path: '/work/plugin' };
+const model = 'pinned-model';
+const runOptions = { cases, runs: 2, exitCode: 0, runnerVersion: '2.1.309 (Claude Code)', plugin, model };
 const arm = (passed = true) => ({
   score: passed ? 1 : 0,
   passed,
@@ -18,6 +20,7 @@ const runnerReport = (withArms = [arm(), arm()]) => ({
   schemaVersion: 1,
   claudeVersion: '2.1.309',
   partial: false,
+  suite: { root: plugin.path, ablation: 'none', modelOverride: model, concurrency: 1, plugins: [{ ...plugin }] },
   costUsd: 0.04,
   durationSeconds: 8,
   cases: [{ name: 'detect-bug', runsPerCase: 2, graders: [{ name: 'finding' }], arms: { with: withArms } }],
@@ -111,4 +114,34 @@ test('leaves comparisons inconclusive when either run omits cost or duration', (
     assert.equal(proposed[metric], null);
     assert.equal(comparison(current, proposed).status, 'inconclusive');
   }
+});
+
+test('requires the runner to report the intended plugin and suite settings', () => {
+  for (const changes of [
+    { plugins: [] },
+    { plugins: [{ ...plugin, problem: 'disabled' }] },
+    { plugins: [{ ...plugin, name: 'other' }] },
+    { plugins: [{ ...plugin, version: '2.0.0' }] },
+    { plugins: [{ ...plugin, path: '/work/other' }] },
+    { plugins: [plugin, { ...plugin, name: 'extra' }] },
+    { root: '/work/other' },
+    { modelOverride: 'other-model' },
+    { ablation: 'with-without' },
+    { concurrency: 2 },
+  ]) {
+    const raw = runnerReport();
+    Object.assign(raw.suite, changes);
+    const result = normalizeRun(raw, runOptions);
+    assert.equal(result.complete, false);
+    assert.equal(result.counts.accepted, 0);
+    assert.equal(result.counts.ungraded, 2);
+    assert.equal(result.costUsd, raw.costUsd);
+  }
+});
+
+test('classifies an aborted attempt as a runner error despite its full score', () => {
+  const result = normalizeRun(runnerReport([{ ...arm(), aborted: true }, arm()]), runOptions);
+  assert.equal(result.counts.errors, 1);
+  assert.equal(result.counts.accepted, 1);
+  assert.equal(result.complete, false);
 });

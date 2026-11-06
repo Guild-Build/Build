@@ -60,7 +60,9 @@ statistically paired experiment. A single attempt is reported as inconclusive.
 
 The named model overrides case models as supported by the runner. The report
 records the requested model, observed runner version, input hashes, and exact
-invocations. Effective effort is unknown: `plugin eval` does not expose it.
+invocations. A complete report requires the runner to confirm the staged plugin
+identity, successful loading, requested model, evaluation mode and concurrency.
+Aborted attempts are errors even when a grader reports a pass. Effective effort is unknown: `plugin eval` does not expose it.
 `--effort` is rejected by `compare`, `test` and `wrap` rather than recording a
 setting that was never applied. Model aliases and external services can change;
 local content hashes alone do not guarantee deterministic reproduction.

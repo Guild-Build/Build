@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -27,7 +27,10 @@ if (label === 'incumbent' && process.env.BG_COMPARE_SCENARIO === 'missing') proc
 if (label === 'incumbent' && process.env.BG_COMPARE_SCENARIO === 'mutated') {
   appendFileSync('../../inputs/candidate/skills/local-skill/SKILL.md', 'Mutated by first run.');
 }
+const disabled = label === 'candidate' && process.env.BG_COMPARE_SCENARIO === 'plugin-disabled';
 const acceptance = label === 'candidate';
+const { name, version } = JSON.parse(readFileSync('.claude-plugin/plugin.json', 'utf8'));
+const plugin = { name, version, path: process.cwd(), ...(disabled ? { problem: 'disabled_by_default' } : {}) };
 const grader = { name: 'file', type: 'file_exists', weight: 1 };
 const arm = {
   score: Number(acceptance), passed: acceptance, error: null, skippedPaidGraders: false,
@@ -37,6 +40,8 @@ const arm = {
 const partial = label === 'incumbent' && process.env.BG_COMPARE_SCENARIO === 'partial';
 const report = {
   schemaVersion: 1, claudeVersion: '2.1.309', partial,
+  suite: { root: process.cwd(), ablation: value('--ablation'), modelOverride: value('--model'),
+    concurrency: Number(value('-j')), plugins: [plugin] },
   costUsd: partial ? 0.75 : 0.1, durationSeconds: 5,
   cases: [{ name: 'case-name', runsPerCase: Number(value('--runs')), graders: [grader],
     arms: { with: Array.from({ length: partial ? 1 : Number(value('--runs')) }, () => arm) } }],
@@ -155,7 +160,10 @@ test('preserves partial attempts and skips the candidate when equal budgets are 
 test('ignores a stale report in the incumbent build when the runner writes no fresh result', t => {
   const fixture = setup(t);
   const grader = { name: 'file', type: 'file_exists', weight: 1 };
+  const stagedPath = join(realpathSync(fixture.root), 'output/work/incumbent');
   const stale = {
+    suite: { root: stagedPath, ablation: 'none', modelOverride: 'test-model',
+      concurrency: 1, plugins: [{ name: 'incumbent', version: '1.0.0', path: stagedPath }] },
     schemaVersion: 1, claudeVersion: '2.1.309', partial: false, costUsd: 0.1, durationSeconds: 5,
     cases: [{
       name: 'case-name', runsPerCase: 3, graders: [grader],
@@ -203,4 +211,15 @@ test('invalidates a comparison if a runner mutates retained inputs', t => {
   assert.match(report.incumbent.result.issues.join(' '), /input.*chang|chang.*input|mutat/i);
   assert.equal(readFileSync(join(fixture.root, skill), 'utf8'), original);
   assert.equal(readFileSync(join(fixture.out, 'inputs', skill), 'utf8'), original + 'Mutated by first run.');
+});
+
+test('reports a disabled candidate plugin as inconclusive despite passing grades', t => {
+  const fixture = setup(t);
+  expectExit(fixture.run('plugin-disabled'), 2);
+  assert.deepEqual(fixture.calls().map(call => call.label), ['incumbent', 'candidate']);
+  const report = fixture.report();
+  assert.equal(report.status, 'inconclusive');
+  assert.equal(report.acceptanceDelta, null);
+  assert.equal(report.candidate.result.counts.accepted, 0);
+  assert.match(report.candidate.result.issues.join(' '), /plugin/i);
 });

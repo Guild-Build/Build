@@ -1,3 +1,5 @@
+import { isAbsolute, resolve } from 'node:path';
+
 // Comparison reports are local summaries. Runner prompts, explanations and traces may
 // contain customer data, so this adapter copies only the fields needed for a decision.
 const nonnegative = value => Number.isFinite(value) && value >= 0 ? value : null;
@@ -13,7 +15,7 @@ function summarizeAttempt(arm, number, graderNames) {
   if (arm == null) return attempt;
   attempt.costUsd = addKnown(nonnegative(arm.costUsd), nonnegative(arm.judgeCostUsd));
   attempt.durationSeconds = nonnegative(arm.durationSeconds);
-  if (arm.error) return { ...attempt, status: 'error' };
+  if (arm.error || arm.aborted) return { ...attempt, status: 'error' };
 
   const reportedNames = names(arm.graders);
   const complete = uniqueNames(graderNames) && uniqueNames(reportedNames)
@@ -30,13 +32,25 @@ function summarizeAttempt(arm, number, graderNames) {
   return { ...attempt, score: arm.score, status: accepted ? 'accepted' : 'failed' };
 }
 
-export function normalizeRun(raw, { cases, runs, exitCode, runnerVersion }) {
+function matchesSuite(suite, plugin, model) {
+  if (!suite || !plugin || typeof model !== 'string' || suite.modelOverride !== model
+    || suite.ablation !== 'none' || suite.concurrency !== 1
+    || !Array.isArray(suite.plugins) || suite.plugins.length !== 1) return false;
+  const [loaded] = suite.plugins;
+  const samePath = value => typeof value === 'string' && isAbsolute(value) && resolve(value) === resolve(plugin.path);
+  return loaded?.name === plugin.name && loaded.version === plugin.version
+    && !loaded.problem && samePath(loaded.path) && samePath(suite.root);
+}
+
+export function normalizeRun(raw, { cases, runs, exitCode, runnerVersion, plugin, model }) {
   const issues = [];
   const observedVersion = versionNumber(raw?.claudeVersion);
   const supportedReport = raw?.schemaVersion === 1 && Array.isArray(raw.cases);
   const matchedVersion = observedVersion !== null && observedVersion === versionNumber(runnerVersion);
   if (!supportedReport) issues.push('Missing or unsupported runner report');
   if (!matchedVersion) issues.push('Runner version could not be matched');
+  const matchedSuite = supportedReport && matchesSuite(raw.suite, plugin, model);
+  if (supportedReport && !matchedSuite) issues.push('Runner suite differs from the planned plugin or settings');
   if (raw?.partial !== false) issues.push('Runner did not confirm a complete run');
 
   const observed = new Map();
@@ -72,7 +86,7 @@ export function normalizeRun(raw, { cases, runs, exitCode, runnerVersion }) {
     if (row && !matchesPlan) issues.push(`Runner graders differ from plan for ${name}`);
 
     const attempts = Array.from({ length: runs }, (_, index) =>
-      summarizeAttempt(Array.isArray(arms) ? arms[index] : null, index + 1, matchesPlan ? graderNames : []));
+      summarizeAttempt(Array.isArray(arms) ? arms[index] : null, index + 1, matchesPlan && matchedSuite ? graderNames : []));
     let accepted = 0;
     for (const attempt of attempts) {
       if (attempt.status !== 'missing' && attempt.status !== 'error') counts.completed++;

@@ -129,7 +129,7 @@ export async function compare(args, { checkFolder }) {
     const cases = deterministicCases(inputs[2], trialRecord);
     const trial = { slug: trialRecord.slug, version: trialRecord.version, sha256: treeHash(inputs[2]), cases };
     const settings = { model: opts.model, runs: opts.runs, runnerVersion, effort: null, effortSource: 'runner default; not exposed by eval', ablation: 'none', concurrency: 1, acceptance: 'all deterministic graders pass', requestedMaxCostUsd: opts.total, os: `${platform()} ${release()}`, node: process.version };
-    const builds = inputs.slice(0, 2).map(p => { const manifest = json(join(p, 'buildguild.json')); return { slug: manifest.slug, version: manifest.version, sha256: treeHash(p) }; });
+    const builds = inputs.slice(0, 2).map(p => { const manifest = json(join(p, 'buildguild.json')); const plugin = json(join(p, '.claude-plugin/plugin.json')); return { slug: manifest.slug, version: manifest.version ?? plugin.version, plugin: { name: plugin.name, version: plugin.version }, sha256: treeHash(p) }; });
     const rerun = ['node', fileURLToPath(new URL('./buildguild.mjs', import.meta.url)), 'compare', inputs[0], inputs[1], '--trial', inputs[2], '--model', opts.model, '--max-cost-usd', String(opts.total), '--runs', String(opts.runs), '--out', output + '-rerun'].map(quote).join(' ');
     const rounds = [];
     const hashes = [...builds.map(b => b.sha256), trial.sha256];
@@ -168,7 +168,7 @@ export async function compare(args, { checkFolder }) {
         if (proc.error || proc.signal) reason = 'Runner was interrupted or could not start.';
       }
       if (!inputsMatch()) inputIssue = 'Saved inputs changed during comparison; results are inconclusive and further runs are skipped.';
-      const result = normalizeRun(raw, { cases, runs: opts.runs, exitCode, runnerVersion });
+      const result = normalizeRun(raw, { cases, runs: opts.runs, exitCode, runnerVersion, model: opts.model, plugin: { ...builds[i].plugin, path: work } });
       if (reason) { result.issues.push(reason); result.complete = false; }
       if (inputIssue) for (const r of [...rounds.map(round => round.result), result]) {
         if (!r.issues.includes(inputIssue)) r.issues.push(inputIssue);
@@ -177,7 +177,7 @@ export async function compare(args, { checkFolder }) {
       previousCost = result.costUsd;
       rounds.push({ build: { ...builds[i], evaluatedSha256 }, allocatedMaxCostUsd: allocation, result });
       // Persist an honest incomplete report after the first arm, so interruption preserves useful results.
-      const missing = { build: builds[1], allocatedMaxCostUsd: half, result: normalizeRun(null, { cases, runs: opts.runs, exitCode: null, runnerVersion }) };
+      const missing = { build: builds[1], allocatedMaxCostUsd: half, result: normalizeRun(null, { cases, runs: opts.runs, exitCode: null, runnerVersion, model: opts.model, plugin: { ...builds[1].plugin, path: join(output, 'work', 'candidate') } }) };
       const report = createComparison({ trial, settings, incumbent: rounds[0], candidate: rounds[1] || missing, rerun });
       save(join(output, 'comparison.json'), report);
       writeFileSync(join(output, 'report.html'), renderComparison(report), { mode: 0o600 });
