@@ -38,7 +38,41 @@ After guarding `--work-dir`, `test` checks that Claude Code is installed before 
 
 ## Compare two local builds privately
 
-Compare your current build with a candidate on tasks you own:
+Prepare your current build and a candidate on tasks you own before spending:
+
+```sh
+node cli/buildguild.mjs prepare ./current-build ./candidate-build \
+  --trial ./team-tasks --model <explicit-model-id> \
+  --max-cost-usd 2 --out ./comparison-review
+```
+
+`prepare` works offline without Claude, credentials or provider requests. It checks
+the local structures, copies and hashes the inputs, and writes `plan.json` plus a
+self-contained `review.html`. It does not execute fixtures, hooks, validators or
+models. Review the exact task prompts, acceptance checks, repeats, total attempts,
+build identities and equal budget allocations before choosing to run. The stated
+budget is a stopping threshold, not an estimate of actual cost or a hard billing
+ceiling. Provider quota, model availability and runtime readiness remain unknown.
+
+The review and terminal output provide the next command, including the SHA-256 of
+the exact plan bytes:
+
+```sh
+node cli/buildguild.mjs compare --plan ./comparison-review/plan.json \
+  --plan-sha256 <hash-from-review> --out ./comparison-001
+```
+
+This command starts model usage. It verifies the plan digest and every saved input
+hash, reconstructs the expected task and settings record, and uses the existing
+comparison runner. It never executes a command stored in JSON. Settings cannot be
+overridden during execution; prepare a new review to change the model, repeats,
+budget or inputs. Changes to the original source folders do not alter the saved
+preparation. Keep its whole folder: the plan alone is not a portable build bundle.
+The result's `plan.json` records `preparationSha256`. The preparation is private
+and is not accepted as public season evidence or proof that a build works.
+
+For an immediate run when you have already reviewed the inputs, the original
+single-step command remains available:
 
 ```sh
 node cli/buildguild.mjs compare ./current-build ./candidate-build \
@@ -54,6 +88,16 @@ structures without executing fixtures. Only deterministic `regex`, `file_exists`
 and `tool_used` graders are supported. Every listed grader must complete and pass
 for an attempt to be accepted; a high average does not compensate for a failed
 check. Use checks that express the task's actual acceptance criteria.
+
+Private preparation and comparison use the local authoring template's format:
+each case needs `prompt.md` and `graders/*.md`. An optional `case.yaml` may contain
+only `schema_version: "1.1"`, the matching case `name`, and `context` with a
+two-space-indented `scaffold_script` path inside the case directory. Blank lines
+and comments are allowed. Advanced YAML, duplicate keys, extra execution fields
+and inline graders are rejected before any runner access. Put execution settings
+in the prompt's front matter and acceptance checks in grader Markdown files. This
+restriction prevents hidden instructions or paid graders from bypassing review;
+it does not change the public trial format or the separate `check` command.
 
 The command snapshots both builds and the trial, hashes file paths, normalized
 executable modes and contents, then runs each build on the same trial. It uses
@@ -129,6 +173,9 @@ from snapshots. User inputs themselves are not edited.
 node --check cli/buildguild.mjs
 node --check cli/manifest.mjs
 node --check cli/compare.mjs
+node --check cli/comparison-inputs.mjs
+node --check cli/comparison-preparation.mjs
+node --check cli/comparison-review.mjs
 node --check cli/comparison-results.mjs
 node --check cli/comparison-responses.mjs
 node --check cli/pack.mjs
