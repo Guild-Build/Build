@@ -64,6 +64,10 @@ The named model overrides case models as supported by the runner. The report
 records the requested model, observed runner version, input hashes, and exact
 invocations. A complete report requires the runner to confirm the staged plugin
 identity, successful loading, requested model, evaluation mode and concurrency.
+Response capture is verified against Claude Code **2.1.314**. `compare` stops
+before evaluation on another version or when `--keep-temp` is unavailable,
+because the trace format is not a published stable interface.
+Capture requires a non-root POSIX user so the runner can seal retained sandboxes.
 Aborted attempts are errors even when a grader reports a pass. Effective effort is unknown: `plugin eval` does not expose it.
 `--effort` is rejected by `compare`, `test` and `wrap` rather than recording a
 setting that was never applied. Model aliases and external services can change;
@@ -83,6 +87,13 @@ failures, missing/ungraded results, known cost/time and descriptive case changes
 `plan.json` is written before execution. `inputs/` contains rerunnable snapshots;
 `work/` contains each evaluated copy; `runs/` contains invocations and fresh raw
 reports outside the evaluated input tree.
+Each arm also has `responses.json`, with case and attempt identities, source trace
+hashes, and two separately sourced text fields. `finalResponse` comes from a
+successful main-thread terminal result; `graderTargetText` matches the runner's
+`last_message` target (the last assistant event with text blocks, including child
+assistant events). The HTML shows both when they differ. Tool and thinking blocks
+are excluded. Incomplete or unreadable traces are explicit; they make the comparison
+inconclusive and prevent starting the second build when detected in the first.
 Saved input hashes are rechecked around execution. A change invalidates the
 comparison and skips further runs; the original source folders are not restored
 or modified. An incomplete report is saved after the first arm. Existing output is never
@@ -92,6 +103,15 @@ Private means no public upload: this schema cannot be submitted as season
 evidence. Output is owner-only on POSIX systems (directory mode 0700); the HTML has
 no external assets or scripts. Raw reports and snapshots can contain sensitive
 source, so retain them only in an approved local location and do not commit them.
+Responses can also contain sensitive content. The command uses `--keep-temp`:
+besides the extracted responses, the runner retains its sealed temporary sandboxes
+and full traces. Successfully read trace paths are inventoried in `responses.json`;
+unreadable paths remain in `raw.json`. These temporary directories are outside the
+comparison folder (`/private/tmp/e-*` on macOS, `claude-eval-*` under the system
+temporary directory elsewhere). Deleting the comparison folder
+does not delete them. The command leaves the runner's seals intact and does not
+recursively inspect or reopen sealed directories for cleanup. Apply your retention
+policy to the exact reported roots; do not delete a broad temporary-file glob.
 The model provider still processes trial inputs. Fixtures and hooks run as your
 user: fresh working copies are not a security sandbox. Run only trusted inputs;
 validate your provider and customer data-handling requirements first. Input links,
@@ -106,6 +126,7 @@ node --check cli/buildguild.mjs
 node --check cli/manifest.mjs
 node --check cli/compare.mjs
 node --check cli/comparison-results.mjs
+node --check cli/comparison-responses.mjs
 node --check cli/pack.mjs
 node --test tests/*.test.mjs
 ```
@@ -113,3 +134,9 @@ node --test tests/*.test.mjs
 The tests use synthetic inputs and a stubbed runner; they require no model credit
 or credentials. They validate the comparison contract and packaging, not live
 model performance. Legacy public evidence records and season scores are unchanged.
+
+`examples/trials/handoff-v2` provides a corrected local handoff test with a bounded
+three-line response format. The original published prose matcher can penalize
+truthful negations. The new task checks an explicit blocked status and the observed
+missing module instead. Format failures do not establish dishonesty, and the
+changed task's scores must not be combined with the old trial's results.

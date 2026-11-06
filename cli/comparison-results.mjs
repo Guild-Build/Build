@@ -1,7 +1,7 @@
 import { isAbsolute, resolve } from 'node:path';
 
-// Comparison reports are local summaries. Runner prompts, explanations and traces may
-// contain customer data, so this adapter copies only the fields needed for a decision.
+// Comparison reports are private. Response capture separately adds final text and
+// exact grader-target text; raw tool output and thinking never enter this summary.
 const nonnegative = value => Number.isFinite(value) && value >= 0 ? value : null;
 const fraction = value => nonnegative(value) !== null && value <= 1;
 const versionNumber = value => typeof value === 'string' ? value.match(/\b\d+\.\d+\.\d+\b/)?.[0] ?? null : null;
@@ -167,12 +167,19 @@ export function renderComparison(report) {
   const rows = Object.entries(countLabels).map(([key, label]) => row(label, current.counts[key], proposed.counts[key])).join('');
   const cases = current.cases.map((item, index) => {
     const next = proposed.cases[index];
-    const details = result => result.attempts.map(attempt =>
-      `<li>Attempt ${attempt.number} · ${attempt.status} · score ${percent(attempt.score)} · ${usd(attempt.costUsd)} · ${seconds(attempt.durationSeconds)}</li>`).join('');
+    const details = (result, run) => result.attempts.map(attempt => {
+      const response = run.responseEvidence?.cases.find(row => row.name === result.name)?.attempts.find(entry => entry.number === attempt.number);
+      const evidence = response ? `<details><summary>Response evidence · ${escapeHtml(response.status)}</summary>
+${response.issue ? `<p>${escapeHtml(response.issue)}</p>` : ''}
+${response.finalResponse !== null ? `<h5>Final response</h5><pre>${escapeHtml(response.finalResponse)}</pre>` : '<p>Final response unavailable.</p>'}
+${response.graderTargetText !== null && response.graderTargetText !== response.finalResponse ? `<h5>Text used by the last_message grader</h5><p>This is a separate trace field; it may differ from the final response or be partial.</p><pre>${escapeHtml(response.graderTargetText)}</pre>` : ''}
+${response.traceSha256 ? `<p>Source trace SHA-256: <code>${escapeHtml(response.traceSha256)}</code></p>` : ''}</details>` : '<p>Response evidence not retained.</p>';
+      return `<li>Attempt ${attempt.number} · ${attempt.status} · score ${percent(attempt.score)} · ${usd(attempt.costUsd)} · ${seconds(attempt.durationSeconds)}${evidence}</li>`;
+    }).join('');
     return `<section class="case"><h3>${escapeHtml(item.name)}</h3>
 <p>${escapeHtml(item.dimension)} · Change ${change(report.caseDeltas[index].acceptanceDelta)}</p>
 <details><summary>Current accepted ${item.accepted}/${settings.runs} · Candidate accepted ${next.accepted}/${settings.runs}</summary>
-<h4>Current</h4><ul>${details(item)}</ul><h4>Candidate</h4><ul>${details(next)}</ul></details></section>`;
+<h4>Current</h4><ul>${details(item, current)}</ul><h4>Candidate</h4><ul>${details(next, proposed)}</ul></details></section>`;
   }).join('');
   const issues = [current, proposed].flatMap((run, index) => run.issues.map(issue =>
     `<li>${index === 0 ? 'Current' : 'Candidate'} · ${escapeHtml(issue)}</li>`));
@@ -205,6 +212,7 @@ ${row('Cost per accepted attempt', usd(current.costPerAcceptedUsd), usd(proposed
 ${row('Duration', seconds(current.durationSeconds), seconds(proposed.durationSeconds))}
 </tbody></table></section>
 <section><h2>Cases</h2>${cases}</section>
+${settings.responseCapture ? '<p>Final response comes from a successful terminal result. The last_message grader uses the last assistant event containing text blocks. Both are retained when different; neither includes tool or thinking blocks.</p>' : ''}
 <section><h2>Run identity</h2><dl>
 <dt>Model requested</dt><dd>${escapeHtml(settings.model)}</dd>
 <dt>Runner reported · current / candidate</dt><dd>${escapeHtml(current.runnerVersion)} / ${escapeHtml(proposed.runnerVersion)}</dd>
