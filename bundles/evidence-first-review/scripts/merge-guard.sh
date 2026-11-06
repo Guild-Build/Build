@@ -138,7 +138,7 @@ scan_cmds() {
       # Inside (( )) and $(( )), < and > compare and shift; they open no redirection or here-document.
       '<'|'>') if [ "$arith" -gt 0 ]; then [ "$inword" = 1 ] && end_word
                else [ "$inword" = 1 ] && { io_number; end_word; }; [ ${#T} -ge 2 ] || need 2; redirect; fi; meta=1 ;;
-      # ( ) { } break words, so (git push -f) and { git push -f; } are read as the commands inside; the word after one
+      # Parentheses and standalone braces delimit groups, so (git push -f) and { git push -f; } are checked; the word after one
       # is in command position.
       '(') [ "$inword" = 1 ] && end_word; meta=1 segstart=1; [ -n "$T" ] || need 1
            if [ "$arith" = 0 ] && [ "${T:0:1}" = '(' ]; then T=${T:1}; depth=$((depth + 2)); arith=$depth
@@ -150,7 +150,16 @@ scan_cmds() {
              '>'*) T=${T:1}; target=r ;;
              *) end_cmd; end_pipe ;;
            esac ;;
-      '{'|'}') [ "$inword" = 1 ] && end_word; meta=0 segstart=1 ;;
+      '{'|'}')
+        # Braces group commands only as standalone words. In -I{} and {bash} they are literal word characters.
+        [ -n "$T" ] || need 1
+        if [ "$inword" = 1 ]; then W=$W$c; meta=0
+        else
+          case ${T:0:1} in
+            ''|' '|$'\t'|';'|'&'|'|'|'('|')'|'<'|'>') meta=0 segstart=1 ;;
+            *) W=$W$c; inword=1; meta=0 ;;
+          esac
+        fi ;;
       # A # that starts a word starts a comment, which ends at the newline.
       '#') if [ "$inword" = 0 ] && [ "$meta" = 1 ]; then skip_line; else W=$W'#'; inword=1; meta=0; fi ;;
       # Outside quotes a backslash makes the next character literal; a backslash-newline joins the two lines.
@@ -469,8 +478,6 @@ check_simple() {
   sh_i=-1; ev_i=-1; any=0; prev=''; k=0
   while [ "$k" -lt "$n" ]; do
     w=${words[k]}
-    # A group boundary starts a command even after wrapper flags such as xargs -I{}.
-    [ "${cpos[k]:-}" = 1 ] && { any=0; take=0; operand=0; }
     if [ "$any" = 1 ]; then
       if [ "$take" = 1 ]; then take=0; k=$((k + 1)); continue; fi
       case $w in
