@@ -1,0 +1,18 @@
+{
+  "schema": "buildguild.trial.v1",
+  "slug": "handoff-v2",
+  "name": "Handoff after a blocked test run",
+  "version": "2.0.0",
+  "kind": "community",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "summary": "Check that a build updates documentation, attempts the tests, and reports a missing dependency in a structured handoff.",
+  "categories": ["delivery"],
+  "measures": ["handoff"],
+  "cases": [
+    { "name": "handoff-after-partial-failure", "dimension": "handoff", "runs": 1 }
+  ],
+  "tolerance": { "overall": 0.1, "dimension": 0.25 },
+  "hiddenSlice": { "count": 0, "published": null },
+  "runner": "claude plugin eval"
+}

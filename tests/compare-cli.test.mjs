@@ -5,18 +5,25 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { runnerTracePrefix } from '../cli/comparison-responses.mjs';
 
 const cli = fileURLToPath(new URL('../cli/buildguild.mjs', import.meta.url));
+const traceBase = () => realpathSync(process.platform === 'darwin' ? '/tmp' : tmpdir());
 const readme = 'This comparison fixture documents the local sample build and trial. It contains a synthetic task for exercising the command line workflow and enough documentation to satisfy validation. The fixture only uses locally generated data and can be run repeatedly in an isolated temporary folder.';
 const stub = `
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const args = process.argv.slice(2);
-if (args[0] === '--version') { console.log('2.1.309 (Claude Code)'); process.exit(0); }
+if (args[0] === '--version') {
+  console.log(process.env.BG_COMPARE_SCENARIO === 'unsupported-version' ? '2.1.313 (Claude Code)' : '2.1.314 (Claude Code)');
+  process.exit(0);
+}
 if (args[1] === 'validate') process.exit(0);
 if (args.includes('--help')) {
-  console.log('--eval-dir --ablation --runs --max-cost-usd --no-publish');
+  console.log('--eval-dir --ablation --runs --max-cost-usd --no-publish'
+    + (process.env.BG_COMPARE_SCENARIO === 'no-keep-temp' ? '' : ' --keep-temp'));
   process.exit(0);
 }
 const label = basename(process.cwd());
@@ -38,13 +45,32 @@ const arm = {
   graders: [{ name: grader.name, passed: acceptance, weight: 1, scored: true, withOnly: false }],
 };
 const partial = label === 'incumbent' && process.env.BG_COMPARE_SCENARIO === 'partial';
+function attempt(_, index) {
+  const root = mkdtempSync(join(realpathSync(process.platform === 'darwin' ? '/tmp' : tmpdir()), process.env.BG_COMPARE_TRACE_PREFIX));
+  appendFileSync(process.env.BG_COMPARE_TRACE_ROOTS, root + '\\n');
+  const output = join(root, 'out');
+  mkdirSync(output, { mode: 0o700 });
+  const tracePath = join(output, 'trace.jsonl');
+  const final = label + ' response ' + (index + 1) + ' <script>alert(1)</script>';
+  const assistant = (content, parent_tool_use_id = null) => ({ type: 'assistant', parent_tool_use_id, message: { content } });
+  const rows = [
+    assistant([{ type: 'thinking', thinking: 'private reasoning' }, { type: 'text', text: 'interim progress' }]),
+    assistant([{ type: 'text', text: 'child-only output' }], 'toolu_child'),
+    assistant([{ type: 'text', text: final }]),
+  ];
+  if (process.env.BG_COMPARE_SCENARIO !== 'no-terminal-' + label) {
+    rows.push({ type: 'result', subtype: 'success', is_error: false, result: final });
+  }
+  writeFileSync(tracePath, rows.map(row => JSON.stringify(row)).join('\\n') + '\\n', { mode: 0o600 });
+  return { ...arm, tracePath };
+}
 const report = {
-  schemaVersion: 1, claudeVersion: '2.1.309', partial,
+  schemaVersion: 1, claudeVersion: '2.1.314', partial,
   suite: { root: process.cwd(), ablation: value('--ablation'), modelOverride: value('--model'),
     concurrency: Number(value('-j')), plugins: [plugin] },
   costUsd: partial ? 0.75 : 0.1, durationSeconds: 5,
   cases: [{ name: 'case-name', runsPerCase: 1, graders: [grader],
-    arms: { with: Array.from({ length: partial ? 1 : Number(value('--runs')) }, () => arm) } }],
+    arms: { with: Array.from({ length: partial ? 1 : Number(value('--runs')) }, attempt) } }],
 };
 writeFileSync(value('--json'), JSON.stringify(report));
 if (partial) process.exit(2);
@@ -53,7 +79,17 @@ if (arm.score < Number(value('--threshold'))) process.exit(1);
 
 function setup(t) {
   const root = mkdtempSync(join(tmpdir(), 'bg-compare-test-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const traceRoots = join(root, 'trace-roots.log');
+  t.after(() => {
+    if (existsSync(traceRoots)) {
+      for (const path of readFileSync(traceRoots, 'utf8').trim().split('\n')) {
+        assert.equal(dirname(path), traceBase());
+        assert.match(path, new RegExp('/' + runnerTracePrefix() + '[a-z0-9]{6}$', 'i'));
+        rmSync(path, { recursive: true, force: true });
+      }
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
   const write = (relative, contents, mode = 0o600) => {
     const target = join(root, relative);
     mkdirSync(dirname(target), { recursive: true });
@@ -94,7 +130,7 @@ function setup(t) {
   ], {
     cwd: root, encoding: 'utf8', timeout: 15_000,
     env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`,
-      BG_COMPARE_LOG: log, BG_COMPARE_FIXTURE_MARKER: fixtureMarker, BG_COMPARE_SCENARIO: scenario },
+      BG_COMPARE_LOG: log, BG_COMPARE_TRACE_PREFIX: runnerTracePrefix(), BG_COMPARE_TRACE_ROOTS: traceRoots, BG_COMPARE_FIXTURE_MARKER: fixtureMarker, BG_COMPARE_SCENARIO: scenario },
   });
   return {
     root, out, fixtureMarker, run,
@@ -124,6 +160,7 @@ test('compares both local builds on the same staged trial and keeps results priv
       assert.equal(args[args.indexOf(flag) + 1], value);
     }
     assert.ok(args.includes('--no-publish'));
+    assert.ok(args.includes('--keep-temp'));
   }
   const report = fixture.report();
   assert.equal(report.status, 'complete');
@@ -133,6 +170,25 @@ test('compares both local builds on the same staged trial and keeps results priv
   assert.match(report.trial.sha256, /^[a-f0-9]{64}$/);
   const html = readFileSync(join(fixture.out, 'report.html'), 'utf8');
   assert.doesNotMatch(html, /<em>Local trial<\/em>/);
+  assert.match(html, /candidate response 1 &lt;script&gt;/);
+  assert.doesNotMatch(html, /<script>alert/);
+  for (const label of ['incumbent', 'candidate']) {
+    const responses = readFileSync(join(fixture.out, 'runs', label, 'responses.json'), 'utf8');
+    const evidence = JSON.parse(responses);
+    assert.equal(evidence.schema, 'buildguild.responses.v1');
+    assert.deepEqual(evidence, report[label].result.responseEvidence);
+    assert.doesNotMatch(responses, /private reasoning|interim progress|child-only output/);
+    const [entry] = evidence.cases;
+    assert.equal(entry.name, 'case-name');
+    assert.equal(entry.attempts.length, 3);
+    for (const [index, attempt] of entry.attempts.entries()) {
+      assert.equal(attempt.number, index + 1);
+      assert.equal(attempt.status, 'complete');
+      assert.equal(attempt.finalResponse, label + ' response ' + (index + 1) + ' <script>alert(1)</script>');
+      assert.equal(attempt.graderTargetText, attempt.finalResponse);
+      assert.match(attempt.traceSha256, /^[0-9a-f]{64}$/);
+    }
+  }
   assert.equal(existsSync(fixture.fixtureMarker), false);
   assert.equal(existsSync(join(fixture.out, 'inputs/incumbent/.git')), false);
   assert.equal(readFileSync(join(fixture.root, 'incumbent/evals/obsolete/graders/broken.md'), 'utf8'), 'invalid old grader');
@@ -164,7 +220,7 @@ test('ignores a stale report in the incumbent build when the runner writes no fr
   const stale = {
     suite: { root: stagedPath, ablation: 'none', modelOverride: 'test-model',
       concurrency: 1, plugins: [{ name: 'incumbent', version: '1.0.0', path: stagedPath }] },
-    schemaVersion: 1, claudeVersion: '2.1.309', partial: false, costUsd: 0.1, durationSeconds: 5,
+    schemaVersion: 1, claudeVersion: '2.1.314', partial: false, costUsd: 0.1, durationSeconds: 5,
     cases: [{
       name: 'case-name', runsPerCase: 3, graders: [grader],
       arms: { with: Array.from({ length: 3 }, () => ({
@@ -222,4 +278,43 @@ test('reports a disabled candidate plugin as inconclusive despite passing grades
   assert.equal(report.acceptanceDelta, null);
   assert.equal(report.candidate.result.counts.accepted, 0);
   assert.match(report.candidate.result.issues.join(' '), /plugin/i);
+});
+
+test('keeps missing terminal responses explicit and the comparison inconclusive', t => {
+  const fixture = setup(t);
+  expectExit(fixture.run('no-terminal-candidate'), 2);
+  const report = fixture.report();
+  assert.equal(report.status, 'inconclusive');
+  assert.equal(report.acceptanceDelta, null);
+  const attempt = report.candidate.result.responseEvidence.cases[0].attempts[0];
+  assert.equal(attempt.status, 'incomplete');
+  assert.equal(attempt.finalResponse, null);
+  assert.match(attempt.issue, /terminal|result|success|final response/i);
+});
+
+test('checks trace retention support before evaluating', t => {
+  const fixture = setup(t);
+  const result = fixture.run('no-keep-temp');
+  expectExit(result, 1);
+  assert.match(result.stderr, /keep-temp/);
+  assert.deepEqual(fixture.calls(), []);
+});
+
+test('preserves the candidate allocation when incumbent response evidence is incomplete', t => {
+  const fixture = setup(t);
+  expectExit(fixture.run('no-terminal-incumbent'), 2);
+  assert.deepEqual(fixture.calls().map(call => call.label), ['incumbent']);
+  const report = fixture.report();
+  assert.equal(report.status, 'inconclusive');
+  assert.equal(report.incumbent.result.responseEvidence.cases[0].attempts[0].status, 'incomplete');
+  assert.equal(report.candidate.result.counts.completed, 0);
+});
+
+test('rejects an unsupported runner version before evaluation', t => {
+  const fixture = setup(t);
+  const result = fixture.run('unsupported-version');
+  expectExit(result, 1);
+  assert.match(result.stderr, /2\.1\.314/);
+  assert.deepEqual(fixture.calls(), []);
+  assert.equal(existsSync(fixture.out), false);
 });

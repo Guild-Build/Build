@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { platform, release } from 'node:os';
 import { normalizeRun, createComparison, renderComparison } from './comparison-results.mjs';
+import { captureResponses, inventoryRunnerTraces, responseRunnerVersion } from './comparison-responses.mjs';
 
 const inside = (a, b) => a === b || a.startsWith(b + sep);
 const overlap = (a, b) => inside(a, b) || inside(b, a);
@@ -115,8 +116,10 @@ export async function compare(args, { checkFolder }) {
   const v = spawnSync('claude', ['--version'], { encoding: 'utf8', timeout: 15000 });
   const runnerVersion = v.status === 0 ? v.stdout.match(/\d+\.\d+\.\d+/)?.[0] : null;
   if (!runnerVersion) throw Error('claude is unavailable; install Claude Code with plugin eval support');
+  if (runnerVersion !== responseRunnerVersion) throw Error(`response capture is verified for Claude Code ${responseRunnerVersion}; installed ${runnerVersion}. No evaluation started.`);
   const help = spawnSync('claude', ['plugin', 'eval', '--help'], { encoding: 'utf8', timeout: 15000 });
-  for (const option of ['--eval-dir', '--ablation', '--runs', '--max-cost-usd', '--no-publish']) if (help.status !== 0 || !help.stdout.includes(option)) throw Error(`installed runner does not advertise ${option}; no evaluation started`);
+  for (const option of ['--eval-dir', '--ablation', '--runs', '--max-cost-usd', '--no-publish', '--keep-temp']) if (help.status !== 0 || !help.stdout.includes(option)) throw Error(`installed runner does not advertise ${option}; no evaluation started`);
+  inventoryRunnerTraces(); // Check platform and temporary storage before starting.
 
   mkdirSync(output, { mode: 0o700 }); // exclusive: a racing directory creation fails
   const oldMask = process.umask(0o077);
@@ -128,18 +131,19 @@ export async function compare(args, { checkFolder }) {
     const trialRecord = json(join(inputs[2], 'trial.json'));
     const cases = deterministicCases(inputs[2], trialRecord);
     const trial = { slug: trialRecord.slug, version: trialRecord.version, sha256: treeHash(inputs[2]), cases };
-    const settings = { model: opts.model, runs: opts.runs, runnerVersion, effort: null, effortSource: 'runner default; not exposed by eval', ablation: 'none', concurrency: 1, acceptance: 'all deterministic graders pass', requestedMaxCostUsd: opts.total, os: `${platform()} ${release()}`, node: process.version };
+    const settings = { model: opts.model, runs: opts.runs, runnerVersion, responseCapture: 'buildguild.responses.v1', effort: null, effortSource: 'runner default; not exposed by eval', ablation: 'none', concurrency: 1, acceptance: 'all deterministic graders pass', requestedMaxCostUsd: opts.total, os: `${platform()} ${release()}`, node: process.version };
     const builds = inputs.slice(0, 2).map(p => { const manifest = json(join(p, 'buildguild.json')); const plugin = json(join(p, '.claude-plugin/plugin.json')); return { slug: manifest.slug, version: manifest.version ?? plugin.version, plugin: { name: plugin.name, version: plugin.version }, sha256: treeHash(p) }; });
     const rerun = ['node', fileURLToPath(new URL('./buildguild.mjs', import.meta.url)), 'compare', inputs[0], inputs[1], '--trial', inputs[2], '--model', opts.model, '--max-cost-usd', String(opts.total), '--runs', String(opts.runs), '--out', output + '-rerun'].map(quote).join(' ');
     const rounds = [];
     const hashes = [...builds.map(b => b.sha256), trial.sha256];
     const inputsMatch = () => { try { return inputs.every((p, i) => treeHash(p) === hashes[i]); } catch { return false; } };
     let inputIssue = null;
+    let evidenceIssue = null;
     let previousCost = 0;
     const half = Math.floor(opts.total * 500000) / 1000000;
     const plan = { schema: 'buildguild.comparison-plan.v1', visibility: 'private', trial, settings, builds, rerun };
     save(join(output, 'plan.json'), plan);
-    console.log(`Private comparison in ${output}\nFixtures and hooks execute as you. Local storage does not prevent model-provider processing.\nRequested total budget $${opts.total}; an in-flight attempt can exceed its allocation. No public submission.`);
+    console.log(`Private comparison in ${output}\nFixtures and hooks execute as you. Local storage does not prevent model-provider processing.\nFinal responses and grader text are retained locally. The runner also retains sealed temporary sandboxes and traces.\nRequested total budget $${opts.total}; an in-flight attempt can exceed its allocation. No public submission.`);
     for (let i = 0; i < 2; i++) {
       const allocation = previousCost === null ? 0 : Math.max(0, Math.min(half, opts.total - previousCost));
       if (!inputsMatch()) inputIssue = 'Saved inputs changed during comparison; results are inconclusive and further runs are skipped.';
@@ -154,14 +158,17 @@ export async function compare(args, { checkFolder }) {
       const runOutput = join(output, 'runs', labels[i]);
       mkdirSync(runOutput, { recursive: true, mode: 0o700 });
       const rawPath = join(runOutput, 'raw.json');
-      let raw = null, exitCode = null, reason = null;
+      let raw = null, exitCode = null, reason = null, traceInventory = null;
       if (inputIssue) {
         reason = inputIssue;
       } else if (allocation < half || allocation <= 0) {
         reason = previousCost === null ? 'Previous spend is unknown; candidate was not started.' : 'Remaining budget cannot fund the same allocation; candidate was not started.';
+      } else if (evidenceIssue) {
+        reason = 'Previous response capture was incomplete; candidate was not started.';
       } else {
-        const argv = ['plugin', 'eval', '.', '--eval-dir', 'evals', '--scaffold', '--allow-tools', 'Bash', 'Write', 'Edit', '--json', rawPath, '--no-publish', '--trust-plugin', '--ablation', 'none', '--runs', String(opts.runs), '--model', opts.model, '--max-cost-usd', String(allocation), '--threshold', '1', '-j', '1'];
+        const argv = ['plugin', 'eval', '.', '--eval-dir', 'evals', '--scaffold', '--allow-tools', 'Bash', 'Write', 'Edit', '--json', rawPath, '--no-publish', '--keep-temp', '--trust-plugin', '--ablation', 'none', '--runs', String(opts.runs), '--model', opts.model, '--max-cost-usd', String(allocation), '--threshold', '1', '-j', '1'];
         save(join(runOutput, 'invocation.json'), { executable: 'claude', argv, evaluatedSha256, allocatedMaxCostUsd: allocation });
+        traceInventory = inventoryRunnerTraces();
         const proc = spawnSync('claude', argv, { cwd: work, stdio: 'inherit' });
         exitCode = proc.status;
         try { raw = json(rawPath); } catch { reason = 'Runner did not produce a readable raw report.'; }
@@ -169,6 +176,13 @@ export async function compare(args, { checkFolder }) {
       }
       if (!inputsMatch()) inputIssue = 'Saved inputs changed during comparison; results are inconclusive and further runs are skipped.';
       const result = normalizeRun(raw, { cases, runs: opts.runs, exitCode, runnerVersion, model: opts.model, plugin: { ...builds[i].plugin, path: work } });
+      result.responseEvidence = captureResponses(raw, { cases, runs: opts.runs, inventory: traceInventory });
+      save(join(runOutput, 'responses.json'), result.responseEvidence);
+      if (!result.responseEvidence.complete) {
+        evidenceIssue = 'Some planned responses were not retained as confirmed final responses.';
+        result.issues.push(evidenceIssue);
+        result.complete = false;
+      }
       if (reason) { result.issues.push(reason); result.complete = false; }
       if (inputIssue) for (const r of [...rounds.map(round => round.result), result]) {
         if (!r.issues.includes(inputIssue)) r.issues.push(inputIssue);
