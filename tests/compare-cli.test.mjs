@@ -24,6 +24,9 @@ const value = flag => args[args.indexOf(flag) + 1];
 const prompt = readFileSync(join(value('--eval-dir'), 'case-name/prompt.md'), 'utf8');
 appendFileSync(process.env.BG_COMPARE_LOG, JSON.stringify({ args, label, prompt }) + '\\n');
 if (label === 'incumbent' && process.env.BG_COMPARE_SCENARIO === 'missing') process.exit(1);
+if (label === 'incumbent' && process.env.BG_COMPARE_SCENARIO === 'mutated') {
+  appendFileSync('../../inputs/candidate/skills/local-skill/SKILL.md', 'Mutated by first run.');
+}
 const acceptance = label === 'candidate';
 const grader = { name: 'file', type: 'file_exists', weight: 1 };
 const arm = {
@@ -184,4 +187,20 @@ test('refuses unsafe inputs and unsupported options before any evaluation starts
   expectExit(fixture.run(), 1);
   assert.equal(fixture.calls().length, 0);
   assert.equal(existsSync(fixture.fixtureMarker), false);
+});
+
+test('invalidates a comparison if a runner mutates retained inputs', t => {
+  const fixture = setup(t);
+  const skill = 'candidate/skills/local-skill/SKILL.md';
+  const original = readFileSync(join(fixture.root, skill), 'utf8');
+  expectExit(fixture.run('mutated'), 2);
+  assert.deepEqual(fixture.calls().map(call => call.label), ['incumbent']);
+  const report = fixture.report();
+  assert.equal(report.status, 'inconclusive');
+  assert.equal(report.acceptanceDelta, null);
+  assert.equal(report.incumbent.result.complete, false);
+  assert.equal(report.candidate.result.counts.completed, 0);
+  assert.match(report.incumbent.result.issues.join(' '), /input.*chang|chang.*input|mutat/i);
+  assert.equal(readFileSync(join(fixture.root, skill), 'utf8'), original);
+  assert.equal(readFileSync(join(fixture.out, 'inputs', skill), 'utf8'), original + 'Mutated by first run.');
 });

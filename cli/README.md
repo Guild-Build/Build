@@ -79,7 +79,9 @@ failures, missing/ungraded results, known cost/time and descriptive case changes
 `plan.json` is written before execution. `inputs/` contains rerunnable snapshots;
 `work/` contains each evaluated copy; `runs/` contains invocations and fresh raw
 reports outside the evaluated input tree.
-An incomplete report is saved after the first arm. Existing output is never
+Saved input hashes are rechecked around execution. A change invalidates the
+comparison and skips further runs; the original source folders are not restored
+or modified. An incomplete report is saved after the first arm. Existing output is never
 overwritten. The rerun command uses the saved inputs and a new output directory.
 
 Private means no public upload: this schema cannot be submitted as season

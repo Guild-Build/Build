@@ -34,14 +34,14 @@ function parseArgs(args) {
 }
 
 // Reject links before reading content. A local comparison never imports a repository's .git or old eval output.
-function inventory(root, build = false, prefix = '') {
+function inventory(root, build = false, prefix = '', excludeGit = false) {
   return readdirSync(join(root, prefix)).sort().flatMap(name => {
-    if (!prefix && (name === '.git' || (build && name === 'evals'))) return [];
+    if (!prefix && ((excludeGit && name === '.git') || (build && name === 'evals'))) return [];
     const rel = prefix ? `${prefix}/${name}` : name;
     const st = lstatSync(join(root, rel));
     if (st.isSymbolicLink() || !(st.isFile() || st.isDirectory())) throw Error(`only regular files and directories are allowed: ${rel}`);
     if (['.env', '.env.local', 'credentials.json', 'id_rsa', 'id_ed25519'].includes(name)) throw Error(`remove credential file from comparison input: ${rel}`);
-    if (st.isDirectory()) return inventory(root, build, rel);
+    if (st.isDirectory()) return inventory(root, build, rel, excludeGit);
     return { rel, mode: st.mode & 0o111 ? 0o755 : 0o644 };
   });
 }
@@ -107,7 +107,7 @@ export async function compare(args, { checkFolder }) {
   const output = join(realpathSync(dirname(requested)), requested.slice(dirname(requested).length + 1));
   if (sources.some(p => overlap(output, p))) throw Error('--out must be outside every input folder and cannot contain an input');
   if (existsSync(output)) throw Error('--out must be a new directory; nothing was overwritten');
-  const files = sources.map((root, i) => inventory(root, i < 2));
+  const files = sources.map((root, i) => inventory(root, i < 2, '', true));
   const trialInput = json(join(sources[2], 'trial.json'));
   deterministicCases(sources[2], trialInput);
   // No fixture or plugin code is executed in preflight.
@@ -124,6 +124,7 @@ export async function compare(args, { checkFolder }) {
     const labels = ['incumbent', 'candidate', 'trial'];
     const inputs = labels.map(label => join(output, 'inputs', label));
     sources.forEach((source, i) => snapshot(source, inputs[i], files[i]));
+    for (let i = 0; i < 3; i++) checkFolder(inputs[i], i === 2 ? 'trial' : 'build', { structuralOnly: true, ignoreEvals: true });
     const trialRecord = json(join(inputs[2], 'trial.json'));
     const cases = deterministicCases(inputs[2], trialRecord);
     const trial = { slug: trialRecord.slug, version: trialRecord.version, sha256: treeHash(inputs[2]), cases };
@@ -131,6 +132,9 @@ export async function compare(args, { checkFolder }) {
     const builds = inputs.slice(0, 2).map(p => { const manifest = json(join(p, 'buildguild.json')); return { slug: manifest.slug, version: manifest.version, sha256: treeHash(p) }; });
     const rerun = ['node', fileURLToPath(new URL('./buildguild.mjs', import.meta.url)), 'compare', inputs[0], inputs[1], '--trial', inputs[2], '--model', opts.model, '--max-cost-usd', String(opts.total), '--runs', String(opts.runs), '--out', output + '-rerun'].map(quote).join(' ');
     const rounds = [];
+    const hashes = [...builds.map(b => b.sha256), trial.sha256];
+    const inputsMatch = () => { try { return inputs.every((p, i) => treeHash(p) === hashes[i]); } catch { return false; } };
+    let inputIssue = null;
     let previousCost = 0;
     const half = Math.floor(opts.total * 500000) / 1000000;
     const plan = { schema: 'buildguild.comparison-plan.v1', visibility: 'private', trial, settings, builds, rerun };
@@ -138,15 +142,22 @@ export async function compare(args, { checkFolder }) {
     console.log(`Private comparison in ${output}\nFixtures and hooks execute as you. Local storage does not prevent model-provider processing.\nRequested total budget $${opts.total}; an in-flight attempt can exceed its allocation. No public submission.`);
     for (let i = 0; i < 2; i++) {
       const allocation = previousCost === null ? 0 : Math.max(0, Math.min(half, opts.total - previousCost));
+      if (!inputsMatch()) inputIssue = 'Saved inputs changed during comparison; results are inconclusive and further runs are skipped.';
       const work = join(output, 'work', labels[i]);
-      snapshot(inputs[i], work, inventory(inputs[i]));
-      snapshot(join(inputs[2], 'cases'), join(work, 'evals'), inventory(join(inputs[2], 'cases')));
-      const evaluatedSha256 = treeHash(work);
+      let evaluatedSha256 = null;
+      if (!inputIssue) {
+        snapshot(inputs[i], work, inventory(inputs[i]));
+        snapshot(join(inputs[2], 'cases'), join(work, 'evals'), inventory(join(inputs[2], 'cases')));
+        evaluatedSha256 = treeHash(work);
+        if (!inputsMatch()) inputIssue = 'Saved inputs changed during comparison; results are inconclusive and further runs are skipped.';
+      }
       const runOutput = join(output, 'runs', labels[i]);
       mkdirSync(runOutput, { recursive: true, mode: 0o700 });
       const rawPath = join(runOutput, 'raw.json');
       let raw = null, exitCode = null, reason = null;
-      if (allocation < half || allocation <= 0) {
+      if (inputIssue) {
+        reason = inputIssue;
+      } else if (allocation < half || allocation <= 0) {
         reason = previousCost === null ? 'Previous spend is unknown; candidate was not started.' : 'Remaining budget cannot fund the same allocation; candidate was not started.';
       } else {
         const argv = ['plugin', 'eval', '.', '--eval-dir', 'evals', '--scaffold', '--allow-tools', 'Bash', 'Write', 'Edit', '--json', rawPath, '--no-publish', '--trust-plugin', '--ablation', 'none', '--runs', String(opts.runs), '--model', opts.model, '--max-cost-usd', String(allocation), '--threshold', '1', '-j', '1'];
@@ -156,8 +167,13 @@ export async function compare(args, { checkFolder }) {
         try { raw = json(rawPath); } catch { reason = 'Runner did not produce a readable raw report.'; }
         if (proc.error || proc.signal) reason = 'Runner was interrupted or could not start.';
       }
+      if (!inputsMatch()) inputIssue = 'Saved inputs changed during comparison; results are inconclusive and further runs are skipped.';
       const result = normalizeRun(raw, { cases, runs: opts.runs, exitCode, runnerVersion });
       if (reason) { result.issues.push(reason); result.complete = false; }
+      if (inputIssue) for (const r of [...rounds.map(round => round.result), result]) {
+        if (!r.issues.includes(inputIssue)) r.issues.push(inputIssue);
+        r.complete = false;
+      }
       previousCost = result.costUsd;
       rounds.push({ build: { ...builds[i], evaluatedSha256 }, allocatedMaxCostUsd: allocation, result });
       // Persist an honest incomplete report after the first arm, so interruption preserves useful results.
