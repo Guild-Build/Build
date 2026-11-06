@@ -474,9 +474,7 @@ check_simple() {
       case $w in
         --) wrapper=''; k=$((k + 1)); continue ;;
         -*|+*)
-          case $wrapper:$w in
-            env:-u|env:--unset|env:-C|env:--chdir|sudo:-u|sudo:--user|sudo:-g|sudo:--group|sudo:-h|sudo:--host|sudo:-p|sudo:--prompt|sudo:-C|sudo:--close-from|sudo:-T|sudo:--command-timeout|sudo:-r|sudo:--role|sudo:-t|sudo:--type|sudo:-D|sudo:--chdir|sudo:-R|sudo:--chroot|sudo:-U|sudo:--other-user|doas:-u|nice:-n|nice:--adjustment|timeout:-s|timeout:--signal|timeout:-k|timeout:--kill-after|flock:-w|flock:--wait|flock:-E|flock:--conflict-exit-code|stdbuf:-i|stdbuf:-o|stdbuf:-e|watch:-n|watch:--interval|xargs:-I|xargs:-J|xargs:-L|xargs:-n|xargs:-P|xargs:-s|xargs:-E|exec:-a) take=1 ;;
-          esac
+          wrapper_option
           k=$((k + 1)); continue ;;
       esac
       if [[ $w =~ $assignment ]] || { [ "$wrapper" = time ] && [ "$w" = '!' ]; }; then k=$((k + 1)); continue; fi
@@ -520,6 +518,26 @@ check_simple() {
     scan_source "${w# }" $((level + 1))
   fi
   return 0
+}
+
+# Set take when a wrapper option consumes the next word. In a short cluster, the first option that takes a value
+# uses the rest of the cluster if present, otherwise the next word (sudo -Hu root and sudo -Huroot).
+wrapper_option() {
+  local flags='' p=1 ch
+  case $wrapper:$w in
+    env:--unset|env:--chdir|sudo:--user|sudo:--group|sudo:--host|sudo:--prompt|sudo:--close-from|sudo:--command-timeout|sudo:--role|sudo:--type|sudo:--chdir|sudo:--chroot|sudo:--other-user|nice:--adjustment|timeout:--signal|timeout:--kill-after|flock:--wait|flock:--conflict-exit-code|watch:--interval|time:--format|time:--output)
+      take=1; return ;;
+  esac
+  case $w in --*) return ;; esac
+  case $wrapper in
+    env) flags=uC ;; sudo) flags=ughpCTrtDRU ;; doas) flags=u ;; nice) flags=n ;;
+    timeout) flags=sk ;; flock) flags=wE ;; stdbuf) flags=ioe ;; watch) flags=n ;;
+    xargs) flags=IJLnPsEad ;; exec) flags=a ;; time) flags=fo ;;
+  esac
+  while [ "$p" -lt ${#w} ]; do
+    ch=${w:p:1}; p=$((p + 1))
+    case $flags in *"$ch"*) [ "$p" = "${#w}" ] && take=1; return ;; esac
+  done
 }
 
 # Set j to the index of the command string of the shell at sh_i, or -1 if -c is not set. -c is c in any option
