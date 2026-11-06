@@ -7,7 +7,7 @@ A build for teams that let coding agents open pull requests under review rules. 
 - **independent-reviewer** (agent): reviews a diff it did not write, with the author's reasoning withheld.
 - **merge-guard** (PreToolUse hook): blocks force pushes and pull-request merges from the authoring session. The author proposes; a different identity merges.
 
-The merge guard reads each Bash command the way the shell splits it, including the commands inside `bash -c`, `eval`, command substitutions, and here-documents or pipes that a shell reads. It reads only the command's text, so it does not catch:
+The merge guard reads each Bash command the way the shell splits it, including the commands inside `bash -c`, `eval`, command substitutions, and here-documents or pipes that a shell reads. Each nested command or shell reading a pipe counts toward a three-level limit; parameter expansions (`${...}`) have a separate limit of 16. Deeper input is blocked before parsing can exceed the hook timeout or exhaust the stack. It reads only the command's text, so it does not catch:
 
 - git aliases, shell aliases and git config, such as an alias for `push --force` or a `+refspec` or mirror setting for a remote;
 - a git name or a command produced by a variable or by another command's output, such as `$GIT push -f` or `sh -c "$(cat cmd.txt)"`;
