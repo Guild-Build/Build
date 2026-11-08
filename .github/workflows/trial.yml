@@ -234,11 +234,12 @@ jobs:
         id: scan
         if: ${{ always() && matrix.verify_only != 'true' }}
         # GitHub masks the key in logs but not in uploaded files, which anyone signed in to GitHub can download from a
-        # public repository. The job fails and nothing is uploaded if the folder holds anything but regular files and
-        # folders (the upload follows links; grep reads regular files only), or if the key or the workspace id is in a
-        # file or in a file or folder name. The log names the paths, with those values blanked out.
+        # public repository. The job fails and nothing is uploaded if the folder is itself a link or holds anything but
+        # regular files and folders (the upload follows links; find and grep do not), or if the key or the workspace id
+        # is in a file or in a file or folder name. The log names the paths, with those values blanked out.
         run: |
           OUT_DIR="$RUNNER_TEMP/upload"
+          if [ -L "$OUT_DIR" ]; then echo "::error::the upload folder is itself a link, which the upload would follow; nothing is uploaded"; exit 1; fi
           if [ -z "$(find "$OUT_DIR" -mindepth 1 2>/dev/null)" ]; then echo "no files to upload"; exit 0; fi
           if [ -z "${ANTHROPIC_API_KEY:-}" ]; then echo "::error::the key is not in this job, so the files cannot be checked; nothing is uploaded"; exit 1; fi
           found=0
