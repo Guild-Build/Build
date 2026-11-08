@@ -2,7 +2,7 @@
 
 The command-line companion to [buildguild.gg](https://buildguild.gg/). Node 22 or later, no dependencies.
 
-Run from a checkout of the Build repository; the `buildguild` npm package is not published yet, so do not run it with `npx`.
+Run from a checkout of [github.com/Guild-Build/Build](https://github.com/Guild-Build/Build); the `buildguild` npm package is not published yet, so do not run it with `npx`.
 
 ```
 node cli/buildguild.mjs new build my-desk
