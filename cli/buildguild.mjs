@@ -610,7 +610,7 @@ async function publish(target) {
 function fileURLToPathSafe() { return new URL(import.meta.url).pathname; }
 
 const help = `buildguild · the BuildGuild companion (${ORIGIN})
-Run from a checkout of the Build repository; the buildguild npm package is not published yet, so do not run it with npx.
+Run from a checkout of https://github.com/Guild-Build/Build; the buildguild npm package is not published yet, so do not run it with npx.
 
   node cli/buildguild.mjs list          builds this season with tiers
   node cli/buildguild.mjs show <slug>   one build's modules, profiles, evidence
