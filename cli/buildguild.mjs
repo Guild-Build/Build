@@ -271,7 +271,7 @@ async function modulePins(bundleDir) {
 // Each case's dimension comes from the trial record; the eval report itself carries no tags. Every record names the trial
 // version it ran, which the tier rules count by; a run on a local trial folder is also marked trialSource "local", so
 // submit can refuse it.
-function wrap(rawPath, { build, buildVersion, trialRecord, local = false, sha256, role, runner, modules = [], reliabilityCase = 'fix-the-failing-test' }) {
+function wrap(rawPath, { build, buildVersion, trialRecord, local = false, sha256, role, runner, modules = [], reliabilityCase = 'fix-the-failing-test', idSuffix = '' }) {
   const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
   const dimensionOf = name => trialRecord.cases.find(c => c.name === name)?.dimension || null;
   const dims = {};
@@ -289,7 +289,7 @@ function wrap(rawPath, { build, buildVersion, trialRecord, local = false, sha256
   // Cost dimension, as published on the trial page: 1 minus (list-price USD per passed case) / 2, clamped to 0..1.
   if (typeof raw.costUsd === 'number' && passed > 0) dims.cost = Number(Math.max(0, Math.min(1, 1 - (raw.costUsd / passed) / 2)).toFixed(3));
   return {
-    schema: 'buildguild.evidence.v1', id: `${new Date().toISOString().slice(0, 10)}-${runner}-${Math.random().toString(36).slice(2, 8)}`,
+    schema: 'buildguild.evidence.v1', id: `${new Date().toISOString().slice(0, 10)}-${runner}-${Math.random().toString(36).slice(2, 8)}${idSuffix}`,
     build, buildVersion, archiveSha256: sha256 || null, trial: trialRecord.slug, trialVersion: trialRecord.version, ...(local ? { trialSource: 'local' } : {}), date: new Date().toISOString().slice(0, 10), runner, role, gist: null,
     environment: { ...fingerprint(), claudeCode: raw.claudeVersion || fingerprint().claudeCode, modules },
     results: { overallScore: raw.aggregates?.overallScore ?? 0, casesPassed: passed, casesTotal: raw.aggregates?.casesTotal ?? 0, meanDelta: raw.aggregates?.meanDelta ?? null, dimensions: dims, partial: !!raw.partial, cases: (raw.cases || []).map(c => ({ name: c.name, score: c.aggregates?.score ?? null, delta: c.aggregates?.delta ?? null })) },
@@ -299,8 +299,13 @@ function wrap(rawPath, { build, buildVersion, trialRecord, local = false, sha256
 }
 
 async function test(slug) {
-  if (!slug) die('usage: buildguild test <slug|path> --model <id> [--trial slug|path] [--max-cost-usd 5] [--runs n] [-j n] [--out evidence.json]');
+  if (!slug) die('usage: buildguild test <slug|path> --model <id> [--trial slug|path] [--max-cost-usd 5] [--runs n] [-j n] [--rep k] [--out evidence.json]');
   const model = modelId(); // first, so a run without a model downloads, resets and spends nothing
+  // --rep k numbers one of several runs of the same build on the same trial: the evidence id ends in -rep<k>, and so does
+  // the default file name. Without it every id and name is as it always was.
+  const repFlag = flag('rep');
+  if (repFlag !== undefined && !(typeof repFlag === 'string' && /^[1-9]\d*$/.test(repFlag))) die('--rep needs a whole number of at least 1; nothing was run');
+  const repSuffix = repFlag === undefined ? '' : `-rep${repFlag}`;
   // A trial folder is checked first, so a broken one is reported even where claude is missing, and before any download.
   const local = localTrial(flag('trial'));
   const trialSlug = local ? null : trialSlugOf(flag('trial', 'guild-smoke-v1'));
@@ -352,8 +357,8 @@ async function test(slug) {
   const errors = arms.map(a => a.error).filter(Boolean);
   if (arms.length && errors.length === arms.length) die(`every agent run ended in an error, so no evidence file was written. First error: ${errors[0]}${rawCheck.partialReason ? ` (partial: ${rawCheck.partialReason})` : ''}`, 2);
   if (errors.length) console.error(`note: ${errors.length} of ${arms.length} agent runs ended in an error; first: ${errors[0]}`);
-  const ev = wrap(rawPath, { build: !existsSync(slug) ? slug : JSON.parse(readFileSync(join(bundleDir, 'buildguild.json'), 'utf8')).slug, buildVersion: meta.version, trialRecord, local: !!local, sha256: meta.sha256, role: flag('role', 'author'), runner, modules });
-  const outPath = resolve(String(flag('out', local ? 'local-run.json' : 'evidence.json')));
+  const ev = wrap(rawPath, { build: !existsSync(slug) ? slug : JSON.parse(readFileSync(join(bundleDir, 'buildguild.json'), 'utf8')).slug, buildVersion: meta.version, trialRecord, local: !!local, sha256: meta.sha256, role: flag('role', 'author'), runner, modules, idSuffix: repSuffix });
+  const outPath = resolve(String(flag('out', `${local ? 'local-run' : 'evidence'}${repSuffix}.json`)));
   writeFileSync(outPath, JSON.stringify(ev, null, 2) + '\n');
   const result = `  overall ${Math.round(ev.results.overallScore * 100)}%${typeof ev.results.meanDelta === 'number' ? `, ${vsBare(ev.results.meanDelta)}` : ''}, ${ev.results.casesPassed}/${ev.results.casesTotal} cases${ev.cost ? `, est. $${ev.cost.usd}` : ''}${ev.results.partial ? ' (PARTIAL: cost ceiling hit)' : ''}`;
   if (local) out(`\nlocal run: ${outPath}\n${result}\nnot evidence: a run on a local trial folder is for its author; only a run on a published trial can be submitted.`);
@@ -635,12 +640,13 @@ Run from a checkout of https://github.com/Guild-Build/Build; the buildguild npm 
   node cli/buildguild.mjs publish [path] [--repo url] [--github login] [--email a] [--summary s] [--yes]
                                         check, show the submission, ask for the consents, then post it to the guild
   node cli/buildguild.mjs trial [slug]  download a trial's cases into .buildguild/trials/
-  node cli/buildguild.mjs test <slug|path> --model <id> [--trial slug|path] [--max-cost-usd 5] [--runs n] [-j n] [--out evidence.json] [--raw-out raw.json] [--work-dir dir]
+  node cli/buildguild.mjs test <slug|path> --model <id> [--trial slug|path] [--max-cost-usd 5] [--runs n] [-j n] [--rep k] [--out evidence.json] [--raw-out raw.json] [--work-dir dir]
                                         run a published trial (default guild-smoke-v1) with claude plugin eval (Claude Code 2.1.269+) in a temp copy,
                                         write an evidence file. A trial folder of your own is checked first; its run goes to local-run.json, not evidence.
                                         environment.modules records each module ref and its GitHub commit SHA at run time, or null when unavailable.
                                         --model names the model it runs on (the hosted season trial: claude-sonnet-5-5); ANTHROPIC_MODEL may stand in
                                         --work-dir is deleted first, so it may not be /, home, the current directory or above, or in or around the build or trial folder
+                                        --rep k marks run k of several of the same build on the same trial: the evidence id and the default file name end in -rep<k>
   node cli/buildguild.mjs wrap <aggregate.json> --build <slug> --trial <slug|path> --model <id> [--build-version v] [--runner login]
                                         convert a raw eval report into buildguild.evidence.v1 naming the model it ran on (from a trial folder: a local record)
   node cli/buildguild.mjs submit <evidence.json> [--yes]

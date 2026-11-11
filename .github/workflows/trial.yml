@@ -1,8 +1,10 @@
 name: Season trial
 # Runs Season trials: one guild build from bundles/ on one trial as buildguild.gg publishes it, with the official eval
 # runner, then uploads the evidence record, the raw report, the results and the agent traces. A maintainer starts it in
-# one of two ways: merge a change to .github/trial-queue.json into main (each request in the file becomes one run; see
-# "Season trials" in README.md), or dispatch it from the Actions tab with the inputs below. Either way each run waits for
+# one of two ways: merge a change to .github/trial-queue.json into main (each request in the file becomes one run, or
+# `repeat` runs of the same build on the same trial; see "Season trials" in README.md), or dispatch it from the Actions tab
+# with the inputs below. A repeated request's runs carry -rep<k> at the end of their evidence id, file names and artifact
+# name, so no two collide; a request without repeat names everything as before. Either way each run waits for
 # the owner's approval in the `trials` environment before it signs in to Azure or spends anything, and a queue with no
 # requests starts nothing. The Anthropic key is read at run time from Azure Key Vault vaultgb01 (secret
 # buildguild-anthropic-api-key) through a federated identity; no copy of the key is held on GitHub. This repository is
@@ -36,6 +38,10 @@ on:
         description: Only verify the vault login and key presence; run nothing
         required: false
         default: "false"
+      repeat:
+        description: How many times to run the build on the trial, one run after another (a whole number from 1 to 5)
+        required: false
+        default: "1"
 permissions:
   contents: read
 env:
@@ -59,50 +65,14 @@ jobs:
           BG_MAX_COST_USD: ${{ inputs.max_cost_usd }}
           BG_MODEL: ${{ inputs.model }}
           BG_VERIFY_ONLY: ${{ inputs.verify_only }}
+          BG_REPEAT: ${{ inputs.repeat }}
         # Each request is checked before anyone is asked to approve it: a build that is not in bundles/, a trial the site
-        # does not publish, or a ceiling that is not a positive number stops the plan, and with it the whole workflow.
-        run: |
-          node --input-type=module <<'JS'
-          import { appendFileSync, existsSync, readFileSync } from 'node:fs';
-          const env = process.env;
-          const QUEUE = '.github/trial-queue.json';
-          const FIELDS = ['build', 'trial', 'max_cost_usd', 'model', 'concurrency', 'verify_only'];
-          const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-          const stop = msg => { console.log(`::error::${msg}`); process.exit(1); };
-          const dispatched = env.GITHUB_EVENT_NAME === 'workflow_dispatch';
-          const requests = dispatched
-            ? [{ build: env.BG_BUILD, trial: env.BG_TRIAL, max_cost_usd: env.BG_MAX_COST_USD, model: env.BG_MODEL, verify_only: env.BG_VERIFY_ONLY }]
-            : JSON.parse(readFileSync(QUEUE, 'utf8')).requests;
-          if (!Array.isArray(requests)) stop(`${QUEUE} needs a "requests" list`);
-          const matrix = requests.map((r, i) => {
-            const where = dispatched ? 'the dispatch inputs' : `request ${i + 1} in ${QUEUE}`;
-            if (typeof r !== 'object' || r === null || Array.isArray(r)) stop(`${where}: a request is an object`);
-            const unknown = Object.keys(r).filter(k => !FIELDS.includes(k));
-            if (unknown.length) stop(`${where}: unknown field ${unknown.join(', ')}`);
-            const m = { build: String(r.build ?? ''), trial: String(r.trial ?? ''), max_cost_usd: String(r.max_cost_usd ?? 5), model: String(r.model ?? 'claude-sonnet-5-5'), concurrency: String(r.concurrency ?? 1), verify_only: String(r.verify_only ?? false) };
-            if (!SLUG.test(m.build) || !existsSync(`bundles/${m.build}/buildguild.json`)) stop(`${where}: no build at bundles/${m.build}`);
-            if (!SLUG.test(m.trial)) stop(`${where}: the trial "${m.trial}" is not a slug`);
-            if (!/^\d+(\.\d+)?$/.test(m.max_cost_usd) || !(Number(m.max_cost_usd) > 0)) stop(`${where}: max_cost_usd must be a positive number of US dollars`);
-            if (!/^[A-Za-z0-9][A-Za-z0-9._[\]-]*$/.test(m.model)) stop(`${where}: "${m.model}" is not a model id`);
-            if (!/^[1-9]\d*$/.test(m.concurrency)) stop(`${where}: concurrency must be a whole number of at least 1`);
-            if (m.verify_only !== 'true' && m.verify_only !== 'false') stop(`${where}: verify_only must be true or false`);
-            return m;
-          });
-          // The CLI fetches the same page during the run; a page it cannot read now would fail that run after approval.
-          for (const trial of new Set(matrix.filter(m => m.verify_only === 'false').map(m => m.trial))) {
-            const url = `${env.BUILDGUILD_ORIGIN}/trials/${trial}.json`;
-            const res = await fetch(url, { headers: { accept: 'application/json', 'user-agent': 'buildguild-cli' }, signal: AbortSignal.timeout(30000) }).catch(err => ({ ok: false, status: err.message }));
-            if (!res.ok) stop(`${url} cannot be read (${res.status}); a guild run uses the published trial, so nothing was started`);
-          }
-          appendFileSync(env.GITHUB_OUTPUT, `matrix=${JSON.stringify(matrix)}\n`);
-          console.log(`matrix=${JSON.stringify(matrix)}`);
-          // The run page shows this summary where the owner approves, so each approval names what it may spend.
-          const ceiling = matrix.filter(m => m.verify_only === 'false').reduce((sum, m) => sum + Number(m.max_cost_usd), 0);
-          const summary = matrix.length
-            ? ['| Build | Trial | Model | Ceiling |', '|---|---|---|---|', ...matrix.map(m => `| ${m.build} | ${m.trial} | ${m.model} | ${m.verify_only === 'true' ? 'verify only, runs nothing' : `${m.max_cost_usd} USD`} |`), '', `Each run waits for the owner's approval in the trials environment. Ceilings total ${Math.round(ceiling * 100) / 100} USD.`]
-            : ['No requests: no trial runs and nothing waits for approval.'];
-          if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, `${summary.join('\n')}\n`);
-          JS
+        # does not publish, a ceiling that is not a positive number, an unknown field, a repeat that is not a whole number
+        # from 1 to 5, a second request for a build and trial already requested, or two runs that would upload under one
+        # artifact name stops the plan, and with it the whole workflow. A request with repeat n becomes n runs, numbered
+        # rep 1 to n; without repeat it is one run, as before.
+        # The script (.github/scripts/plan-trial-runs.mjs) also writes the summary, with each ceiling times its repeats.
+        run: node .github/scripts/plan-trial-runs.mjs
   trial:
     needs: plan
     # GitHub evaluates this before it expands the matrix, so an empty plan skips the job: no approval request, no Azure
@@ -114,12 +84,15 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    # One run at a time, repeats included. An entry from a repeated request has a rep ("1" to "5"); any other entry has
+    # none, and GitHub reads a missing matrix property as an empty string, so such a run's name, files and artifact name
+    # are exactly as before.
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
         include: ${{ fromJSON(needs.plan.outputs.matrix) }}
-    name: ${{ matrix.build }} on ${{ matrix.trial }}
+    name: ${{ matrix.build }} on ${{ matrix.trial }}${{ matrix.rep && format(', run {0}', matrix.rep) || '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -200,26 +173,34 @@ jobs:
           BG_MAX_COST_USD: ${{ matrix.max_cost_usd }}
           BG_MODEL: ${{ matrix.model }}
           BG_CONCURRENCY: ${{ matrix.concurrency }}
+          BG_REP: ${{ matrix.rep }}
         # The eval creates each run's home and workspace under the system temp directory. Inside the sandbox /tmp is
         # replaced, which left the workspace read-only on this runner, so the temp directory is moved under the runner's
         # own work area. The CLI downloads the published trial from BUILDGUILD_ORIGIN and stops, saying so, if it cannot.
-        # The shell starts without the two token variables, as the key check above explains.
+        # The shell starts without the two token variables, as the key check above explains. A run of a repeated request
+        # passes --rep, which ends the evidence id in -rep<k>, and its file names end the same way; any other run passes
+        # neither.
         shell: env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL bash -e {0}
         run: |
           mkdir -p "$RUNNER_TEMP/evaltmp" && export TMPDIR="$RUNNER_TEMP/evaltmp"
-          node cli/buildguild.mjs test "bundles/$BG_BUILD" --trial "$BG_TRIAL" --max-cost-usd "$BG_MAX_COST_USD" --model "$BG_MODEL" -j "$BG_CONCURRENCY" --runner github-actions --role guild --out "evidence-$BG_BUILD-$BG_TRIAL.json" --raw-out "raw-$BG_BUILD-$BG_TRIAL.json" --work-dir "$RUNNER_TEMP/trial-run" --keep-temp
+          SUFFIX="${BG_REP:+-rep$BG_REP}"
+          REP_ARGS=()
+          if [ -n "$BG_REP" ]; then REP_ARGS=(--rep "$BG_REP"); fi
+          node cli/buildguild.mjs test "bundles/$BG_BUILD" --trial "$BG_TRIAL" --max-cost-usd "$BG_MAX_COST_USD" --model "$BG_MODEL" -j "$BG_CONCURRENCY" --runner github-actions --role guild --out "evidence-$BG_BUILD-$BG_TRIAL$SUFFIX.json" --raw-out "raw-$BG_BUILD-$BG_TRIAL$SUFFIX.json" --work-dir "$RUNNER_TEMP/trial-run" --keep-temp "${REP_ARGS[@]}"
       - name: Gather the files to upload
         if: ${{ always() && matrix.verify_only != 'true' }}
         env:
           BG_BUILD: ${{ matrix.build }}
           BG_TRIAL: ${{ matrix.trial }}
+          BG_REP: ${{ matrix.rep }}
         # One folder holds exactly what is uploaded. It starts empty, and copies follow links, so the scan reads the
         # bytes the upload sends.
         run: |
           OUT_DIR="$RUNNER_TEMP/upload"
+          SUFFIX="${BG_REP:+-rep$BG_REP}"
           rm -rf "$OUT_DIR"
           mkdir -p "$OUT_DIR"
-          for f in "evidence-$BG_BUILD-$BG_TRIAL.json" "raw-$BG_BUILD-$BG_TRIAL.json"; do
+          for f in "evidence-$BG_BUILD-$BG_TRIAL$SUFFIX.json" "raw-$BG_BUILD-$BG_TRIAL$SUFFIX.json"; do
             if [ -f "$f" ]; then cp -L "$f" "$OUT_DIR/"; fi
           done
           if [ -d "$RUNNER_TEMP/trial-run/evals/results" ]; then cp -RL "$RUNNER_TEMP/trial-run/evals/results" "$OUT_DIR/results"; fi
@@ -275,8 +256,10 @@ jobs:
           echo "only regular files and folders, and neither the key nor the workspace id in any name or file"
       - name: Upload the scanned files
         if: ${{ always() && matrix.verify_only != 'true' && steps.scan.outcome == 'success' }}
+        # Each run's artifact needs its own name, or its upload fails. The plan builds this name the same way (artifactName
+        # in .github/scripts/plan-trial-runs.mjs, kept in step by a test) and refuses two runs that would share one.
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: evidence-${{ matrix.build }}-${{ matrix.trial }}
+          name: evidence-${{ matrix.build }}-${{ matrix.trial }}${{ matrix.rep && format('-rep{0}', matrix.rep) || '' }}
           path: ${{ runner.temp }}/upload/
           if-no-files-found: warn

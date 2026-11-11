@@ -81,8 +81,10 @@ buildguild.gg publishes it, with the official eval runner, one run at a time and
 A maintainer queues runs with a pull request that changes [`.github/trial-queue.json`](.github/trial-queue.json):
 increase `run` by one and list the requests, each naming a `build`, a `trial`, a `max_cost_usd` ceiling and a pinned
 `model`. When it merges into `main`, the workflow plans one run per request; a request for a build that is not in
-`bundles/`, or for a trial buildguild.gg does not publish, stops the plan. A maintainer can also start a single run from
-the Actions tab with the same fields. Either way the project owner approves each run in the `trials` environment before
+`bundles/`, or for a trial buildguild.gg does not publish, stops the plan. A request may add `repeat` (1 to 5, default 1)
+to run the same build on the same trial that many times, one run after another; each repeated run's evidence id and files
+end in `-rep<k>`, and a queue may name each build and trial pair only once. A maintainer can also start a single request
+from the Actions tab with the same fields. Either way the project owner approves each run in the `trials` environment before
 it reads the key or spends anything, and an empty queue starts nothing.
 
 A guild record's attestation is the public URL of the run that produced it,
