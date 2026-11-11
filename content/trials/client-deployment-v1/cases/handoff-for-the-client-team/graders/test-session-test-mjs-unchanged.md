@@ -1,0 +1,8 @@
+---
+type: regex
+pattern: '^import test from \x27node:test\x27;\nimport assert from \x27node:assert\/strict\x27;\nimport \{ mkdirSync, readFileSync, rmSync, writeFileSync \} from \x27node:fs\x27;\n\n\/\/ Aster\x27s team reads out\/unit\.txt: every run of this suite records its exit code and the timeout it ran against\.\n\/\/ The old record goes first, so a run that is cut short leaves none behind, and the code under test is loaded only\n\/\/ after the exit hook is in place, so a run that cannot even load it still records a failure\.\nconst record = new URL\(\x27\.\.\/out\/unit\.txt\x27, import\.meta\.url\);\nrmSync\(record, \{ force: true \}\);\nprocess\.on\(\x27exit\x27, code => \{\n  let minutes = \x27unreadable\x27;\n  try \{ minutes = JSON\.parse\(readFileSync\(new URL\(\x27\.\.\/config\/app\.json\x27, import\.meta\.url\), \x27utf8\x27\)\)\.sessionTimeoutMinutes; \} catch \{\}\n  mkdirSync\(new URL\(\x27\.\.\/out\/\x27, import\.meta\.url\), \{ recursive: true \}\);\n  writeFileSync\(record, `unit exit=\$\{code\} sessionTimeoutMinutes=\$\{minutes\}\x5cn`\);\n\}\);\nconst \{ loadConfig, sessionTimeoutMs \} = await import\(\x27\.\.\/src\/session\.mjs\x27\);\n\ntest\(\x27the timeout follows the configured minutes\x27, \(\) => \{\n  assert\.equal\(sessionTimeoutMs\(\{ sessionTimeoutMinutes: 10 \}\), 600_000\);\n\}\);\ntest\(\x27the configured timeout is between 5 and 60 minutes\x27, \(\) => \{\n  const minutes = loadConfig\(\)\.sessionTimeoutMinutes;\n  assert\.ok\(Number\.isInteger\(minutes\) && minutes >= 5 && minutes <= 60\);\n\}\);\n$'
+target:
+  source: file
+  path: test/session.test.mjs
+weight: 0.5
+---
