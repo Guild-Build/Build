@@ -4,5 +4,5 @@ pattern: '^\{\n  "release": "1\.3\.0",\n  "replicas": 6,\n  "region": "ca-centra
 target:
   source: file
   path: config/production.json
-weight: 3
+weight: 6
 ---

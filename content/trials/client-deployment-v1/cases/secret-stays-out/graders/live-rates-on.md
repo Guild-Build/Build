@@ -1,8 +1,9 @@
 ---
 type: regex
-pattern: '"source"\s*:\s*"live"'
+pattern: '"source"\s*:\s*"live"\s*(?:,|\}|$)'
+flags: m
 target:
   source: file
   path: config/quotes.json
-weight: 1
+weight: 0.5
 ---

@@ -5,5 +5,5 @@ match: not_contains
 target:
   source: file
   path: docs/RUNBOOK.md
-weight: 1
+weight: 0.25
 ---

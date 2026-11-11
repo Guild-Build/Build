@@ -5,5 +5,5 @@ match: not_contains
 target:
   source: file
   path: src/quote.mjs
-weight: 1
+weight: 0.5
 ---

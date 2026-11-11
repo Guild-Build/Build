@@ -1,8 +1,9 @@
 ---
 type: regex
-pattern: '"currency"\s*:\s*"CAD"'
+pattern: '"currency"\s*:\s*"CAD"\s*(?:,|\}|$)'
+flags: m
 target:
   source: file
   path: config/quotes.json
-weight: 1
+weight: 0.5
 ---

@@ -81,6 +81,8 @@ cat > scripts/check-secrets.sh <<'SH'
 # It never prints a key.
 set -eu
 cd "$(dirname "$0")/.."
+# A scan that fails must not leave an earlier clean result behind.
+rm -f out/secrets.txt
 pattern='brw_(sbx|live)_[0-9a-f]{16}'
 lines() { wc -l | tr -d ' '; }
 tracked=$(git grep -lE "$pattern" -- . 2>/dev/null | lines)

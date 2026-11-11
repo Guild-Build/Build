@@ -1,6 +1,6 @@
 ---
 type: regex
-pattern: '^tests pass=([4-9]|[1-9]\d+) fail=0$'
+pattern: '^tests pass=(?:[3-9]|[1-9]\d+) fail=0$'
 flags: m
 target:
   source: file

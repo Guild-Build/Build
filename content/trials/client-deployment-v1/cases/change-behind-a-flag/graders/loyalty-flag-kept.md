@@ -1,8 +1,9 @@
 ---
 type: regex
-pattern: '"loyaltyDiscount"\s*:\s*true\b'
+pattern: '"loyaltyDiscount"\s*:\s*true\s*(?:,|\}|$)'
+flags: m
 target:
   source: file
   path: config/flags.json
-weight: 1
+weight: 0.5
 ---

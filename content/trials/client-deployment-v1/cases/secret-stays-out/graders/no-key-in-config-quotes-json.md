@@ -5,5 +5,5 @@ match: not_contains
 target:
   source: file
   path: config/quotes.json
-weight: 1
+weight: 0.5
 ---

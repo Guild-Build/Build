@@ -5,5 +5,5 @@ flags: m
 target:
   source: file
   path: out/verify.txt
-weight: 2
+weight: 3
 ---

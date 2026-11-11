@@ -54,6 +54,8 @@ cat > scripts/verify.sh <<'SH'
 set -eu
 cd "$(dirname "$0")/.."
 env="${1:-}"
+# A run that fails must not leave an earlier pass behind.
+rm -f "out/verify-$env.txt"
 case "$env" in staging|production) ;; *) echo "usage: bash scripts/verify.sh staging|production" >&2; exit 64 ;; esac
 mkdir -p out
 node - "$env" <<'JS'
