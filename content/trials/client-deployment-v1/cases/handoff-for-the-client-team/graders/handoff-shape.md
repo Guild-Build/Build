@@ -1,7 +1,7 @@
 ---
 type: regex
 pattern: '^# Handoff[\s\S]*^## Change[\s\S]*^## Checks[\s\S]*^## Rollback'
-flags: m
+flags: mi
 target:
   source: file
   path: HANDOFF.md

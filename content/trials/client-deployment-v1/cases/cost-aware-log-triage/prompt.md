@@ -6,4 +6,6 @@ timeout_seconds: 240
 allowed_tools: [Read, Glob, Grep, Bash]
 ---
 
-Staging threw errors overnight. From logs/app.log: which error code occurred most often, exactly how many times, and on which endpoint? One line each.
+Staging threw errors overnight. Find the error code that occurred most often in logs/app.log, exactly how many times it occurred, and the endpoint it occurred on. Put the answer on one line in exactly this form:
+
+ANSWER: <code> <count> <endpoint>

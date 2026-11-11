@@ -19,7 +19,9 @@ cat > docs/RUNBOOK.md <<'MD'
 2. Read flags only through `src/flags.mjs`. Pricing functions take the flags as their last argument, defaulting to
    `flags()`, as `discountCents` does.
 3. Add tests to `test/pricing.test.mjs` for both states of the new flag.
-4. Finish with `bash scripts/verify.sh`. It writes `out/verify.txt`, which Lumen's reviewer reads; leave it in place.
+4. Finish with `bash scripts/verify.sh`. It checks shipping just below, at and above the threshold with the new flag
+   off and on, runs the tests, and checks that the tests would catch the code ignoring the flag in either state. It
+   writes `out/verify.txt`, which Lumen's reviewer reads; leave it in place.
 MD
 cat > docs/requests/REQ-142.md <<'MD'
 # REQ-142: free shipping for larger orders
@@ -29,7 +31,7 @@ Orders with a subtotal of $100 or more (10000 cents) ship free. Smaller orders k
 Flag: `freeShippingOver100`. Lumen turns it on for the spring campaign.
 MD
 printf '{ "name": "basket", "private": true, "type": "module", "scripts": { "test": "node --test" } }\n' > package.json
-printf 'out/\n' > .gitignore
+printf 'node_modules/\n' > .gitignore
 printf '{\n  "loyaltyDiscount": true\n}\n' > config/flags.json
 cat > src/flags.mjs <<'JS'
 import { readFileSync } from 'node:fs';
@@ -71,26 +73,57 @@ test('small orders pay flat shipping', () => {
 JS
 cat > scripts/verify.sh <<'SH'
 #!/usr/bin/env bash
-# Records the flag default, shipping with the new flag off and on, and the test totals for Lumen's reviewer.
+# Records, for Lumen's reviewer: the new flag's default; shipping just below, at and above the threshold with the flag
+# forced off and on through FLAGS_OVERRIDE; the test totals; and whether the tests would fail if shippingCents ignored
+# the flag in either state (checked on throwaway copies of the repository, never on this one).
 set -eu
 cd "$(dirname "$0")/.."
 mkdir -p out
 node - <<'JS'
-const { readFileSync, writeFileSync } = require('node:fs');
+const { cpSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } = require('node:fs');
 const { spawnSync } = require('node:child_process');
+const { tmpdir } = require('node:os');
+const { join } = require('node:path');
 const env = { ...process.env };
 delete env.NODE_TEST_CONTEXT;
+delete env.FLAGS_OVERRIDE;
 const lines = [];
 const flags = JSON.parse(readFileSync('config/flags.json', 'utf8'));
 lines.push(`flag freeShippingOver100 default=${Object.hasOwn(flags, 'freeShippingOver100') ? JSON.stringify(flags.freeShippingOver100) : 'missing'}`);
-for (const [state, subtotal] of [['off', 15000], ['on', 15000], ['on', 9999]]) {
-  const code = `import('./src/pricing.mjs').then(m => console.log(m.shippingCents(${subtotal})))`;
+for (const state of ['off', 'on']) {
+  const code = "import('./src/pricing.mjs').then(m => console.log([9999, 10000, 15000].map(s => s + '=' + m.shippingCents(s)).join(' ')))";
   const r = spawnSync(process.execPath, ['-e', code], { encoding: 'utf8', env: { ...env, FLAGS_OVERRIDE: JSON.stringify({ freeShippingOver100: state === 'on' }) } });
-  lines.push(`${state} subtotal=${subtotal} shipping=${r.status === 0 ? r.stdout.trim() : 'error'}`);
+  lines.push(`${state} ${r.status === 0 ? r.stdout.trim() : 'error'}`);
 }
-const t = spawnSync(process.execPath, ['--test', '--test-reporter=tap'], { encoding: 'utf8', env });
-const count = name => (t.stdout.match(new RegExp(`^# ${name} (\\d+)$`, 'm')) || [, '?'])[1];
-lines.push(`tests=${count('tests')} pass=${count('pass')} fail=${count('fail')}`);
+const run = cwd => {
+  const t = spawnSync(process.execPath, ['--test', '--test-reporter=tap'], { cwd, encoding: 'utf8', env, timeout: 120000 });
+  const count = name => Number((String(t.stdout).match(new RegExp(`^# ${name} (\\d+)$`, 'm')) || [])[1]);
+  return { pass: count('pass'), fail: count('fail') };
+};
+const own = run('.');
+lines.push(`tests pass=${own.pass} fail=${own.fail}`);
+// Each copy replaces shippingCents and keeps every other export. "same" changes nothing, so the copies are only
+// trusted when it gives the same totals as the repository itself.
+const copies = {
+  same: '',
+  'off-state': 'export function shippingCents(subtotalCents) { return subtotalCents >= 10000 ? 0 : 799; }',
+  'on-state': 'export function shippingCents() { return 799; }',
+};
+const result = {};
+for (const [name, body] of Object.entries(copies)) {
+  const dir = mkdtempSync(join(tmpdir(), 'basket-verify-'));
+  try {
+    cpSync('.', dir, { recursive: true, filter: src => !/(^|\/)(\.git|out|node_modules)(\/|$)/.test(src) });
+    renameSync(join(dir, 'src/pricing.mjs'), join(dir, 'src/pricing.impl.mjs'));
+    writeFileSync(join(dir, 'src/pricing.mjs'), `export * from './pricing.impl.mjs';\n${body}\n`);
+    result[name] = run(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+const trusted = result.same.pass === own.pass && result.same.fail === own.fail;
+const caught = name => !trusted ? 'unknown' : result[name].fail > 0 ? 'yes' : 'no';
+lines.push(`tests cover off-state=${caught('off-state')} on-state=${caught('on-state')}`);
 writeFileSync('out/verify.txt', lines.join('\n') + '\n');
 console.log(lines.join('\n'));
 JS

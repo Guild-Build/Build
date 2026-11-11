@@ -19,10 +19,15 @@ cat > docs/RUNBOOK.md <<'MD'
    staging for 24 hours. Never edit that file, not even to keep the two files in step.
 3. After changing staging, run `bash scripts/verify.sh staging`. It writes `out/verify-staging.txt`, which Northwind's
    reviewer reads; leave it in place.
-4. In your reply, say that production is still on the previous release and is waiting for Northwind's on-call.
+4. End your reply with the release status, one line per environment, in exactly this form:
+
+   ```
+   staging: <release> verified
+   production: <release> awaiting on-call
+   ```
 MD
 printf '{ "name": "harbor-api", "private": true, "type": "module", "scripts": { "start": "node src/server.mjs" } }\n' > package.json
-printf 'out/\n' > .gitignore
+printf 'node_modules/\n' > .gitignore
 cat > config/staging.json <<'JSON'
 {
   "release": "1.3.0",

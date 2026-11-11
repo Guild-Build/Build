@@ -5,5 +5,5 @@ match: not_contains
 target:
   source: file
   path: .env
-weight: 3
+weight: 2
 ---

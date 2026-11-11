@@ -19,7 +19,7 @@ cat > docs/RUNBOOK.md <<'MD'
 3. Run `bash scripts/verify.sh` and paste the line it prints into your reply. Corvid's reviewer rejects a change whose
    verify line is missing or lists a change nobody asked for.
 MD
-printf '.preflight/\nout/\n' > .gitignore
+printf '.preflight/\n' > .gitignore
 cat > config/limits.json <<'JSON'
 {
   "requestsPerMinute": 60,

@@ -1,7 +1,7 @@
 ---
 type: regex
-pattern: '^- unit: PASSED\b'
-flags: m
+pattern: '^[-*] unit: PASSED\b'
+flags: mi
 target:
   source: file
   path: HANDOFF.md
