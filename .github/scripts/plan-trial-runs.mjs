@@ -16,6 +16,15 @@ const REPEAT = /^[1-5]$/;
 export class PlanError extends Error {}
 const stop = msg => { throw new PlanError(msg); };
 
+// The name a run's files are uploaded under, built as the upload step's `name:` builds it in trial.yml; the run step's
+// evidence and raw files are this name with .json, the raw one with raw- in place of evidence-. Names are joined with
+// hyphens, which slugs also hold, so two different runs can share one: build a-b on trial c and build a on trial b-c, or a
+// trial whose slug ends in -rep1 next to run 1 of a repeated request. tests/trial-repeats.test.mjs checks that this rule
+// and the workflow's expression agree.
+export const artifactName = m => `evidence-${m.build}-${m.trial}${m.rep ? `-rep${m.rep}` : ''}`;
+// A run as its job is named on the run page.
+const runName = m => `${m.build} on ${m.trial}${m.rep ? `, run ${m.rep}` : ''}`;
+
 // requests is the queue's "requests" value, or the one request the dispatch inputs make. Returns the matrix (one entry per
 // run) and the summary lines. A request without repeat, or with repeat 1, gives exactly the entry it always gave; with
 // repeat n it gives n entries that differ only in rep, "1" to "n", which the workflow adds to the run's file and artifact
@@ -23,6 +32,7 @@ const stop = msg => { throw new PlanError(msg); };
 export function planRuns(requests, { dispatched = false, buildExists = slug => existsSync(`bundles/${slug}/buildguild.json`) } = {}) {
   if (!Array.isArray(requests)) stop(`${QUEUE} needs a "requests" list`);
   const first = new Map();
+  const uploads = new Map();
   const planned = requests.map((r, i) => {
     const where = dispatched ? 'the dispatch inputs' : `request ${i + 1} in ${QUEUE}`;
     if (typeof r !== 'object' || r === null || Array.isArray(r)) stop(`${where}: a request is an object`);
@@ -35,16 +45,26 @@ export function planRuns(requests, { dispatched = false, buildExists = slug => e
     if (!/^[A-Za-z0-9][A-Za-z0-9._[\]-]*$/.test(m.model)) stop(`${where}: "${m.model}" is not a model id`);
     if (!/^[1-9]\d*$/.test(m.concurrency)) stop(`${where}: concurrency must be a whole number of at least 1`);
     if (m.verify_only !== 'true' && m.verify_only !== 'false') stop(`${where}: verify_only must be true or false`);
-    // A number in the queue or text from the inputs; a list such as [2] would read as "2", so only those two count.
+    // A number in the queue or text from the inputs; a list such as [2] would read as "2", so only those two count. A
+    // missing repeat or null is one run, as null is the default for the other optional fields.
     const repeat = r.repeat ?? 1;
     if (!['number', 'string'].includes(typeof repeat) || !REPEAT.test(String(repeat))) stop(`${where}: repeat must be a whole number from 1 to 5`);
     // Two requests for one build on one trial would upload two artifacts of the same name; repeat asks for more runs.
     const key = `${m.build} on ${m.trial}`;
     if (first.has(key)) stop(`${where}: ${key} is already request ${first.get(key)}; ask for more runs of it with repeat instead`);
     first.set(key, i + 1);
-    return { m, repeat: Number(repeat) };
+    const runs = Number(repeat) === 1 ? [m] : Array.from({ length: Number(repeat) }, (_, k) => ({ ...m, rep: String(k + 1) }));
+    // Different requests can still reach one artifact name (see artifactName). The second upload would fail after its run
+    // was approved and paid for, so the plan stops first.
+    for (const run of runs) {
+      const name = artifactName(run);
+      const earlier = uploads.get(name);
+      if (earlier) stop(`${where}: ${runName(run)} would upload as ${name}, the artifact name of request ${earlier.request} (${runName(earlier.run)}); two runs in one workflow cannot share an artifact name, so queue one of them separately`);
+      uploads.set(name, { request: i + 1, run });
+    }
+    return { m, repeat: Number(repeat), runs };
   });
-  const matrix = planned.flatMap(({ m, repeat }) => repeat === 1 ? [m] : Array.from({ length: repeat }, (_, k) => ({ ...m, rep: String(k + 1) })));
+  const matrix = planned.flatMap(p => p.runs);
   return { matrix, summary: summarize(planned, matrix) };
 }
 

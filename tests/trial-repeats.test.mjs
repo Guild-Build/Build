@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { planRuns, PlanError } from '../.github/scripts/plan-trial-runs.mjs';
+import { artifactName, planRuns, PlanError } from '../.github/scripts/plan-trial-runs.mjs';
 
 const script = fileURLToPath(new URL('../.github/scripts/plan-trial-runs.mjs', import.meta.url));
 const workflow = readFileSync(fileURLToPath(new URL('../.github/workflows/trial.yml', import.meta.url)), 'utf8');
@@ -102,6 +102,41 @@ test('a second request for the same build and trial is refused, whatever else di
   assert.equal(plan([first, { build: 'lean-start', trial: 'calibration-shell-v1' }, { build: 'measured-delivery', trial: 'guild-smoke-v1' }]).matrix.length, 3);
 });
 
+test('two runs that would upload under one artifact name are refused, naming both requests and the name', () => {
+  const tail = 'two runs in one workflow cannot share an artifact name, so queue one of them separately';
+  // The review's case: a trial whose slug ends in -rep1 next to a repeated request for the trial without it, in either order.
+  refused([{ build: 'lean-start', trial: 'guild-smoke-v1', repeat: 2 }, { build: 'lean-start', trial: 'guild-smoke-v1-rep1' }],
+    `request 2 in .github/trial-queue.json: lean-start on guild-smoke-v1-rep1 would upload as evidence-lean-start-guild-smoke-v1-rep1, the artifact name of request 1 (lean-start on guild-smoke-v1, run 1); ${tail}`);
+  refused([{ build: 'lean-start', trial: 'guild-smoke-v1-rep1' }, { build: 'lean-start', trial: 'guild-smoke-v1', repeat: 2 }],
+    `request 2 in .github/trial-queue.json: lean-start on guild-smoke-v1, run 1 would upload as evidence-lean-start-guild-smoke-v1-rep1, the artifact name of request 1 (lean-start on guild-smoke-v1-rep1); ${tail}`);
+  // A hyphen joins the build and the trial, so build lean on trial start-guild-smoke-v1 meets lean-start on guild-smoke-v1,
+  // with or without repeats. The plan on main accepted such a pair, and its second upload would have failed.
+  const withLean = { buildExists: slug => slug === 'lean' || builds.has(slug) };
+  refused([{ build: 'lean-start', trial: 'guild-smoke-v1' }, { build: 'lean', trial: 'start-guild-smoke-v1' }],
+    `request 2 in .github/trial-queue.json: lean on start-guild-smoke-v1 would upload as evidence-lean-start-guild-smoke-v1, the artifact name of request 1 (lean-start on guild-smoke-v1); ${tail}`, withLean);
+  refused([{ build: 'lean-start', trial: 'guild-smoke-v1', repeat: 3 }, { build: 'lean', trial: 'start-guild-smoke-v1', repeat: 3 }],
+    `request 2 in .github/trial-queue.json: lean on start-guild-smoke-v1, run 1 would upload as evidence-lean-start-guild-smoke-v1-rep1, the artifact name of request 1 (lean-start on guild-smoke-v1, run 1); ${tail}`, withLean);
+  // The first problem in queue order stops the plan: a clash in request 2 comes before an unknown field in request 3.
+  refused([{ build: 'lean-start', trial: 'guild-smoke-v1', repeat: 2 }, { build: 'lean-start', trial: 'guild-smoke-v1-rep2' }, { build: 'lean-start', trial: 'calibration-shell-v1', colour: 'red' }],
+    `request 2 in .github/trial-queue.json: lean-start on guild-smoke-v1-rep2 would upload as evidence-lean-start-guild-smoke-v1-rep2, the artifact name of request 1 (lean-start on guild-smoke-v1, run 2); ${tail}`);
+});
+
+test('runs whose artifact names differ are accepted, and single runs keep the names they always had', () => {
+  const names = requests => plan(requests, { buildExists: slug => slug === 'lean' || builds.has(slug) }).matrix.map(artifactName);
+  assert.deepEqual(names([{ build: 'measured-delivery', trial: 'guild-smoke-v1' }, { build: 'lean-start', trial: 'guild-smoke-v1' }, { build: 'lean-start', trial: 'calibration-shell-v1' }]),
+    ['evidence-measured-delivery-guild-smoke-v1', 'evidence-lean-start-guild-smoke-v1', 'evidence-lean-start-calibration-shell-v1']);
+  // A request with repeat 2 has no run 3, so a trial ending in -rep3 does not meet it; nor do other builds' repeats.
+  assert.deepEqual(names([
+    { build: 'lean-start', trial: 'guild-smoke-v1', repeat: 2 },
+    { build: 'lean-start', trial: 'guild-smoke-v1-rep3' },
+    { build: 'measured-delivery', trial: 'guild-smoke-v1', repeat: 2 },
+    { build: 'lean', trial: 'start-calibration-shell-v1' },
+  ]), [
+    'evidence-lean-start-guild-smoke-v1-rep1', 'evidence-lean-start-guild-smoke-v1-rep2', 'evidence-lean-start-guild-smoke-v1-rep3',
+    'evidence-measured-delivery-guild-smoke-v1-rep1', 'evidence-measured-delivery-guild-smoke-v1-rep2', 'evidence-lean-start-calibration-shell-v1',
+  ]);
+});
+
 test('unknown fields and the other refusals still stop the plan', () => {
   const where = 'request 1 in .github/trial-queue.json';
   refused([{ build: 'lean-start', trial: 'guild-smoke-v1', repeats: 3 }], `${where}: unknown field repeats`);
@@ -167,6 +202,28 @@ test('the workflow calls the script, runs one job at a time and names a repeated
   assert.match(workflow, /name: evidence-\$\{\{ matrix\.build \}\}-\$\{\{ matrix\.trial \}\}\$\{\{ matrix\.rep && format\('-rep\{0\}', matrix\.rep\) \|\| '' \}\}\n/);
 });
 
+// Evaluates a workflow line's expressions for the two forms its names use, and refuses any other form. As GitHub's contexts
+// reference says, a matrix property the entry does not have reads as an empty string.
+const evaluate = (line, matrix) => line.replace(/\$\{\{ (.+?) \}\}/g, (_, expr) => {
+  let m = expr.match(/^matrix\.([a-z_]+)$/);
+  if (m) return matrix[m[1]] ?? '';
+  m = expr.match(/^matrix\.([a-z_]+) && format\('([^']*)', matrix\.([a-z_]+)\) \|\| ''$/);
+  if (m && m[1] === m[3]) return matrix[m[1]] ? m[2].replace('{0}', matrix[m[1]]) : '';
+  throw new Error(`no evaluator for the expression ${expr}`);
+});
+
+test("the upload step names each artifact by the plan's rule, so the plan's name check covers what is uploaded", () => {
+  const uploads = workflow.match(/\n {10}name: (evidence-[^\n]+)\n/g);
+  assert.equal(uploads.length, 1);
+  const line = uploads[0].trim().slice('name: '.length);
+  for (const run of [
+    entry('lean-start', 'guild-smoke-v1'),
+    entry('lean-start', 'guild-smoke-v1', { rep: '1' }),
+    entry('lean-start', 'guild-smoke-v1-rep1'),
+    entry('measured-delivery', 'calibration-shell-v1', { rep: '5', verify_only: 'true' }),
+  ]) assert.equal(evaluate(line, run), artifactName(run), JSON.stringify(run));
+});
+
 test('the run step names files and passes --rep only for a repeated run', t => {
   // The step's own shell lines, run by bash with node replaced by a stub that prints its arguments.
   const step = workflow.slice(workflow.indexOf('          mkdir -p "$RUNNER_TEMP/evaltmp"'), workflow.indexOf('      - name: Gather the files to upload'));
@@ -181,6 +238,13 @@ test('the run step names files and passes --rep only for a repeated run', t => {
   const before = ['cli/buildguild.mjs', 'test', 'bundles/lean-start', '--trial', 'guild-smoke-v1', '--max-cost-usd', '3', '--model', 'claude-sonnet-5-5', '-j', '1', '--runner', 'github-actions', '--role', 'guild', '--out', 'evidence-lean-start-guild-smoke-v1.json', '--raw-out', 'raw-lean-start-guild-smoke-v1.json', '--work-dir', `${root}/trial-run`, '--keep-temp'];
   assert.deepEqual(argv(''), before);
   assert.deepEqual(argv('4'), [...before.slice(0, 16), 'evidence-lean-start-guild-smoke-v1-rep4.json', '--raw-out', 'raw-lean-start-guild-smoke-v1-rep4.json', ...before.slice(19), '--rep', '4']);
+  // The evidence and raw files carry the artifact's name, so a name the plan accepts is also unique for them.
+  for (const rep of ['', '4']) {
+    const args = argv(rep);
+    const name = artifactName(entry('lean-start', 'guild-smoke-v1', rep ? { rep } : {}));
+    assert.equal(args[args.indexOf('--out') + 1], `${name}.json`);
+    assert.equal(args[args.indexOf('--raw-out') + 1], `raw${name.slice('evidence'.length)}.json`);
+  }
 });
 
 async function cliSetup(t) {

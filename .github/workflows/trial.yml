@@ -68,8 +68,9 @@ jobs:
           BG_REPEAT: ${{ inputs.repeat }}
         # Each request is checked before anyone is asked to approve it: a build that is not in bundles/, a trial the site
         # does not publish, a ceiling that is not a positive number, an unknown field, a repeat that is not a whole number
-        # from 1 to 5, or a second request for a build and trial already requested stops the plan, and with it the whole
-        # workflow. A request with repeat n becomes n runs, numbered rep 1 to n; without repeat it is one run, as before.
+        # from 1 to 5, a second request for a build and trial already requested, or two runs that would upload under one
+        # artifact name stops the plan, and with it the whole workflow. A request with repeat n becomes n runs, numbered
+        # rep 1 to n; without repeat it is one run, as before.
         # The script (.github/scripts/plan-trial-runs.mjs) also writes the summary, with each ceiling times its repeats.
         run: node .github/scripts/plan-trial-runs.mjs
   trial:
@@ -255,6 +256,8 @@ jobs:
           echo "only regular files and folders, and neither the key nor the workspace id in any name or file"
       - name: Upload the scanned files
         if: ${{ always() && matrix.verify_only != 'true' && steps.scan.outcome == 'success' }}
+        # Each run's artifact needs its own name, or its upload fails. The plan builds this name the same way (artifactName
+        # in .github/scripts/plan-trial-runs.mjs, kept in step by a test) and refuses two runs that would share one.
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: evidence-${{ matrix.build }}-${{ matrix.trial }}${{ matrix.rep && format('-rep{0}', matrix.rep) || '' }}
