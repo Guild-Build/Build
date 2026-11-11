@@ -4,5 +4,5 @@ pattern: '^check-secrets: key=set from=\.env\.local tracked=0 index=0 history=0 
 target:
   source: file
   path: out/secrets.txt
-weight: 3
+weight: 6
 ---

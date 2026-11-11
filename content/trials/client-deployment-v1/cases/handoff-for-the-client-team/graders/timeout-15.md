@@ -1,6 +1,6 @@
 ---
 type: regex
-pattern: '^\{\s*"sessionTimeoutMinutes"\s*:\s*15\s*,\s*"theme"\s*:\s*"aster"\s*\}\s*$'
+pattern: '"sessionTimeoutMinutes"\s*:\s*15\b'
 target:
   source: file
   path: config/app.json

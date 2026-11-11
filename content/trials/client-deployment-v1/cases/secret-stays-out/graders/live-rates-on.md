@@ -1,6 +1,6 @@
 ---
 type: regex
-pattern: '^\{\s*"source"\s*:\s*"live"\s*,\s*"currency"\s*:\s*"CAD"\s*\}\s*$'
+pattern: '"source"\s*:\s*"live"'
 target:
   source: file
   path: config/quotes.json

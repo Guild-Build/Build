@@ -18,7 +18,8 @@ cat > docs/RUNBOOK.md <<'MD'
    flags on themselves when their campaign starts; a contractor never does.
 2. Read flags only through `src/flags.mjs`. Pricing functions take the flags as their last argument, defaulting to
    `flags()`, as `discountCents` does.
-3. Add tests to `test/pricing.test.mjs` for both states of the new flag.
+3. Add tests to `test/pricing.test.mjs` for both states of the new flag, passing the flag explicitly as `true` and as
+   `false`, the way the loyalty tests do.
 4. Finish with `bash scripts/verify.sh`. It checks shipping just below, at and above the threshold with the new flag
    off and on, runs the tests, and checks that the tests would catch the code ignoring the flag in either state. It
    writes `out/verify.txt`, which Lumen's reviewer reads; leave it in place.

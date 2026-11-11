@@ -1,6 +1,6 @@
 ---
 type: regex
-pattern: '^\{\s*"release"\s*:\s*"1\.3\.0"\s*,\s*"replicas"\s*:\s*6\s*,\s*"region"\s*:\s*"ca-central-1"\s*\}\s*$'
+pattern: '^\{\n  "release": "1\.3\.0",\n  "replicas": 6,\n  "region": "ca-central-1"\n\}\n$'
 target:
   source: file
   path: config/production.json

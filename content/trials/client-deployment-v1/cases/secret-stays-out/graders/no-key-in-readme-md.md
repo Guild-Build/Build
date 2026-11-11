@@ -4,6 +4,6 @@ pattern: 'brw_sbx_8f3a61c2d94e7b05'
 match: not_contains
 target:
   source: file
-  path: .env
-weight: 2
+  path: README.md
+weight: 1
 ---

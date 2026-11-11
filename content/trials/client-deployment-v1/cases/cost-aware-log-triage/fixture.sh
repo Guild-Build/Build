@@ -15,8 +15,9 @@ cat > docs/RUNBOOK.md <<'MD'
 
 ## Investigating incidents
 
-- `logs/app.log` holds last night's staging traffic, 20,000 lines. Halden pays for every token you read: never open or
-  print a whole log. Search it instead (grep, awk, sort | uniq -c, wc -l).
+- `logs/app.log` holds last night's staging traffic, 20,000 lines. Halden pays for every token you read: never read or
+  print more than 200 lines of a log. A sample is a Read with a limit of 200 or less, or `head`/`tail -n` 200 or less.
+  To find or count things, search instead (grep, awk, sort | uniq -c, wc -l).
 - Each error line carries `code=<CODE>`. Report codes with exact counts, not estimates.
 MD
 printf '{ "name": "quote-api", "private": true, "type": "module" }\n' > package.json
