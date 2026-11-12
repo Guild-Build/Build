@@ -76,7 +76,7 @@ async function main() {
   const hostUserns = readlinkSync('/proc/self/ns/user');
   const standIn = await startStandIn({ command: PROBE_COMMAND });
   const rawPath = join(out, 'raw.json');
-  const argv = [join(root, 'cli/buildguild.mjs'), 'test', join(root, '.github/sandbox-self-test/build'),
+  const argv = [join(root, 'cli/buildguild.mjs'), 'test', join(root, '.github/sandbox-self-test/empty-build'),
     '--trial', join(root, '.github/sandbox-self-test/trial'), '--model', model, '--max-cost-usd', '0.01', '-j', '1',
     '--runner', 'github-actions', '--role', 'guild', '--out', join(out, 'local-run.json'), '--raw-out', rawPath,
     '--work-dir', join(base, 'run'), '--keep-temp'];

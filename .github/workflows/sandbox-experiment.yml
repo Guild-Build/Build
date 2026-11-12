@@ -62,6 +62,10 @@ jobs:
         run: |
           sudo dmesg --clear || true
           node .github/scripts/sandbox-self-test.mjs --model claude-sonnet-5-5
+      - name: The after-trial rule on the self-test's own traces
+        if: ${{ always() }}
+        continue-on-error: true
+        run: node .github/scripts/shell-starts.mjs "$RUNNER_TEMP/sandbox-self-test/tmp"
       - name: After the self-test
         if: ${{ always() }}
         run: |
