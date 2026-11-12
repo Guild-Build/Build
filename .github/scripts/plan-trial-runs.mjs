@@ -27,7 +27,8 @@ export const KEY_CHECK_CALLS = 2;
 const MIN_TRIAL_BUDGET_USD = '0.01';
 
 // Dollar amounts are decimal text and are added and subtracted digit for digit, as whole numbers of 10^-places dollars,
-// so no floating-point rounding reaches a budget.
+// so no floating-point rounding, and no limit on size, reaches a budget or the total the owner approves. A ceiling is
+// dollars and cents (the plan refuses more than two decimal places), so its sums are sums of whole cents.
 const placesOf = (...amounts) => Math.max(...amounts.map(a => (a.split('.')[1] ?? '').length));
 const units = (amount, places) => { const [whole, part = ''] = amount.split('.'); return BigInt(whole + part.padEnd(places, '0')); };
 const usd = (n, places) => {
@@ -39,8 +40,8 @@ const keyCheckPlaces = placesOf(KEY_CHECK_BUDGET_USD, MIN_TRIAL_BUDGET_USD);
 export const KEY_CHECK_RESERVE_USD = usd(units(KEY_CHECK_BUDGET_USD, keyCheckPlaces) * BigInt(KEY_CHECK_CALLS), keyCheckPlaces);
 export const MIN_CEILING_USD = usd(units(KEY_CHECK_RESERVE_USD, keyCheckPlaces) + units(MIN_TRIAL_BUDGET_USD, keyCheckPlaces), keyCheckPlaces);
 
-// The trial's share of a ceiling (a positive decimal, as the plan checks it): the ceiling less the reserve, or null when
-// that would leave the trial less than MIN_TRIAL_BUDGET_USD.
+// The trial's share of a ceiling (a positive amount in dollars and cents, as the plan checks it): the ceiling less the
+// reserve, or null when that would leave the trial less than MIN_TRIAL_BUDGET_USD.
 export function trialBudget(ceiling) {
   const places = placesOf(ceiling, KEY_CHECK_RESERVE_USD, MIN_TRIAL_BUDGET_USD);
   const left = units(ceiling, places) - units(KEY_CHECK_RESERVE_USD, places);
@@ -77,7 +78,9 @@ export function planRuns(requests, { dispatched = false, buildExists = slug => e
     const m = { build: String(r.build ?? ''), trial: String(r.trial ?? ''), max_cost_usd: String(r.max_cost_usd ?? 5), model: String(r.model ?? 'claude-sonnet-5-5'), concurrency: String(r.concurrency ?? 1), verify_only: String(r.verify_only ?? false) };
     if (!SLUG.test(m.build) || !buildExists(m.build)) stop(`${where}: no build at bundles/${m.build}`);
     if (!SLUG.test(m.trial)) stop(`${where}: the trial "${m.trial}" is not a slug`);
-    if (!/^\d+(\.\d+)?$/.test(m.max_cost_usd) || !(Number(m.max_cost_usd) > 0)) stop(`${where}: max_cost_usd must be a positive number of US dollars`);
+    // A ceiling is an amount of money, checked as written: an all-zero amount is not positive, and cents are the smallest unit.
+    if (!/^\d+(\.\d+)?$/.test(m.max_cost_usd) || /^[0.]+$/.test(m.max_cost_usd)) stop(`${where}: max_cost_usd must be a positive number of US dollars`);
+    if (!/^\d+(\.\d{1,2})?$/.test(m.max_cost_usd)) stop(`${where}: max_cost_usd must be in dollars and cents, with at most two decimal places`);
     if (!/^[A-Za-z0-9][A-Za-z0-9._[\]-]*$/.test(m.model)) stop(`${where}: "${m.model}" is not a model id`);
     if (!/^[1-9]\d*$/.test(m.concurrency)) stop(`${where}: concurrency must be a whole number of at least 1`);
     if (m.verify_only !== 'true' && m.verify_only !== 'false') stop(`${where}: verify_only must be true or false`);
@@ -116,12 +119,13 @@ export function planRuns(requests, { dispatched = false, buildExists = slug => e
 // each ceiling times its repeats. When any run spends, a last paragraph says how a ceiling is split.
 function summarize(planned, matrix) {
   if (!matrix.length) return ['No requests: no trial runs and nothing waits for approval.'];
-  const ceiling = matrix.filter(m => m.verify_only === 'false').reduce((sum, m) => sum + Number(m.max_cost_usd), 0);
-  const total = `Ceilings total ${Math.round(ceiling * 100) / 100} USD`;
+  const ceilings = matrix.filter(m => m.verify_only === 'false').map(m => m.max_cost_usd);
+  const places = placesOf('0', ...ceilings);
+  const total = `Ceilings total ${usd(ceilings.reduce((sum, c) => sum + units(c, places), 0n), places)} USD`;
   const cost = m => m.verify_only === 'true' ? 'verify only, runs nothing' : `${m.max_cost_usd} USD`;
   const trial = m => m.verify_only === 'true' ? 'none' : `${m.trial_budget_usd} USD`;
   const repeated = planned.some(p => p.repeat !== 1);
-  const split = matrix.some(m => m.verify_only === 'false') ? ['', `A ceiling covers every paid call of its run. The key check keeps ${KEY_CHECK_RESERVE_USD} USD of it: one tiny call, or two when the key is organisation-level, each with a budget of ${KEY_CHECK_BUDGET_USD} USD, and a check that reaches its budget stops the run before the trial. The trial gets the rest${repeated ? ', the same on every repeat' : ''}. Claude Code holds each budget to its own cost estimate, and a reply or agent run already under way when a budget is reached still finishes, so a run can pass its ceiling by that much.`] : [];
+  const split = matrix.some(m => m.verify_only === 'false') ? ['', `A ceiling covers every paid call of its run. The key check keeps ${KEY_CHECK_RESERVE_USD} USD of it: one tiny call, or two when the key is organisation-level, each with a budget of ${KEY_CHECK_BUDGET_USD} USD, and the run stops before the trial unless a check gets the reply ok within its budget. The trial gets the rest${repeated ? ', the same on every repeat' : ''}. Claude Code holds each budget to its own cost estimate: the key check can pass its budget by the one reply that reaches it, and the trial can pass its budget by every agent run already under way when it is reached, up to the request's concurrency (1 unless the request says otherwise).`] : [];
   if (!repeated) {
     return ['| Build | Trial | Model | Ceiling | Trial budget |', '|---|---|---|---|---|', ...matrix.map(m => `| ${m.build} | ${m.trial} | ${m.model} | ${cost(m)} | ${trial(m)} |`), '', `Each run waits for the owner's approval in the trials environment. ${total}.`, ...split];
   }

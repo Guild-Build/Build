@@ -24,7 +24,7 @@ const entry = (build, trial, { rep, ...extra } = {}) => {
   if (m.verify_only === 'false') Object.assign(m, { key_check_budget_usd: KEY_CHECK_BUDGET_USD, trial_budget_usd: trialBudget(m.max_cost_usd) });
   return rep === undefined ? m : { ...m, rep };
 };
-const split = "A ceiling covers every paid call of its run. The key check keeps 0.5 USD of it: one tiny call, or two when the key is organisation-level, each with a budget of 0.25 USD, and a check that reaches its budget stops the run before the trial. The trial gets the rest%s. Claude Code holds each budget to its own cost estimate, and a reply or agent run already under way when a budget is reached still finishes, so a run can pass its ceiling by that much.";
+const split = "A ceiling covers every paid call of its run. The key check keeps 0.5 USD of it: one tiny call, or two when the key is organisation-level, each with a budget of 0.25 USD, and the run stops before the trial unless a check gets the reply ok within its budget. The trial gets the rest%s. Claude Code holds each budget to its own cost estimate: the key check can pass its budget by the one reply that reaches it, and the trial can pass its budget by every agent run already under way when it is reached, up to the request's concurrency (1 unless the request says otherwise).";
 
 test('a queue without repeat plans one run per request and summarises them in one table', () => {
   const { matrix, summary } = plan([
