@@ -6,12 +6,15 @@
 // returned. No model is asked and no key is used.
 //
 // It passes only on positive evidence. The CLI exits 0, and the eval reports exactly the agent runs the self-test's own
-// fixture asks for: its one case, run once with the build and once without (expectedRuns). Each of those runs left its
-// own trace holding exactly one Bash call with its result, and each result is a command that exited 0 and printed three
-// lines: the arithmetic the shell worked out (so the command really ran), seccomp mode 2 (the sandbox's seccomp helper
-// turns its filter on as its last step before the command), and a user namespace other than this runner's own (so the
-// command ran inside the sandbox, not beside it). The stand-in received exactly those results, no more and no fewer.
-// And the after-trial check (shell-starts.mjs) accepts the run, so it reads this Claude Code release's traces in full.
+// fixture asks for: its one case, run once with the build and once without (expectedRuns). Each of those runs names a
+// trace of its own, no trace is named twice and every trace found belongs to one of them; each trace holds exactly one
+// Bash call, the self-test command, with its result. The stand-in received one result for each of those calls, bound
+// by the call's id: none missing, none twice, none for a call no trace holds, and each the same as the trace's. Each
+// result is a command that exited 0 and printed three lines: the arithmetic the shell worked out (so the command really
+// ran), seccomp mode 2 (the sandbox's seccomp helper turns its filter on as its last step before the command), and a
+// user namespace other than this runner's own (so the command ran inside the sandbox, not beside it). Last, the
+// after-trial check (shell-starts.mjs) accepts the run, so it reads this Claude Code release's traces and report in
+// full.
 //
 // Usage: node .github/scripts/sandbox-self-test.mjs --model <id>
 import { spawn } from 'node:child_process';
@@ -20,7 +23,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startStandIn, STAND_IN_KEY } from './stand-in-api.mjs';
-import { bashCalls, readReport, runName, runsIn, tracesIn, verdict } from './shell-starts.mjs';
+import { bashCalls, pairing, readReport, runName, runsIn, tracesIn, verdict } from './shell-starts.mjs';
 
 export const PROBE_COMMAND = `printf 'probe=%s\\n' "$((6 * 7))"; sed -n 's/^Seccomp:[[:space:]]*/seccomp=/p' /proc/self/status; printf 'userns=%s\\n' "$(readlink /proc/self/ns/user)"`;
 
@@ -67,23 +70,42 @@ export function judge(results, { expected, raw, traces, hostUserns }) {
     const names = reported.map(r => r.name).sort();
     if (JSON.stringify(names) !== JSON.stringify(expected)) problems.push(`the eval reported ${listed(names)}, but the self-test's trial asks for exactly ${listed(expected)}`);
   }
-  // Each reported run: its own trace, read in full, holding exactly one Bash call with its result.
-  const traced = [];
+  // One trace to one run: each reported run names its own, no trace is named twice, and no trace is left over.
+  if (reported) {
+    const p = pairing(reported, Object.keys(traces));
+    if (p.unnamed) problems.push(`${p.unnamed} reported agent run(s) name no trace`);
+    if (p.shared.length) problems.push(`${p.shared.length} trace(s) are named by more than one reported agent run: ${p.shared.join(', ')}`);
+    if (p.extra.length) problems.push(`${p.extra.length} trace(s) belong to no reported agent run: ${p.extra.join(', ')}`);
+  }
+  // Each reported run's own trace, read in full, holds exactly one Bash call with its result.
+  const traced = new Map();
+  const shared = reported ? new Set(pairing(reported, Object.keys(traces)).shared) : new Set();
   for (const run of reported || []) {
-    const text = run.trace === null ? undefined : traces[run.trace];
-    if (typeof text !== 'string') { problems.push(`agent run (${run.name}) left no readable trace`); continue; }
+    const text = run.trace === null || shared.has(run.trace) ? undefined : traces[run.trace];
+    if (typeof text !== 'string') { problems.push(`agent run (${run.name}) left no readable trace of its own`); continue; }
     const read = bashCalls(text);
     if (read.empty || read.unreadable || read.unanswered.length || read.calls.length !== 1) {
       problems.push(`agent run (${run.name}): its trace holds ${read.calls.length} Bash call(s) with a result, ${read.unanswered.length} without one and ${read.unreadable} unreadable line(s), not exactly one call and its result`);
       continue;
     }
-    traced.push(read.calls[0]);
-    problems.push(...probeProblems(read.calls[0], `agent run (${run.name})`, hostUserns));
+    if (read.calls[0].command !== PROBE_COMMAND) problems.push(`agent run (${run.name}): its traced Bash call ran ${show(read.calls[0].command)}, not the self-test command`);
+    traced.set(read.calls[0].id, { run: run.name, ...read.calls[0] });
   }
-  // The stand-in received exactly the runs' own results: none missing, none extra, none twice.
-  const key = r => JSON.stringify([r.isError, r.text.trim()]);
-  if (JSON.stringify(results.map(key).sort()) !== JSON.stringify(traced.map(key).sort())) {
-    problems.push(`the stand-in received ${results.length} Bash result(s), but the reported runs' traces hold ${traced.length}; each run must return exactly its own one`);
+  // Each traced call's result reached the stand-in exactly once, under its own id and with the same text, and the
+  // stand-in received nothing else; then each result must pass on its own.
+  const received = new Map();
+  for (const r of results) received.set(r.id, [...(received.get(r.id) ?? []), r]);
+  for (const [id, copies] of received) {
+    if (!traced.has(id)) problems.push(`the stand-in received ${copies.length} result(s) for ${id}, a call no reported run's trace holds`);
+    else if (copies.length > 1) problems.push(`the stand-in received ${copies.length} results for ${id}, not one`);
+  }
+  for (const [id, call] of traced) {
+    const copies = received.get(id) ?? [];
+    if (!copies.length) { problems.push(`agent run (${call.run}): the stand-in never received the result of its call ${id}`); continue; }
+    if (copies.length !== 1) continue;
+    const [got] = copies;
+    if (got.isError !== call.isError || got.text.trim() !== call.text.trim()) problems.push(`agent run (${call.run}): the result the stand-in received for ${id} differs from the one its trace holds`);
+    problems.push(...probeProblems(got, `agent run (${call.run})`, hostUserns));
   }
   const after = verdict(traces, raw);
   if (!after.measurement) problems.push(`the after-trial check would not accept this run: ${after.sentence}`);

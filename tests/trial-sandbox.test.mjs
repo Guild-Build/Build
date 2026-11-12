@@ -1,8 +1,8 @@
 // The Season trial job's two sandbox checks and the pins behind them. Before the key is fetched, the self-test
 // (.github/scripts/sandbox-self-test.mjs) runs the trial's own path with a stand-in for the model
 // (.github/scripts/stand-in-api.mjs); after the trial, .github/scripts/shell-starts.mjs decides whether the traces show
-// that the sandbox started every shell command the agents asked for. Nothing here calls a model or the network: the
-// stand-in and every claude are local.
+// that the sandbox started every shell command Claude Code tried to run. Nothing here calls a model or the network: the
+// stand-in and every claude are local, and no test runs git.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { decide, startStandIn, STAND_IN_KEY } from '../.github/scripts/stand-in-api.mjs';
 import { cliArgs, expectedRuns, judge, PROBE_COMMAND, selfTest, standInEnv } from '../.github/scripts/sandbox-self-test.mjs';
-import { bashCalls, REFUSALS, runsIn, SETUP_LINES, stoppedBySandbox, tracesIn, verdict } from '../.github/scripts/shell-starts.mjs';
+import { ALLOWED_REFUSALS, bashCalls, kindOf, runsIn, SETUP_LINES, tracesIn, verdict } from '../.github/scripts/shell-starts.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const read = rel => readFileSync(join(root, rel), 'utf8');
@@ -22,43 +22,63 @@ const install = read('.github/scripts/install-trial-tools.sh');
 const readme = read('README.md');
 const temp = (t, prefix) => { const dir = mkdtempSync(join(tmpdir(), prefix)); t.after(() => rmSync(dir, { recursive: true, force: true })); return dir; };
 
-// What the pilot run's Bash tool returned for every one of its 30 shell calls, on ubuntu-26.04 with Claude Code 2.1.322
-// (run 43153585543), and what the self-test's command printed inside a working sandbox on ubuntu-24.04 (run
-// 43248208194), where each line naming a .bashrc names its own run's folder.
+// Bash results as Claude Code 2.1.322 wrote them, sandbox on, when a stand-in model asked for each call (run
+// 43266336234): [is_error, content, its tool_result_meta entry]. Those under BROKEN came from ubuntu-26.04, where the
+// sandbox cannot start a command.
+const ACCEPT = { permission_decision: { decision: 'accept', source: 'config', reason_type: 'rule' } };
+const HOOK = { non_execution_kind: 'permission-rule', permission_decision: { decision: 'reject', source: 'hook', reason_type: 'hook' } };
+const SECCOMP_HELPER = 'apply-seccomp: write /proc/self/setgroups (nested userns is capability-restricted; caller must provide CAP_SYS_ADMIN): Permission denied';
+const OBSERVED = {
+  'exit 0': [false, 'hi', ACCEPT],
+  'exit 3': [true, 'Exit code 3\nout\nerr', ACCEPT],
+  'grep miss': [false, '(Bash completed with no output)', ACCEPT],
+  'hook exits 2': [true, "PreToolUse:Bash hook error: [echo 'test hook: blocked' >&2; exit 2]: test hook: blocked\n", HOOK],
+  'hook denies by JSON': [true, 'PreToolUse:Bash hook error: json hook says no', HOOK],
+  'malformed input': [true, '<tool_use_error>InputValidationError: Bash failed due to the following issues:\nThe required parameter `command` is missing\nAn unexpected parameter `cmd` was provided</tool_use_error>', undefined],
+  'long sleep': [true, '<tool_use_error>Blocked: standalone sleep 120. To wait for a condition, use Monitor with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use run_in_background: true. Do not chain shorter sleeps to work around this block.</tool_use_error>', undefined],
+};
+const BROKEN = {
+  'exit 0, sandbox broken': [true, `Exit code 1\n${SECCOMP_HELPER}`, ACCEPT],
+  'grep miss, sandbox broken': [false, SECCOMP_HELPER, ACCEPT],
+};
+// What the pilot run's Bash tool returned for each of its 30 shell calls (run 43153585543), and results this release's
+// source writes but which a free run cannot produce: its sandbox bridge error, its refusals of a command for a sandbox
+// reason, and a command interrupted before it finished.
 const bashrc = folder => `/bin/bash: /home/runner/work/_temp/evaltmp/${folder}/home/.bashrc: Permission denied`;
 const BASHRC = bashrc('claude-eval-1dVSyj');
-const SECCOMP_HELPER = 'apply-seccomp: write /proc/self/setgroups (nested userns is capability-restricted; caller must provide CAP_SYS_ADMIN): Permission denied';
 const PILOT = `Exit code 1\n${BASHRC}\n${BASHRC}\n${SECCOMP_HELPER}`;
+const FROM_SOURCE = [
+  'Linux sandbox HTTP bridge socket is missing (socat may have died). Restart to retry.',
+  'Linux sandbox SOCKS bridge socket is missing (socat may have died). Restart to retry.',
+  'Sandbox is required (sandbox.failIfUnavailable) and stopped being available in this session: socat is no longer installed. The command was refused, and so is a request to run it outside the sandbox (dangerouslyDisableSandbox): do not retry it that way. Only commands the user runs themselves with the `!` prefix, and commands their settings exclude from the sandbox, still run.',
+  'Sandbox is required but failed to initialize: bwrap is missing. Restart to retry. Running it outside the sandbox (dangerouslyDisableSandbox) is not allowed either.',
+  'Sandbox is enabled but failed to initialize. Sandboxing is disabled for the rest of this session; restart to retry.',
+  'partial output\n<error>Command was aborted before completion</error>',
+];
 const working = folder => `${bashrc(folder)}\n${bashrc(folder)}\nprobe=42\nseccomp=2\nuserns=user:[4026532282]`;
 const HOST = 'user:[4026531837]';
-// Claude Code's own refusals as its bundled source writes them, each with a reason filled in.
-const REFUSED = [
-  'Sandbox is required (sandbox.failIfUnavailable) and stopped being available in this session: socat is no longer installed. The command was refused, and so is a request to run it outside the sandbox (dangerouslyDisableSandbox): do not retry it that way. Only commands the user runs themselves with the `!` prefix, and commands their settings exclude from the sandbox, still run.',
-  'Sandbox is required but failed to initialize: bwrap could not\nset up its namespaces. Restart to retry. Running it outside the sandbox (dangerouslyDisableSandbox) is not allowed either.',
-  'Sandbox is required but failed to initialize. Fix the sandbox settings to retry (a --settings file is pinned for the process: restart). Running it outside the sandbox (dangerouslyDisableSandbox) is not allowed either.',
-  'Sandbox is enabled but failed to initialize: no seccomp filter. Until the sandbox can start, commands that would run in it are refused.',
-  'Sandbox is enabled but failed to initialize. Sandboxing is disabled for the rest of this session; restart to retry.',
-];
 
-// A trace as Claude Code writes it, one JSON message per line; each call is [tool, input, isError, text], and a call
-// whose text is undefined has no result.
-const entries = calls => calls.flatMap(([tool, input, isError, text], i) => [
-  { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: `toolu_${i}`, name: tool, input }] } },
-  ...(text === undefined ? [] : [{ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `toolu_${i}`, content: text, ...(isError ? { is_error: true } : {}) }] } }]),
+// A trace as Claude Code writes it, one JSON message per line. Each call is [tool, input, isError, text, meta]: a call
+// whose text is undefined has no result, and meta is its tool_result_meta entry. Ids start with `prefix`.
+const entries = (calls, prefix = 'toolu') => calls.flatMap(([tool, input, isError, text, meta], i) => [
+  { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: `${prefix}_${i}`, name: tool, input }] } },
+  ...(text === undefined ? [] : [{ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `${prefix}_${i}`, content: text, ...(isError ? { is_error: true } : {}) }] }, ...(meta ? { tool_result_meta: [{ id: `${prefix}_${i}`, ...meta }] } : {}) }]),
 ]);
-const trace = calls => entries(calls).map(entry => JSON.stringify(entry)).join('\n') + '\n';
-const bash = (command, isError, text) => ['Bash', { command }, isError, text];
+const trace = (calls, prefix) => entries(calls, prefix).map(entry => JSON.stringify(entry)).join('\n') + '\n';
+const bash = (command, isError, text, meta = ACCEPT) => ['Bash', { command }, isError, text, meta];
+const shape = ([isError, text, meta], command = 'c') => ['Bash', { command }, isError, text, meta];
 // A raw report as the eval writes it: each run is [case, arm, run folder], with the trace path the eval gives it.
 const report = runs => {
   const cases = new Map();
   for (const [name, arm, folder] of runs) {
     if (!cases.has(name)) cases.set(name, { name, arms: { with: [], without: [] } });
-    cases.get(name).arms[arm].push({ score: 1, error: null, tracePath: `/home/runner/work/_temp/evaltmp/${folder}/out/trace.jsonl` });
+    cases.get(name).arms[arm].push({ score: 1, error: null, tracePath: folder === null ? null : `/home/runner/work/_temp/evaltmp/${folder}/out/trace.jsonl` });
   }
   return { cases: [...cases.values()] };
 };
-// A run whose traces and report agree, from { folder: [calls] } with every run in case "c", arm "with".
-const run = byFolder => ({ traces: Object.fromEntries(Object.entries(byFolder).map(([f, calls]) => [f, trace(calls)])), raw: report(Object.keys(byFolder).map(f => ['c', 'with', f])) });
+// A run whose traces and report agree, from { folder: [calls] }, each run in its own case.
+const run = byFolder => ({ traces: Object.fromEntries(Object.entries(byFolder).map(([f, calls]) => [f, trace(calls, f)])), raw: report(Object.keys(byFolder).map(f => [`case-${f}`, 'with', f])) });
+const verdictOf = byFolder => { const r = run(byFolder); return verdict(r.traces, r.raw); };
 
 // A step of the trial job as written, and its run lines as its shell sees them.
 const stepText = name => {
@@ -99,6 +119,9 @@ test('the stand-in asks for one Bash call, records what came back once, and othe
   const later = as({ ...back, messages: [...back.messages, { role: 'assistant', content: second.reply.content }, { role: 'user', content: 'And now?' }] });
   assert.equal(later.reply.stop_reason, 'end_turn');
   assert.deepEqual(later.results, []);
+  // Two copies of one result in one request are both recorded, so the self-test sees the call answered twice.
+  const twice = decide({ ...offer, messages: [{ role: 'user', content: [1, 2].map(() => ({ type: 'tool_result', tool_use_id: 'toolu_sandbox_self_test_9', content: 'x' })) }] }, { command: 'c', seen: new Set(), nextId: () => 1 });
+  assert.equal(twice.results.length, 2);
 });
 
 test('the stand-in speaks the Messages API on 127.0.0.1, streamed or not, only to its own key, and logs no prompt', async t => {
@@ -134,12 +157,12 @@ test('the stand-in speaks the Messages API on 127.0.0.1, streamed or not, only t
   assert.doesNotMatch(JSON.stringify(s.requests), /private prompt words|sk-ant|placeholder/);
 });
 
-// The self-test's own runs: one with the build and one without, each in its own folder, as the eval writes them.
+// The self-test's own runs: one with the build and one without, each in its own folder with its own call id.
 const EXPECTED = ['run-one-command, with the build', 'run-one-command, without the build'];
 const selfRuns = (runs = [['with', 'claude-eval-a'], ['without', 'claude-eval-b']], text = working, isError = false) => ({
   raw: report(runs.map(([arm, folder]) => ['run-one-command', arm, folder])),
-  traces: Object.fromEntries(runs.map(([, folder]) => [folder, trace([bash(PROBE_COMMAND, isError, text(folder))])])),
-  results: runs.map(([, folder]) => ({ id: folder, isError, text: text(folder) })),
+  traces: Object.fromEntries(runs.map(([, folder]) => [folder, trace([bash(PROBE_COMMAND, isError, text(folder))], folder)])),
+  results: runs.map(([, folder]) => ({ id: `${folder}_0`, isError, text: text(folder) })),
 });
 const judged = (s, options = {}) => judge(s.results, { expected: EXPECTED, raw: s.raw, traces: s.traces, hostUserns: HOST, ...options });
 const failing = (s, options) => {
@@ -157,33 +180,62 @@ test("the self-test expects exactly the runs its own fixture asks for: one case,
 });
 
 test('the self-test fails when a run it asks for is missing, an extra run appears, or a result is duplicated or missing', () => {
-  // The reviewer's case: the report lists only the run with the build, with its one result and its trace.
+  // The first review's case: the report lists only the run with the build, with its one result and its trace.
   assert.match(failing(selfRuns([['with', 'claude-eval-a']])), /^the eval reported 1 agent run \(run-one-command, with the build\), but the self-test's trial asks for exactly 2 agent runs \(run-one-command, with the build; run-one-command, without the build\)$/m);
   assert.match(failing(selfRuns([['without', 'claude-eval-b']])), /^the eval reported 1 agent run \(run-one-command, without the build\)/m);
   // An extra run.
   assert.match(failing(selfRuns([['with', 'claude-eval-a'], ['without', 'claude-eval-b'], ['with', 'claude-eval-c']])), /^the eval reported 3 agent runs /m);
-  // A result the stand-in received twice, or one it never received.
-  const twice = selfRuns();
-  twice.results.push(twice.results[0]);
-  assert.match(failing(twice), /the stand-in received 3 Bash result\(s\), but the reported runs' traces hold 2/);
+  // A third result, a missing result, and a call recorded twice in its run's own trace.
+  const third = selfRuns();
+  third.results.push(third.results[0]);
+  assert.match(failing(third), /the stand-in received 2 results for claude-eval-a_0, not one/);
   const short = selfRuns();
   short.results.pop();
-  assert.match(failing(short), /the stand-in received 1 Bash result\(s\), but the reported runs' traces hold 2/);
-  // One run asked twice in its own trace, or left no trace.
+  assert.match(failing(short), /agent run \(run-one-command, without the build\): the stand-in never received the result of its call claude-eval-b_0/);
   const doubled = selfRuns();
-  doubled.traces['claude-eval-a'] = trace([bash(PROBE_COMMAND, false, working('claude-eval-a')), bash(PROBE_COMMAND, false, working('claude-eval-a'))]);
+  doubled.traces['claude-eval-a'] = trace([bash(PROBE_COMMAND, false, working('claude-eval-a')), bash(PROBE_COMMAND, false, working('claude-eval-a'))], 'claude-eval-a');
   assert.match(failing(doubled), /agent run \(run-one-command, with the build\): its trace holds 2 Bash call\(s\) with a result/);
+  // A run that left no trace, and no report at all.
   const traceless = selfRuns();
   delete traceless.traces['claude-eval-b'];
   const why = failing(traceless);
-  assert.match(why, /agent run \(run-one-command, without the build\) left no readable trace/);
-  assert.match(why, /the after-trial check would not accept this run: This run is not a measurement: .*1 of them left no trace/);
-  // No report at all.
+  assert.match(why, /agent run \(run-one-command, without the build\) left no readable trace of its own/);
+  assert.match(why, /the after-trial check would not accept this run: This run is not a measurement: 1 trace the eval's report names was not found/);
   assert.match(failing({ ...selfRuns(), raw: null }), /^the eval wrote no readable report/m);
-  // A trace of no reported run: only the after-trial check sees it, and the self-test fails with it.
+  // A trace of no reported run.
   const stray = selfRuns();
-  stray.traces['claude-eval-z'] = trace([bash('ls', false, 'a')]);
-  assert.deepEqual(judged(stray).problems, ["the after-trial check would not accept this run: This run is not a measurement: the eval's report lists 2 agent runs and 3 traces were found: 1 trace belongs to no run it lists."]);
+  stray.traces['claude-eval-z'] = trace([bash('ls', false, 'a')], 'claude-eval-z');
+  assert.match(failing(stray), /^1 trace\(s\) belong to no reported agent run: claude-eval-z$/m);
+});
+
+test('the self-test binds each result to its own call and its own trace: identical counts and texts are not enough', () => {
+  // The second review's first case: both reported runs point at one trace, and two distinct results arrive.
+  const shared = selfRuns();
+  shared.raw = report([['run-one-command', 'with', 'claude-eval-a'], ['run-one-command', 'without', 'claude-eval-a']]);
+  delete shared.traces['claude-eval-b'];
+  const one = failing(shared);
+  assert.match(one, /^1 trace\(s\) are named by more than one reported agent run: claude-eval-a$/m);
+  assert.match(one, /the stand-in received 1 result\(s\) for claude-eval-b_0, a call no reported run's trace holds/);
+  assert.match(one, /the after-trial check would not accept this run: .*1 trace is named by more than one agent run/);
+  // Its second case: two traces with their own calls, identical output, and the first call's result twice in place of
+  // the second's. The count matches and every text passes.
+  const same = selfRuns(undefined, () => 'probe=42\nseccomp=2\nuserns=user:[101]');
+  same.results = [same.results[0], same.results[0]];
+  const two = failing(same);
+  assert.match(two, /the stand-in received 2 results for claude-eval-a_0, not one/);
+  assert.match(two, /agent run \(run-one-command, without the build\): the stand-in never received the result of its call claude-eval-b_0/);
+  // The first round's same-count check, kept: the right ids, but one result is not what its trace holds.
+  const differs = selfRuns();
+  differs.results[1] = { ...differs.results[1], text: working('claude-eval-a') };
+  assert.match(failing(differs), /agent run \(run-one-command, without the build\): the result the stand-in received for claude-eval-b_0 differs from the one its trace holds/);
+  // A traced call that is not the self-test command, even with passing output.
+  const other = selfRuns();
+  other.traces['claude-eval-a'] = trace([bash('cat probe-output.txt', false, working('claude-eval-a'))], 'claude-eval-a');
+  assert.match(failing(other), /agent run \(run-one-command, with the build\): its traced Bash call ran "cat probe-output\.txt", not the self-test command/);
+  // A result for a call no trace holds, at the right count.
+  const foreign = selfRuns();
+  foreign.results[1] = { ...foreign.results[1], id: 'toolu_made_up' };
+  assert.match(failing(foreign), /the stand-in received 1 result\(s\) for toolu_made_up, a call no reported run's trace holds/);
 });
 
 test('the self-test passes only on exit 0 with the expected lines, from inside the sandbox', () => {
@@ -227,8 +279,10 @@ test('the CLI under the self-test gets the stand-in and its placeholder key, nev
 
 // A stub claude for the CLI under the self-test: as `plugin eval` it plays the arms STUB_PLAN names (both by default)
 // against whatever model API it is given, as Claude Code does, but returns STUB_PLAN's result instead of running the
-// command. It writes each run's trace (unless told not to; `twice` names an arm whose trace records the call twice)
-// and the raw report, and logs what it was started with.
+// command. It writes each run's trace and the raw report and logs what it was started with. Options: `twice` names an
+// arm whose trace records its call twice, `noTrace` writes no trace, `noReport` writes nothing, `shareTrace` points
+// every run in the report at the first run's trace, and `firstResultTwice` makes the first run answer the stand-in with
+// two copies of its result in one request while the second run never sends its own.
 const stubClaude = `#!${process.execPath}
 const { appendFileSync, mkdirSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
@@ -240,6 +294,7 @@ if (plan.noReport) process.exit(1);
 (async () => {
   const arms = { with: [], without: [] };
   const post = body => fetch(process.env.ANTHROPIC_BASE_URL + '/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY }, body: JSON.stringify(body) }).then(r => r.json());
+  let firstTrace;
   for (const [i, arm] of (plan.arms || ['with', 'without']).entries()) {
     const ask = { model: 'claude-sonnet-5-5', max_tokens: 9, tools: [{ name: 'Bash' }], messages: [{ role: 'user', content: 'Run the sandbox self-test command.' }] };
     const call = (await post(ask)).content.find(b => b.type === 'tool_use');
@@ -248,9 +303,12 @@ if (plan.noReport) process.exit(1);
     mkdirSync(out, { recursive: true });
     const lines = [{ type: 'assistant', message: { role: 'assistant', content: [call] } }, { type: 'user', message: { role: 'user', content: [result] } }];
     if (plan.twice === arm) lines.push({ type: 'assistant', message: { role: 'assistant', content: [{ ...call, id: call.id + '_again' }] } }, { type: 'user', message: { role: 'user', content: [{ ...result, tool_use_id: call.id + '_again' }] } });
-    if (!plan.noTrace) writeFileSync(join(out, 'trace.jsonl'), lines.map(e => JSON.stringify(e)).join('\\n') + '\\n');
-    await post({ ...ask, messages: [...ask.messages, { role: 'assistant', content: [call] }, { role: 'user', content: [result] }] });
-    arms[arm].push({ score: 1, error: null, tracePath: join(out, 'trace.jsonl') });
+    const written = !plan.noTrace && !(plan.shareTrace && i > 0);
+    if (written) writeFileSync(join(out, 'trace.jsonl'), lines.map(e => JSON.stringify(e)).join('\\n') + '\\n');
+    const answer = plan.firstResultTwice ? (i === 0 ? [result, result] : null) : [result];
+    if (answer) await post({ ...ask, messages: [...ask.messages, { role: 'assistant', content: [call] }, { role: 'user', content: answer }] });
+    if (i === 0) firstTrace = join(out, 'trace.jsonl');
+    arms[arm].push({ score: 1, error: null, tracePath: plan.shareTrace ? firstTrace : join(out, 'trace.jsonl') });
   }
   writeFileSync('buildguild-raw.json', JSON.stringify({ claudeVersion: '2.1.322', costUsd: 0, partial: false, cases: [{ name: 'run-one-command', arms, aggregates: { score: 1 } }], aggregates: { overallScore: 1, casesPassed: 1, casesTotal: 1, meanDelta: 0 } }));
 })();
@@ -290,11 +348,22 @@ test('the self-test runs the CLI against the stand-in only, and its verdict foll
   assert.equal(pilot.status, 0);
   assert.equal(pilot.verdict.pass, false);
   assert.match(pilot.verdict.problems[0], /^agent run \(run-one-command, with the build\): the command did not exit 0/);
-  // The reviewer's case: one arm only, with its one result and trace, and the CLI at exit 0.
+  // The first review's case: one arm only, with its one result and trace, and the CLI at exit 0.
   const oneArm = await run('one-arm', { text: working('x'), arms: ['with'] });
   assert.equal(oneArm.status, 0);
   assert.equal(oneArm.verdict.pass, false);
   assert.match(oneArm.verdict.problems[0], /^the eval reported 1 agent run \(run-one-command, with the build\), but the self-test's trial asks for exactly 2 agent runs/);
+  // The second review's cases: both runs pointing at one trace, and the first result twice in place of the second.
+  const shared = await run('shared', { text: working('x'), shareTrace: true });
+  assert.equal(shared.status, 0);
+  assert.equal(shared.verdict.pass, false);
+  assert.match(shared.verdict.problems.join('\n'), /are named by more than one reported agent run/);
+  const firstTwice = await run('first-twice', { text: working('x'), firstResultTwice: true });
+  assert.equal(firstTwice.status, 0);
+  assert.equal(firstTwice.verdict.pass, false);
+  assert.deepEqual(firstTwice.results.map(r => r.id), ['toolu_sandbox_self_test_1', 'toolu_sandbox_self_test_1']);
+  assert.match(firstTwice.verdict.problems.join('\n'), /the stand-in received 2 results for toolu_sandbox_self_test_1, not one/);
+  assert.match(firstTwice.verdict.problems.join('\n'), /never received the result of its call toolu_sandbox_self_test_2/);
   // An extra run, and a run whose trace records its call twice.
   const extra = await run('extra', { text: working('x'), arms: ['with', 'without', 'with'] });
   assert.match(extra.verdict.problems[0], /^the eval reported 3 agent runs /);
@@ -304,69 +373,61 @@ test('the self-test runs the CLI against the stand-in only, and its verdict foll
   // Results the traces do not hold, and an eval that writes no report.
   const untraced = await run('untraced', { text: working('x'), noTrace: true });
   assert.equal(untraced.verdict.pass, false);
-  assert.match(untraced.verdict.problems.join('\n'), /left no readable trace/);
+  assert.match(untraced.verdict.problems.join('\n'), /left no readable trace of its own/);
   const broken = await run('broken', { noReport: true });
   assert.equal(broken.status, 1);
   assert.equal(broken.verdict.pass, false);
   assert.match(broken.verdict.problems[0], /^the CLI ended with exit status 1, not 0/);
 });
 
-test("the after-trial rule: what counts as a command the sandbox kept from starting, and the limit it states", () => {
-  const stopped = [
-    PILOT,
-    `Exit code 1\n${SECCOMP_HELPER}`,
-    'Exit code 1\nbwrap: setting up uid map: Permission denied',
-    `Exit code 1\n${BASHRC}\nbwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n`,
-    // Claude Code's own refusals, word for word apart from the reason, even inside some other wording.
-    ...REFUSED,
-    `Error: ${REFUSED[0]}`,
-  ];
-  for (const text of stopped) assert.equal(stoppedBySandbox(true, text), true, text);
-  const notStopped = [
-    // A test that fails, after the shell's start-up complaints.
-    `Exit code 1\n${BASHRC}\n${BASHRC}\nFAIL tests/sum.test.js\n  expected 3, got 4\nTests: 1 failed, 4 passed`,
-    // A script that exits 1, silently or with its own message.
-    'Exit code 1',
-    `Exit code 1\n${BASHRC}\n${BASHRC}`,
-    'Exit code 1\nerror: config.yaml not found',
-    // bash's own complaint about the command.
-    'Exit code 127\n/bin/bash: line 1: pytest: command not found',
-    // A command's own output that mentions the sandbox among other lines, or not at the start of a line.
-    'Exit code 1\nchecking the sandbox\nbwrap: No permissions to create a new namespace',
-    'Exit code 1\nlog: apply-seccomp: write /proc/self/setgroups: Permission denied',
-    // The helper's prefix without its step and error, and Claude Code's words cut short or changed.
-    'Exit code 1\napply-seccomp: oops',
-    'Exit code 1\nSandbox is required',
-    'Exit code 1\nSandbox is required but failed to initialize: bwrap missing.',
-    REFUSED[1].replace('Restart to retry.', 'Restart later.'),
-  ];
-  for (const text of notStopped) assert.equal(stoppedBySandbox(true, text), false, text);
-  // A result that is not an error was a command that ran, whatever it printed.
-  assert.equal(stoppedBySandbox(false, SECCOMP_HELPER), false);
-  assert.equal(stoppedBySandbox(false, REFUSED[0]), false);
-  assert.equal(SETUP_LINES.length, 2);
-  assert.equal(REFUSALS.length, 4);
+test("the after-trial rule reads each result's shape: a process exit, an allowed refusal, or an error that is neither", () => {
+  const kind = ([isError, text, meta]) => kindOf(isError, text, meta);
+  // As Claude Code 2.1.322 wrote them: exits, a grep miss it reads as success, and refusals before the command ran.
+  assert.deepEqual(Object.fromEntries(Object.entries(OBSERVED).map(([k, v]) => [k, kind(v)])), {
+    'exit 0': 'success', 'exit 3': 'failed', 'grep miss': 'success', 'hook exits 2': 'refused', 'hook denies by JSON': 'refused', 'malformed input': 'refused', 'long sleep': 'refused',
+  });
+  // On the broken image: the helper's line, behind "Exit code 1" or as the whole output of a grep read as success.
+  for (const v of Object.values(BROKEN)) assert.equal(kind(v), 'stopped', v[1]);
+  assert.equal(kindOf(true, PILOT, ACCEPT), 'stopped');
+  // Errors that are no process exit, whatever their wording: the review's bridge error, Claude Code's refusals and an
+  // interrupted command. None of them is matched by its text.
+  for (const text of FROM_SOURCE) assert.equal(kindOf(true, text, ACCEPT), 'not-an-exit', text);
+  assert.equal(kindOf(true, `Error: Exit code 1\n${SECCOMP_HELPER}`, ACCEPT), 'not-an-exit');
+  // A hook's words with no hook decision behind them, or a validation tag around other words, are not refusals.
+  assert.equal(kindOf(true, OBSERVED['hook exits 2'][1], ACCEPT), 'not-an-exit');
+  assert.equal(kindOf(true, '<tool_use_error>Blocked: no reason given</tool_use_error>', undefined), 'not-an-exit');
+  assert.equal(kindOf(true, '<tool_use_error>Error calling tool (Bash): spawn E2BIG</tool_use_error>', undefined), 'not-an-exit');
+  // Ordinary failures of a command that ran stay failures.
+  for (const text of [`Exit code 1\n${BASHRC}\n${BASHRC}\nFAIL tests/sum.test.js\n  expected 3, got 4`, 'Exit code 1', `Exit code 1\n${BASHRC}`, 'Exit code 127\n/bin/bash: line 1: pytest: command not found', 'Exit code 1\nchecking the sandbox\nbwrap: No permissions to create a new namespace', 'Exit code 1\napply-seccomp: oops', 'Exit code 1\nlog: apply-seccomp: write /proc/self/setgroups: Permission denied']) {
+    assert.equal(kindOf(true, text, ACCEPT), 'failed', text);
+  }
+  assert.equal(kindOf(false, `${BASHRC}\nREADME.md`, ACCEPT), 'success');
+  assert.deepEqual(SETUP_LINES.map(String), ['/^bwrap: \\S/', '/^apply-seccomp: .+: \\S/']);
+  assert.equal(ALLOWED_REFUSALS.length, 3);
 });
 
-test("the reviewer's ordinary script is not a sandbox stop, and a script that prints only a setup-shaped line is, as stated", () => {
+test("the stated limit, with real bash: the review's ordinary script is a failure, and a script that prints only a setup-shaped line counts as stopped", () => {
   const ran = command => {
     const r = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
-    assert.equal(r.status, 1);
-    return stoppedBySandbox(true, `Exit code ${r.status}\n${r.stdout}${r.stderr}`);
+    return [r.status, kindOf(r.status !== 0, `${r.status !== 0 ? `Exit code ${r.status}\n` : ''}${r.stdout}${r.stderr}`, ACCEPT)];
   };
-  assert.equal(ran("printf 'Sandbox is required for deployment\\n' >&2; exit 1"), false);
-  // The stated limit: a command that started, failed and printed only lines of the two setup shapes counts as stopped.
-  assert.equal(ran("printf 'bwrap: cannot reach the mirror\\n' >&2; exit 1"), true);
-  assert.equal(ran("printf 'apply-seccomp: open config: No such file or directory\\n' >&2; exit 1"), true);
+  assert.deepEqual(ran("printf 'Sandbox is required for deployment\\n' >&2; exit 1"), [1, 'failed']);
+  assert.deepEqual(ran("printf 'bwrap: cannot reach the mirror\\n' >&2; exit 1"), [1, 'stopped']);
+  assert.deepEqual(ran("printf 'apply-seccomp: open config: No such file or directory\\n' >&2; exit 1"), [1, 'stopped']);
+  // Even at exit 0: such output alone counts as stopped, which can only reject a run.
+  assert.deepEqual(ran("printf 'bwrap: cannot reach the mirror\\n'"), [0, 'stopped']);
 });
 
 test('a trace is read in full: its requests, their results, and every line that cannot be read', () => {
-  // A result before its request still pairs; a request answered twice counts once, and as stopped if either result is.
+  // A result before its request still pairs; a request answered twice takes its worst result.
   const lines = entries([bash('ls', false, 'a'), bash('make', true, 'Exit code 1\nFAIL')]);
-  const swapped = [lines[1], lines[0], lines[2], lines[3], { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_1', is_error: true, content: SECCOMP_HELPER }] } }].map(e => JSON.stringify(e)).join('\n');
-  const read = bashCalls(swapped);
-  assert.deepEqual(read.calls.map(c => [c.command, c.stopped]), [['ls', false], ['make', true]]);
-  assert.deepEqual([read.unanswered, read.unreadable, read.empty], [[], 0, false]);
+  const swapped = [lines[1], lines[0], lines[2], lines[3], { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_1', is_error: true, content: `Exit code 1\n${SECCOMP_HELPER}` }] } }].map(e => JSON.stringify(e)).join('\n');
+  const readBack = bashCalls(swapped);
+  assert.deepEqual(readBack.calls.map(c => [c.command, c.kind]), [['ls', 'success'], ['make', 'stopped']]);
+  assert.deepEqual([readBack.unanswered, readBack.unreadable, readBack.empty], [[], 0, false]);
+  // The meta that belongs to a result is the entry with its id.
+  const metaRead = bashCalls(trace([shape(OBSERVED['hook exits 2'])]));
+  assert.deepEqual([metaRead.calls[0].kind, metaRead.calls[0].meta.permission_decision.source], ['refused', 'hook']);
   // A request with no result, lines that are not JSON objects, and empty traces.
   assert.deepEqual(bashCalls(trace([bash('npm test', undefined, undefined)])).unanswered, [{ id: 'toolu_0', command: 'npm test' }]);
   assert.equal(bashCalls(`${trace([bash('ls', false, 'a')])}5\nnull\n[1]\n{"type":`).unreadable, 4);
@@ -375,47 +436,60 @@ test('a trace is read in full: its requests, their results, and every line that 
   assert.equal(bashCalls('{not json').empty, false);
   // Results written as text blocks are read like plain text, and other tools are not Bash requests.
   const blocks = bashCalls(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'x', name: 'Bash', input: { command: 'c' } }, { type: 'tool_use', id: 'y', name: 'Read', input: {} }] } }) + '\n' + JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'x', is_error: true, content: [{ type: 'text', text: 'Exit code 1' }, { type: 'text', text: SECCOMP_HELPER }] }] } }));
-  assert.deepEqual([blocks.calls.length, blocks.calls[0].stopped, blocks.unanswered.length], [1, true, 0]);
+  assert.deepEqual([blocks.calls.length, blocks.calls[0].kind, blocks.unanswered.length], [1, 'stopped', 0]);
   // The report's runs, named by case and arm, with the folder of each trace.
   assert.deepEqual(runsIn(report([['c', 'with', 'claude-eval-a'], ['c', 'without', 'claude-eval-b']])), [{ name: 'c, with the build', trace: 'claude-eval-a' }, { name: 'c, without the build', trace: 'claude-eval-b' }]);
-  assert.deepEqual(runsIn({ cases: [{ name: 'c', arms: { with: [{ tracePath: null }] } }] }), [{ name: 'c, with the build', trace: null }]);
+  assert.deepEqual(runsIn(report([['c', 'with', null]])), [{ name: 'c, with the build', trace: null }]);
 });
 
-test('the after-trial verdict: a measurement only on positive evidence for every shell command, and the reasons with counts when not', () => {
-  const healthy = run({
-    'claude-eval-a': [bash('npm test', true, `Exit code 1\n${BASHRC}\nFAIL tests/sum.test.js`), bash('ls', false, 'README.md'), ['Read', { file_path: '/x' }, true, SECCOMP_HELPER]],
-    'claude-eval-b': [bash('./deploy.sh', true, 'Exit code 1'), bash('pytest', true, 'Exit code 127\n/bin/bash: line 1: pytest: command not found')],
-  });
-  const fine = verdict(healthy.traces, healthy.raw);
+test('the after-trial verdict: a measurement only on positive evidence, and one stopped or failed-to-run call among healthy ones is enough to reject', () => {
+  const healthy = {
+    'claude-eval-a': [bash('npm test', true, `Exit code 1\n${BASHRC}\nFAIL tests/sum.test.js`), bash('ls', false, 'README.md'), ['Read', { file_path: '/x' }, true, SECCOMP_HELPER], shape(OBSERVED['hook exits 2'], 'git push --force')],
+    'claude-eval-b': [bash('./deploy.sh', true, 'Exit code 1'), bash('pytest', true, 'Exit code 127\n/bin/bash: line 1: pytest: command not found'), shape(OBSERVED['grep miss'], 'grep zzz f')],
+  };
+  const fine = verdictOf(healthy);
   assert.equal(fine.measurement, true);
-  assert.equal(fine.sentence, "The sandbox started every shell command the agents asked for: 4 of 4, and each of the 2 agent runs in the eval's report left a complete trace.");
-  // A complete trace with no shell command in it is still a measurement.
-  const quiet = run({ 'claude-eval-a': [['Read', { file_path: '/x' }, false, 'text']] });
-  assert.equal(verdict(quiet.traces, quiet.raw).sentence, "The sandbox started every shell command the agents asked for: 0 of 0, and each of the 1 agent run in the eval's report left a complete trace.");
+  assert.equal(fine.sentence, "The sandbox started every shell command Claude Code tried to run for the agents: 5 of 5 ran to an exit (2 with success), and 1 more was refused before running, by a hook or an input check; each of the 2 agent runs in the eval's report left its own complete trace.");
+  // A complete trace with no shell command in it is still a measurement, and so is one whose only call a hook stopped.
+  assert.equal(verdictOf({ 'claude-eval-a': [['Read', { file_path: '/x' }, false, 'text']] }).measurement, true);
+  assert.equal(verdictOf({ 'claude-eval-a': [shape(OBSERVED['hook denies by JSON'])] }).measurement, true);
+  const not = byFolder => { const v = verdictOf(byFolder); assert.equal(v.measurement, false); return v.sentence; };
+  // Kept from the first round: one stopped call among healthy runs rejects the run.
+  assert.match(not({ ...healthy, 'claude-eval-c': [bash('ls', false, 'a'), bash('make', true, 'Exit code 1\nbwrap: setting up uid map: Permission denied')] }), /the sandbox kept 1 of the 7 shell commands Claude Code tried to run from starting, in 1 of 3 agent runs/);
+  // A grep stopped by the sandbox, which Claude Code reads as success, among healthy calls.
+  assert.match(not({ ...healthy, 'claude-eval-c': [shape(BROKEN['grep miss, sandbox broken'], 'grep x f')] }), /the sandbox kept 1 of the 6 shell commands/);
+  // One error that is no exit among healthy calls, such as the review's bridge error, quoted in the sentence.
+  assert.match(not({ ...healthy, 'claude-eval-c': [bash('ls', true, FROM_SOURCE[0])] }), /1 shell command ended in an error from Claude Code instead of an exit of the command \(the first: Linux sandbox HTTP bridge socket is missing \(socat may have died\)\. Restart to retry\.\)/);
+  // Not one shell command came back as a success, in the whole job.
+  assert.equal(not({ 'claude-eval-a': [bash('npm test', true, 'Exit code 1\nFAIL')], 'claude-eval-b': [bash('make', true, 'Exit code 2\nerror')] }), 'This run is not a measurement: Claude Code tried to run 2 shell commands for the agents and not one came back as a success.');
+  // The pilot: every call stopped, so no success either.
+  const pilot = verdictOf({ 'claude-eval-p': [bash('git status', true, PILOT)], 'claude-eval-q': [bash('ls', true, PILOT), bash('make', true, PILOT)], 'claude-eval-r': [['Read', { file_path: '/x' }, false, 'text']] });
+  assert.deepEqual([pilot.measurement, pilot.stopped.length], [false, 3]);
+  assert.equal(pilot.sentence, `This run is not a measurement: the sandbox kept 3 of the 3 shell commands Claude Code tried to run from starting, in 2 of 3 agent runs, so every grader that needed one of them failed (the first ended with: ${SECCOMP_HELPER}); Claude Code tried to run 3 shell commands for the agents and not one came back as a success.`);
+});
+
+test('the after-trial verdict: the report and the traces must be complete and pair one trace to one run', () => {
   const not = (traces, raw) => { const v = verdict(traces, raw); assert.equal(v.measurement, false); return v.sentence; };
-  // The reviewer's three traces: the result line cut short, a request with no result, and a wholly malformed trace.
-  const pilotTrace = trace([bash('git status', true, `Exit code 1\n${SECCOMP_HELPER}`)]).trimEnd();
-  const one = trace => ({ 'claude-eval-a': trace });
+  const pilotTrace = trace([bash('git status', true, `Exit code 1\n${SECCOMP_HELPER}`)], 'claude-eval-a').trimEnd();
   const raw1 = report([['c', 'with', 'claude-eval-a']]);
-  assert.equal(not(one(pilotTrace), raw1), `This run is not a measurement: the sandbox kept 1 of the 1 shell commands the agents asked for from starting, in 1 of 1 agent run, so every grader that needed one of them failed (the first ended with: ${SECCOMP_HELPER}).`);
-  assert.equal(not(one(pilotTrace.slice(0, -1)), raw1), 'This run is not a measurement: 1 shell command the agents asked for got no result in the trace, as when a run is cut off in the middle of a command; 1 trace line could not be read.');
+  const one = text => ({ 'claude-eval-a': text });
+  // The first review's three traces: the result line cut short, a request with no result, a wholly malformed trace.
+  assert.equal(not(one(pilotTrace.slice(0, -1)), raw1), 'This run is not a measurement: 1 trace line could not be read; 1 shell command the agents asked for got no result in the trace, as when a run is cut off in the middle of a command.');
   assert.equal(not(one(pilotTrace.split('\n')[0]), raw1), 'This run is not a measurement: 1 shell command the agents asked for got no result in the trace, as when a run is cut off in the middle of a command.');
   assert.equal(not(one('{"type":"assistant","message":\nnot json at all\n'), raw1), 'This run is not a measurement: 2 trace lines could not be read.');
   // An empty trace file, or one that could not be opened.
   assert.equal(not(one(''), raw1), 'This run is not a measurement: 1 trace file was empty.');
   assert.equal(not({ 'claude-eval-a': null }, raw1), 'This run is not a measurement: 1 trace file could not be opened.');
-  // The report against the traces: runs that left none, traces of no run, no report, and a report of no runs.
-  const three = report([['c', 'with', 'claude-eval-a'], ['c', 'without', 'claude-eval-b'], ['d', 'with', 'claude-eval-c']]);
-  assert.equal(not({ 'claude-eval-a': trace([]), 'claude-eval-c': trace([]) }, three), "This run is not a measurement: 2 trace files were empty; the eval's report lists 3 agent runs and 2 traces were found: 1 of them left no trace.");
-  assert.equal(not({ 'claude-eval-a': trace([bash('ls', false, 'a')]), 'claude-eval-z': trace([bash('ls', false, 'a')]) }, raw1), "This run is not a measurement: the eval's report lists 1 agent run and 2 traces were found: 1 trace belongs to no run it lists.");
-  assert.equal(not(healthy.traces, null), 'This run is not a measurement: the eval left no readable report of its agent runs, so nothing shows that each one left its trace.');
+  // The second review's case: two runs naming one trace, whose single call succeeded.
+  const good = trace([bash('ls', false, 'a')], 'claude-eval-a');
+  assert.equal(not(one(good), report([['c', 'with', 'claude-eval-a'], ['c', 'without', 'claude-eval-a']])), "This run is not a measurement: 1 trace is named by more than one agent run in the eval's report, so some run left no trace of its own.");
+  // A run that names no trace, a named trace not found, a trace of no run, no report, and a report of no runs.
+  assert.equal(not(one(good), report([['c', 'with', 'claude-eval-a'], ['c', 'without', null]])), "This run is not a measurement: 1 agent run in the eval's report names no trace.");
+  assert.equal(not(one(good), report([['c', 'with', 'claude-eval-a'], ['d', 'with', 'claude-eval-b']])), "This run is not a measurement: 1 trace the eval's report names was not found.");
+  assert.equal(not({ 'claude-eval-a': good, 'claude-eval-z': good }, raw1), "This run is not a measurement: 1 trace found belongs to no agent run in the eval's report.");
+  assert.equal(not(one(good), null), 'This run is not a measurement: the eval left no readable report of its agent runs, so nothing shows that each one left its trace.');
   assert.equal(not({}, { cases: [] }), "This run is not a measurement: the eval's report lists no agent runs.");
-  assert.equal(not({}, raw1), "This run is not a measurement: the eval's report lists 1 agent run and 0 traces were found: 1 of them left no trace.");
-  // The pilot: every shell call in every run stopped by the sandbox's helper, among runs that asked for none.
-  const pilot = run({ 'claude-eval-p': [bash('git status', true, PILOT)], 'claude-eval-q': [bash('ls', true, PILOT), bash('make', true, PILOT)], 'claude-eval-r': [] });
-  const v = verdict(pilot.traces, pilot.raw);
-  assert.deepEqual([v.measurement, v.stopped.length, v.calls], [false, 3, 3]);
-  assert.match(v.sentence, /^This run is not a measurement: the sandbox kept 3 of the 3 shell commands the agents asked for from starting, in 2 of 3 agent runs, /);
+  assert.equal(not({}, raw1), "This run is not a measurement: 1 trace the eval's report names was not found.");
 });
 
 test('the after-trial check fails the job and says why in its log, the job summary and the step outputs', t => {
@@ -431,27 +505,32 @@ test('the after-trial check fails the job and says why in its log, the job summa
     return { ...r, output: readFileSync(join(folder, 'output'), 'utf8'), summary: readFileSync(join(folder, 'summary'), 'utf8') };
   };
   const raw1 = report([['c', 'with', 'claude-eval-a']]);
-  const bad = runIn({ 'claude-eval-a': trace([bash('ls', true, 'Exit code 1\nbwrap: odd\rline')]) }, raw1);
+  const bad = runIn({ 'claude-eval-a': trace([bash('ls', false, 'a'), bash('ls', true, 'Exit code 1\nbwrap: odd\rline')], 'claude-eval-a') }, raw1);
   assert.equal(bad.status, 1);
   assert.match(bad.stdout, /^::error::This run is not a measurement: /m);
-  assert.match(bad.summary, /^### Not a measurement\n\nThis run is not a measurement: the sandbox kept 1 of the 1 /);
+  assert.match(bad.summary, /^### Not a measurement\n\nThis run is not a measurement: the sandbox kept 1 of the 2 /);
   // Two output lines, whatever the trace held: the carriage return in the sandbox's line is dropped.
-  assert.deepEqual(bad.output.split('\n'), ['measurement=false', 'sentence=This run is not a measurement: the sandbox kept 1 of the 1 shell commands the agents asked for from starting, in 1 of 1 agent run, so every grader that needed one of them failed (the first ended with: bwrap: oddline).', '']);
-  const good = runIn({ 'claude-eval-a': trace([bash('npm test', true, 'Exit code 1\nFAIL')]) }, raw1);
+  assert.deepEqual(bad.output.split('\n'), ['measurement=false', 'sentence=This run is not a measurement: the sandbox kept 1 of the 2 shell commands Claude Code tried to run from starting, in 1 of 1 agent run, so every grader that needed one of them failed (the first ended with: bwrap: oddline).', '']);
+  const good = runIn({ 'claude-eval-a': trace([bash('npm test', true, 'Exit code 1\nFAIL'), bash('ls', false, 'a')], 'claude-eval-a') }, raw1);
   assert.equal(good.status, 0);
   assert.equal(good.output.split('\n')[0], 'measurement=true');
   assert.doesNotMatch(good.summary, /Not a measurement/);
-  // The reviewer's three traces and an empty one fail it through the command line too.
-  const pilotTrace = trace([bash('git status', true, `Exit code 1\n${SECCOMP_HELPER}`)]).trimEnd();
-  for (const text of [pilotTrace.slice(0, -1), pilotTrace.split('\n')[0], '{"type":"assistant","message":\nnot json at all\n', '']) {
-    const incomplete = runIn({ 'claude-eval-a': text }, raw1);
-    assert.equal(incomplete.status, 1, text);
-    assert.match(incomplete.output, /^measurement=false\nsentence=This run is not a measurement: /, text);
-    assert.match(incomplete.summary, /^### Not a measurement\n/, text);
+  // The reviews' traces fail it through the command line too: three incomplete ones and an empty one, two runs naming
+  // one trace, and the bridge error.
+  const pilotTrace = trace([bash('git status', true, `Exit code 1\n${SECCOMP_HELPER}`)], 'claude-eval-a').trimEnd();
+  for (const [traces, raw] of [
+    ...[pilotTrace.slice(0, -1), pilotTrace.split('\n')[0], '{"type":"assistant","message":\nnot json at all\n', ''].map(text => [{ 'claude-eval-a': text }, raw1]),
+    [{ 'claude-eval-a': trace([bash('ls', false, 'a')], 'claude-eval-a') }, report([['c', 'with', 'claude-eval-a'], ['c', 'without', 'claude-eval-a']])],
+    [{ 'claude-eval-a': trace([bash('ls', true, FROM_SOURCE[0])], 'claude-eval-a') }, raw1],
+  ]) {
+    const failed = runIn(traces, raw);
+    assert.equal(failed.status, 1, JSON.stringify(traces));
+    assert.match(failed.output, /^measurement=false\nsentence=This run is not a measurement: /);
+    assert.match(failed.summary, /^### Not a measurement\n/);
   }
   // A missing or unreadable raw report fails the check.
   for (const raw of [undefined, '{"cases": [']) {
-    const missing = runIn({ 'claude-eval-a': trace([bash('ls', false, 'a')]) }, raw);
+    const missing = runIn({ 'claude-eval-a': trace([bash('ls', false, 'a')], 'claude-eval-a') }, raw);
     assert.equal(missing.status, 1);
     assert.match(missing.output, /^measurement=false\nsentence=This run is not a measurement: the eval left no readable report/);
   }
@@ -544,7 +623,7 @@ test('the gather step renames the record of a run that is not a measurement, bes
   assert.deepEqual(kept.files, ['evidence-lean-start-guild-smoke-v1.json', 'raw-lean-start-guild-smoke-v1.json', 'traces/claude-eval-a/trace.jsonl']);
   assert.equal(kept.note, null);
   assert.equal(kept.summary, '');
-  const why = 'This run is not a measurement: the sandbox kept 30 of the 30 shell commands the agents asked for from starting.';
+  const why = 'This run is not a measurement: the sandbox kept 30 of the 30 shell commands Claude Code tried to run from starting.';
   const renamed = gather('false', why);
   assert.deepEqual(renamed.files, ['NOT-A-MEASUREMENT.txt', 'not-evidence-lean-start-guild-smoke-v1.json', 'raw-lean-start-guild-smoke-v1.json', 'traces/claude-eval-a/trace.jsonl']);
   assert.equal(readFileSync(join(renamed.upload, 'not-evidence-lean-start-guild-smoke-v1.json'), 'utf8'), '{"schema":"buildguild.evidence.v1"}\n');
@@ -556,21 +635,24 @@ test('the gather step renames the record of a run that is not a measurement, bes
   assert.match(unchecked.note, /^This run was never checked for shell commands the sandbox kept from starting\.\n/);
 });
 
-test('the workflow header and the README say what each check proves, the rule\'s limit, and how to move a pin', () => {
+test('the workflow header and the README say what each check proves, the rule and its limits, and how to move a pin', () => {
   const header = workflow.slice(0, workflow.indexOf('\non:'));
   const flat = text => text.replace(/\n# ?/g, ' ').replace(/\s+/g, ' ');
-  for (const phrase of ['pinned to the ubuntu-24.04 image and to the Claude Code release in .github/scripts/install-trial-tools.sh', "AppArmor's bwrap-userns-restrict profile keeps the sandbox's seccomp helper from starting any command", 'with a stand-in for the model on 127.0.0.1, so no model is asked and nothing is spent', 'both agent runs its trial asks for, one with the build and one without, each ran its Bash call inside the sandbox', "a user namespace other than the runner's", 'The run is a measurement only if every agent run the report lists left a trace, every trace reads in full, every shell command the agents asked for has its result, and the sandbox started each one.', 'not-evidence-<build>-<trial>.json beside NOT-A-MEASUREMENT.txt']) {
+  for (const phrase of ['pinned to the ubuntu-24.04 image and to the Claude Code release in .github/scripts/install-trial-tools.sh', "AppArmor's bwrap-userns-restrict profile keeps the sandbox's seccomp helper from starting any command", 'with a stand-in for the model on 127.0.0.1, so no model is asked and nothing is spent', 'both agent runs its trial asks for, one with the build and one without, each ran its Bash call inside the sandbox', "a user namespace other than the runner's", 'not-evidence-<build>-<trial>.json beside NOT-A-MEASUREMENT.txt']) {
     assert.ok(flat(header).includes(phrase), phrase);
   }
   const shells = stepText(SHELLS).replace(/\n {8}# ?/g, ' ').replace(/\s+/g, ' ');
-  for (const phrase of ["Limit: a command that started, failed and printed nothing but lines of those two shapes, plus bash's complaints, is counted as stopped too, which can only reject a run, never accept one.", 'A run cut off in the middle of a shell command is rejected and has to run again.', 'one of Claude Code\'s own refusals for a sandbox reason, word for word']) {
-    assert.ok(shells.includes(phrase), phrase);
-  }
   const text = readme.replace(/\s+/g, ' ');
-  for (const phrase of ['**Before the key is fetched**', '**After the trial**', 'no model is asked and nothing is spent', 'exactly the two agent runs that trial asks for, one with the build and one without', 'A run cut off in the middle of a shell command is therefore rejected, and has to be run again.', 'A trial whose agents asked for no shell command at all is still a measurement.', "That rule has a limit: a command that started, failed and printed nothing but lines of those two shapes, plus bash's complaints, is counted as stopped too. That can only reject a run, never accept one.", '`bwrap: <message>`', '`apply-seccomp: <step>: <error>`', 'To move a pin on purpose:', 'The sandbox self-test workflow runs on that pull request at no cost. Merge only if it passes.', 'with each of the three Claude Code releases tried (2.1.309, 2.1.311 and 2.1.322)']) {
+  // The same rule and the same limits, in the step's comment and in the README.
+  for (const where of [shells, text]) {
+    for (const phrase of ['error whose text begins "Exit code <n>"', 'a PreToolUse hook refused the call', "the model's input failed validation", 'Claude Code blocked a long sleep', 'nothing but the sandbox wrapper\'s own setup lines', 'not one of them came back as a success', 'can only reject a run, never accept one', 'prints something besides those shapes and hits only some commands is not detected', 'A run cut off in the middle of a shell command is rejected']) {
+      assert.ok(where.includes(phrase), `${phrase} (${where === shells ? 'workflow' : 'README'})`);
+    }
+  }
+  for (const phrase of ['**Before the key is fetched**', '**After the trial**', 'no model is asked and nothing is spent', 'exactly the two agent runs that trial asks for, one with the build and one without', 'received each call\'s result exactly once, under the call\'s own id', 'A trial whose agents asked for no shell command at all is still a measurement.', 'To move a pin on purpose:', 'The sandbox self-test workflow runs on that pull request at no cost. Merge only if it passes.', 'with each of the three Claude Code releases tried (2.1.309, 2.1.311 and 2.1.322)', 'reads exit status 1 as success for `grep`, `find`, `diff` and `test`']) {
     assert.ok(text.includes(phrase), phrase);
   }
-  for (const stale of ['never matches', 'whatever the Claude Code release']) {
+  for (const stale of ['never matches', 'whatever the Claude Code release', 'word for word apart from the reason']) {
     assert.ok(!text.includes(stale) && !flat(header).includes(stale) && !shells.includes(stale), stale);
   }
 });
