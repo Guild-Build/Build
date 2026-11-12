@@ -7,5 +7,8 @@
  {"name": "malformed input", "input": {"cmd": "ls"}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}}},
  {"name": "long sleep", "input": {"command": "sleep 120"}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}}},
  {"name": "asks to run outside the sandbox", "input": {"command": "echo hi", "dangerouslyDisableSandbox": true}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}}},
- {"name": "required sandbox, socat hidden from PATH", "input": {"command": "echo hi"}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false, "failIfUnavailable": true}}, "hideSocat": true}
+ {"name": "required sandbox, socat hidden from PATH", "input": {"command": "echo hi"}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false, "failIfUnavailable": true}}, "hideSocat": true},
+ {"name": "started in the background", "input": {"command": "echo hi", "run_in_background": true}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}}},
+ {"name": "runs past its timeout", "input": {"command": "python3 -c \"import time; time.sleep(8); print('late')\"", "timeout": 2000}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}}},
+ {"name": "git diff with a difference, exit 1", "input": {"command": "git diff --no-index --quiet /etc/hostname /etc/hosts"}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}}}
 ]

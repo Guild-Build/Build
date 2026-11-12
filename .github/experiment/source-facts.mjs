@@ -19,6 +19,11 @@ const needles = [
   'bridge socket is missing (socat may have died). Restart to retry.',
   'Sandbox is required (sandbox.failIfUnavailable) and stopped being available in this session: ${',
   ',is_error:!0,tool_use_id:n}],...',
+  'if(s==="diff"||s==="grep")return',
+  '.message,noOutputExpected:',
+  'Semantic interpretation for non-error exit codes with special meaning',
+  'ID of the background task if command is running in background',
+  '.returnCodeInterpretation!==""?',
 ];
 for (const n of needles) {
   const hits = [];
