@@ -30,8 +30,8 @@ name: Season trial
 # other than the runner's. Otherwise the job stops there. After the trial, .github/scripts/shell-starts.mjs reads the
 # eval's raw report and every agent trace. The run is a measurement only if they are complete and pair one trace to one
 # run, every Bash result is the command's own exit or a refusal made before it ran, no exit holds nothing but the
-# sandbox's setup lines, and at least one command Claude Code tried to run came back as a success. Otherwise the job
-# fails and says why in its summary, and its files upload as not-evidence-<build>-<trial>, with the record renamed
+# sandbox's setup lines, and at least one command Claude Code tried to run exited 0. Otherwise the job fails and says
+# why in its summary, and its files upload as not-evidence-<build>-<trial>, with the record renamed
 # not-evidence-<build>-<trial>.json beside NOT-A-MEASUREMENT.txt.
 on:
   push:
@@ -271,12 +271,14 @@ jobs:
         # refusals made before a command runs: a PreToolUse hook refused the call, the model's input failed validation,
         # or Claude Code blocked a long sleep. (c) A Bash result is a process exit with nothing but the sandbox
         # wrapper's own setup lines, shaped like "bwrap: <message>" or "apply-seccomp: <step>: <error>", plus bash's
-        # complaints. (d) Claude Code tried to run shell commands for the agents and not one of them came back as a
-        # success. Limits: (c) also counts a command that started and printed nothing but such lines, which can only
-        # reject a run, never accept one; and a wrapper failure that exits with a status, prints something besides
-        # those shapes and hits only some commands is not detected here (the self-test and the pins guard against it).
-        # Any of these fails the job, says why in the job summary, and the files below upload as
-        # not-evidence-<build>-<trial>.
+        # complaints. (d) Claude Code tried to run shell commands for the agents and not one of them exited 0. A grep
+        # that found nothing, which Claude Code reads as success, and a command it ran in the background, as it does
+        # when a command runs past its timeout, do not count; its own record of each result in the trace says which.
+        # Limits: (c) also counts a command that started and printed nothing but such lines, which can only reject a
+        # run, never accept one; and a wrapper failure that exits with a status, prints something besides those shapes
+        # and hits only some commands is not detected here, nor is one that hits only commands run in the background
+        # (the self-test and the pins guard against it). Any of these fails the job, says why in the job summary, and
+        # the files below upload as not-evidence-<build>-<trial>.
         run: node .github/scripts/shell-starts.mjs "$RUNNER_TEMP/evaltmp" "raw-$BG_BUILD-$BG_TRIAL${BG_REP:+-rep$BG_REP}.json"
       - name: Gather the files to upload
         if: ${{ always() && matrix.verify_only != 'true' }}

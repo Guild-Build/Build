@@ -17,10 +17,16 @@
 //      lines shaped like bubblewrap's "bwrap: <message>" or the seccomp helper's "apply-seccomp: <step>: <error>", and
 //      otherwise only bash's own complaints. A result counts whether Claude Code marked it an error or not, since it
 //      reads exit status 1 as success for grep, find, diff and test;
-//  (d) Claude Code tried to run at least one shell command for the agents and not one of them came back as a success.
+//  (d) Claude Code tried to run at least one shell command for the agents and not one of them exited 0. A result
+//      Claude Code did not mark an error is not always an exit 0: it also reads exit status 1 as success for grep,
+//      find, diff, test and a few more, and it answers at once for a command it runs in the background, as it does
+//      when a command runs past its timeout. Its own record of the result, the trace line's tool_use_result, says so
+//      with returnCodeInterpretation or backgroundTaskId, so a call exited 0 only when that record is there, says the
+//      command was not interrupted, and holds neither.
 // The limits: (c) also counts a command that started and printed nothing but such lines, which can only reject a run.
-// And a wrapper failure that exits with a status, prints something besides those shapes and hits only some commands
-// is not detected here; the self-test before the key and the pins guard against that.
+// A wrapper failure that exits with a status, prints something besides those shapes and hits only some commands is
+// not detected here, and neither is one that hits a command run in the background, whose exit comes later, outside its
+// Bash result. The self-test before the key and the pins guard against those.
 //
 // Usage: node .github/scripts/shell-starts.mjs <folder holding claude-eval-*/out/trace.jsonl> <the eval's raw report>
 import { appendFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
@@ -53,13 +59,19 @@ export function kindOf(isError, text, meta) {
   return isError ? 'failed' : 'success';
 }
 
+// Whether a result shows an exit 0: a success (not stopped) whose record, Claude Code's tool_use_result, says the
+// command was not interrupted, its exit status was not read as success (returnCodeInterpretation), and it was not
+// moved to the background (backgroundTaskId).
+const exitZero = (kind, record) => kind === 'success' && record !== null && typeof record === 'object' && record.interrupted === false && record.returnCodeInterpretation === undefined && record.backgroundTaskId === undefined;
+
 // The text of a tool result, which Claude Code writes as a string or as a list of text blocks.
 const textOf = block => typeof block.content === 'string' ? block.content
   : Array.isArray(block.content) ? block.content.map(b => (b && b.type === 'text' ? b.text : '')).join('\n') : '';
 
-// One trace, JSON lines: every Bash request with its result ({ id, command, isError, text, kind }), the requests with
-// no result anywhere in the trace, how many non-blank lines are not a JSON object, and whether the trace is empty. A
-// request answered more than once is judged on its first result and on every later one: the worst kind wins.
+// One trace, JSON lines: every Bash request with its result ({ id, command, isError, text, kind, exitedZero }), the
+// requests with no result anywhere in the trace, how many non-blank lines are not a JSON object, and whether the trace
+// is empty. A request answered more than once is judged on its first result and on every later one: the worst kind
+// wins, and it exited 0 only if every one of its results says so.
 const WORST = ['success', 'failed', 'refused', 'stopped', 'not-an-exit'];
 export function bashCalls(trace) {
   const entries = [];
@@ -79,12 +91,18 @@ export function bashCalls(trace) {
   }
   const results = new Map();
   for (const e of entries) {
-    for (const b of e.type === 'user' && Array.isArray(e.message?.content) ? e.message.content : []) {
-      if (b?.type !== 'tool_result' || !requests.has(b.tool_use_id)) continue;
+    const blocks = (e.type === 'user' && Array.isArray(e.message?.content) ? e.message.content : []).filter(b => b?.type === 'tool_result');
+    // Claude Code writes each result on a line of its own, with its record beside it; on a line holding more than one
+    // result, the record cannot be told apart, so it counts for none of them.
+    const record = blocks.length === 1 ? e.tool_use_result : undefined;
+    for (const b of blocks) {
+      if (!requests.has(b.tool_use_id)) continue;
       const meta = Array.isArray(e.tool_result_meta) ? e.tool_result_meta.find(m => m?.id === b.tool_use_id) : undefined;
       const call = { id: b.tool_use_id, command: requests.get(b.tool_use_id), isError: b.is_error === true, text: textOf(b), meta };
       call.kind = kindOf(call.isError, call.text, meta);
+      call.exitedZero = exitZero(call.kind, record);
       const seen = results.get(b.tool_use_id);
+      if (seen) seen.exitedZero = call.exitedZero = seen.exitedZero && call.exitedZero;
       if (!seen || WORST.indexOf(call.kind) > WORST.indexOf(seen.kind)) results.set(b.tool_use_id, call);
     }
   }
@@ -142,6 +160,7 @@ export function verdict(traces, raw) {
   const stopped = of('stopped');
   const notAnExit = of('not-an-exit');
   const tried = calls.filter(c => c.kind !== 'refused');
+  const exited = calls.filter(c => c.exitedZero).length;
   const reasons = [];
   // (a)
   if (!raw) reasons.push('the eval left no readable report of its agent runs, so nothing shows that each one left its trace');
@@ -165,11 +184,12 @@ export function verdict(traces, raw) {
     reasons.push(`the sandbox kept ${stopped.length} of the ${tried.length} shell commands Claude Code tried to run from starting, in ${new Set(stopped.map(s => s.trace)).size} of ${plural(names.length, 'agent run')}, so every grader that needed one of them failed (the first ended with: ${first})`);
   }
   // (d)
-  if (tried.length && !of('success').length) reasons.push(`Claude Code tried to run ${plural(tried.length, 'shell command')} for the agents and not one came back as a success`);
+  if (tried.length && !exited) reasons.push(`Claude Code tried to run ${plural(tried.length, 'shell command')} for the agents and not one exited 0`);
   const measurement = reasons.length === 0;
   const refused = of('refused').length;
+  const shells = tried.length ? `none of the ${plural(tried.length, 'shell command')} Claude Code tried to run for the agents was kept from starting or ended in an error from Claude Code, and ${exited} exited 0` : 'Claude Code tried to run no shell command for the agents';
   const sentence = measurement
-    ? `The sandbox started every shell command Claude Code tried to run for the agents: ${tried.length} of ${tried.length} ran to an exit (${of('success').length} with success)${refused ? `, and ${plural(refused, 'more')} ${refused === 1 ? 'was' : 'were'} refused before running, by a hook or an input check` : ''}; each of the ${plural(runs.length, 'agent run')} in the eval's report left its own complete trace.`
+    ? `No result shows the sandbox keeping a command from starting: ${shells}${refused ? ` (${plural(refused, 'other')} ${refused === 1 ? 'was' : 'were'} refused before running, by a hook or an input check)` : ''}; each of the ${plural(runs.length, 'agent run')} in the eval's report left its own complete trace.`
     : `This run is not a measurement: ${reasons.join('; ')}.`;
   return { measurement, sentence, calls, stopped, notAnExit, unanswered, unreadable, empty, unopened };
 }

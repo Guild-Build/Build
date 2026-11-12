@@ -126,12 +126,17 @@ each run checks the sandbox twice:
      like bubblewrap's `bwrap: <message>` or the seccomp helper's `apply-seccomp: <step>: <error>`, plus bash's own
      complaints. A result counts whether or not Claude Code marked it an error, because it reads exit status 1 as
      success for `grep`, `find`, `diff` and `test`.
-  4. Claude Code tried to run at least one shell command for the agents and not one of them came back as a success.
+  4. Claude Code tried to run at least one shell command for the agents and not one of them exited 0. A result Claude
+     Code did not mark an error is not always an exit 0: it reads exit status 1 as success for `grep`, `find`, `diff`,
+     `test` and a few more, and it answers at once for a command it runs in the background, as it does when a command
+     runs past its timeout. Claude Code's own record of each result in the trace says which, and only a result recorded
+     as neither, and not interrupted, counts.
 
   A trial whose agents asked for no shell command at all is still a measurement. The check has two limits. Rule 3 also
-  counts a command that started and printed nothing but such lines, which can only reject a run, never accept one. And
-  a wrapper failure that exits with a status, prints something besides those shapes and hits only some commands is not
-  detected by this check; the self-test before the key and the pins guard against it.
+  counts a command that started and printed nothing but such lines, which can only reject a run, never accept one. And a
+  wrapper failure that exits with a status, prints something besides those shapes and hits only some commands is not
+  detected by this check, nor is one that hits only commands run in the background, whose exit comes later, outside
+  their Bash results; the self-test before the key and the pins guard against it.
 
   When the run is not a measurement, the job fails and its summary names each reason that applied, with counts, and
   quotes the first error. Its files upload as `not-evidence-<build>-<trial>`, with the record renamed
@@ -148,6 +153,9 @@ seccomp helper from starting any command with each of the three Claude Code rele
    equal), in a pull request.
 2. The sandbox self-test workflow runs on that pull request at no cost. Merge only if it passes. If it fails, the pin
    stays where it is.
+3. For a new Claude Code release, also check again how it writes a Bash result, against its source. Rules 2 and 4 of
+   the after-trial check read results as 2.1.322 writes them, and the self-test only runs a command that exits 0.
+   [Pull request 15](https://github.com/Guild-Build/Build/pull/15) lists where 2.1.322 writes them.
 
 Moving to `ubuntu-26.04` also needs its `bwrap-userns-restrict` profile out of the way, which is a change to the
 runner's security settings. That pull request must name the change and give its reason.
