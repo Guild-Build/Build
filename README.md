@@ -105,34 +105,37 @@ each run checks the sandbox twice:
   [`.github/sandbox-self-test/`](.github/sandbox-self-test/). A stand-in for the model on 127.0.0.1 takes the place of
   Anthropic's API, so no model is asked and nothing is spent. It proves that the agent's own Bash tool ran a command
   inside the sandbox. It passes only when the eval reports exactly the two agent runs that trial asks for, one with the
-  build and one without. Each must have left its own trace with one Bash call, and each command must have exited 0 and
-  printed the arithmetic it was given, a seccomp filter turned on and a user namespace other than the runner's.
+  build and one without, each with a trace of its own that holds one Bash call, the self-test command. The stand-in
+  must have received each call's result exactly once, under the call's own id, and each command must have exited 0
+  and printed the arithmetic it was given, a seccomp filter turned on and a user namespace other than the runner's.
   Otherwise the run stops before Azure and the key.
 - **After the trial**, [`.github/scripts/shell-starts.mjs`](.github/scripts/shell-starts.mjs) reads the eval's raw
-  report and every agent trace. The run is a measurement only if all of these hold:
-  - every agent run the report lists left its trace, and no trace is left over;
-  - every trace reads in full: no empty file and no line that is not JSON;
-  - every shell command the agents asked for has its result;
-  - no result shows the sandbox keeping its command from starting.
+  report and every agent trace. The run is not a measurement when any of these holds:
+  1. The report or the traces are incomplete or do not match: the report is missing, unreadable or lists no run; a run
+     names no trace, or a trace another run also names; a named trace is not found, or a trace found belongs to no
+     run; a trace is empty or holds a line that is not a JSON object; or a shell command has no result. A run cut off
+     in the middle of a shell command is rejected and has to run again.
+  2. A Bash result is an error that is not a process exit, meaning Claude Code returned an error for the call without
+     the command running to an exit status. In the pinned release a command that ran and exited non-zero is the one
+     error whose text begins "Exit code <n>". Every other error counts, whatever its wording, Claude Code's own
+     refusals and its sandbox bridge errors included, and so does a command interrupted before it finished. Three
+     refusals that Claude Code makes before it tries to run a command are allowed: a PreToolUse hook refused the call
+     (its result records the hook's decision), the model's input failed validation, or Claude Code blocked a long
+     sleep.
+  3. A Bash result is a process exit whose output is nothing but the sandbox wrapper's own setup lines: lines shaped
+     like bubblewrap's `bwrap: <message>` or the seccomp helper's `apply-seccomp: <step>: <error>`, plus bash's own
+     complaints. A result counts whether or not Claude Code marked it an error, because it reads exit status 1 as
+     success for `grep`, `find`, `diff` and `test`.
+  4. Claude Code tried to run at least one shell command for the agents and not one of them came back as a success.
 
-  A run cut off in the middle of a shell command is therefore rejected, and has to be run again. A trial whose agents
-  asked for no shell command at all is still a measurement.
+  A trial whose agents asked for no shell command at all is still a measurement. The check has two limits. Rule 3 also
+  counts a command that started and printed nothing but such lines, which can only reject a run, never accept one. And
+  a wrapper failure that exits with a status, prints something besides those shapes and hits only some commands is not
+  detected by this check; the self-test before the key and the pins guard against it.
 
-  A result shows the sandbox keeping its command from starting when the Bash tool returned an error and either of
-  these holds:
-  - the error holds one of Claude Code's own refusals for a sandbox reason, word for word apart from the reason it
-    names, such as `Sandbox is required but failed to initialize: … Restart to retry. Running it outside the sandbox
-    (dangerouslyDisableSandbox) is not allowed either.`;
-  - its lines after Claude Code's `Exit code N` line include one shaped like bubblewrap's `bwrap: <message>` or the
-    seccomp helper's `apply-seccomp: <step>: <error>`, and the others are only bash's own complaints.
-
-  Bubblewrap and the helper print such a line and exit when they cannot set up, before the command exists. That rule
-  has a limit: a command that started, failed and printed nothing but lines of those two shapes, plus bash's
-  complaints, is counted as stopped too. That can only reject a run, never accept one.
-
-  When the run is not a measurement, the job fails and its summary says which of these reasons applied, with counts.
-  Its files upload as `not-evidence-<build>-<trial>`, with the record renamed `not-evidence-<build>-<trial>.json`
-  beside `NOT-A-MEASUREMENT.txt`.
+  When the run is not a measurement, the job fails and its summary names each reason that applied, with counts, and
+  quotes the first error. Its files upload as `not-evidence-<build>-<trial>`, with the record renamed
+  `not-evidence-<build>-<trial>.json` beside `NOT-A-MEASUREMENT.txt`.
 
 The trial job is pinned so that a new runner image or Claude Code release cannot silently stop the sandbox. It runs on
 `ubuntu-24.04`, not `ubuntu-latest`: on `ubuntu-26.04`, AppArmor's `bwrap-userns-restrict` profile kept the sandbox's

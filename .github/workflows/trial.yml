@@ -28,10 +28,11 @@ name: Season trial
 # both agent runs its trial asks for, one with the build and one without, each ran its Bash call inside the sandbox,
 # with exit 0 and what it was asked to print: the arithmetic it was given, a seccomp filter on, and a user namespace
 # other than the runner's. Otherwise the job stops there. After the trial, .github/scripts/shell-starts.mjs reads the
-# eval's raw report and every agent trace. The run is a measurement only if every agent run the report lists left a
-# trace, every trace reads in full, every shell command the agents asked for has its result, and the sandbox started
-# each one. Otherwise the job fails and says why in its summary, and its files upload as not-evidence-<build>-<trial>,
-# with the record renamed not-evidence-<build>-<trial>.json beside NOT-A-MEASUREMENT.txt.
+# eval's raw report and every agent trace. The run is a measurement only if they are complete and pair one trace to one
+# run, every Bash result is the command's own exit or a refusal made before it ran, no exit holds nothing but the
+# sandbox's setup lines, and at least one command Claude Code tried to run came back as a success. Otherwise the job
+# fails and says why in its summary, and its files upload as not-evidence-<build>-<trial>, with the record renamed
+# not-evidence-<build>-<trial>.json beside NOT-A-MEASUREMENT.txt.
 on:
   push:
     branches: [main]
@@ -262,16 +263,19 @@ jobs:
           BG_BUILD: ${{ matrix.build }}
           BG_TRIAL: ${{ matrix.trial }}
           BG_REP: ${{ matrix.rep }}
-        # The rule, in .github/scripts/shell-starts.mjs. The run is a measurement only on positive evidence for every
-        # shell command: the raw report the run step wrote exists, every agent run it lists left its trace (and no trace
-        # is left over), every trace line reads, no trace is empty, every Bash request has its result, and no result
-        # shows the sandbox keeping its command from starting. A result shows that when the Bash tool returned an error
-        # that holds one of Claude Code's own refusals for a sandbox reason, word for word, or whose lines after
-        # "Exit code N" include one shaped like bubblewrap's "bwrap: <message>" or the seccomp helper's
-        # "apply-seccomp: <step>: <error>" and are otherwise only bash's own complaints. Limit: a command that started,
-        # failed and printed nothing but lines of those two shapes, plus bash's complaints, is counted as stopped too,
-        # which can only reject a run, never accept one. A run cut off in the middle of a shell command is rejected and
-        # has to run again. Any of these fails the job, says why in the job summary, and the files below upload as
+        # The rule, in .github/scripts/shell-starts.mjs, on the raw report the run step wrote and every agent trace. The
+        # run is not a measurement when (a) the report or the traces are incomplete or do not pair one trace to one run,
+        # or a Bash request has no result. A run cut off in the middle of a shell command is rejected and has to run
+        # again. (b) A Bash result is an error that is not a process exit: in Claude Code 2.1.322 a command that ran and
+        # exited non-zero is the one error whose text begins "Exit code <n>". Every other error counts, except three
+        # refusals made before a command runs: a PreToolUse hook refused the call, the model's input failed validation,
+        # or Claude Code blocked a long sleep. (c) A Bash result is a process exit with nothing but the sandbox
+        # wrapper's own setup lines, shaped like "bwrap: <message>" or "apply-seccomp: <step>: <error>", plus bash's
+        # complaints. (d) Claude Code tried to run shell commands for the agents and not one of them came back as a
+        # success. Limits: (c) also counts a command that started and printed nothing but such lines, which can only
+        # reject a run, never accept one; and a wrapper failure that exits with a status, prints something besides
+        # those shapes and hits only some commands is not detected here (the self-test and the pins guard against it).
+        # Any of these fails the job, says why in the job summary, and the files below upload as
         # not-evidence-<build>-<trial>.
         run: node .github/scripts/shell-starts.mjs "$RUNNER_TEMP/evaltmp" "raw-$BG_BUILD-$BG_TRIAL${BG_REP:+-rep$BG_REP}.json"
       - name: Gather the files to upload
