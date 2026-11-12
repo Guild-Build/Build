@@ -51,6 +51,20 @@ jobs:
           for (const f of fragments) { const found = bin.includes(f); if (!found) missing++; console.log(`${found ? 'found  ' : 'MISSING'} ${f}`); }
           process.exit(missing ? 1 : 0);
           EOF
+      - name: Bash result shapes in the pinned release, sandbox on, through a stand-in model
+        if: ${{ always() }}
+        run: |
+          # A copy of /usr/bin without socat, for the scenario that hides it.
+          mkdir -p "$RUNNER_TEMP/nosocat" && for f in /usr/bin/*; do [ "$(basename "$f")" = socat ] || ln -sf "$f" "$RUNNER_TEMP/nosocat/"; done
+          mkdir -p "$RUNNER_TEMP/scenarios"
+          NOSOCAT_BIN="$RUNNER_TEMP/nosocat" node .github/experiment/scenarios.mjs "$(cat .github/experiment/linux-scenarios.json)" "$RUNNER_TEMP/scenarios"
+      - name: Where the pinned release holds that code
+        if: ${{ always() }}
+        run: |
+          node .github/experiment/source-facts.mjs "$(realpath "$(command -v claude)")"
+          ls -la "$(npm root -g)/@anthropic-ai/" 2>&1
+          for f in "$(npm root -g)"/@anthropic-ai/claude-code-linux-x64/claude "$(npm root -g)"/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64/claude; do [ -f "$f" ] && sha256sum "$f"; done; sha256sum "$(realpath "$(command -v claude)")"
+          npm view @anthropic-ai/claude-code-linux-x64@2.1.322 dist.integrity dist.tarball
       - name: Self-test the sandbox through the agent's own Bash tool
         run: |
           sudo dmesg --clear || true

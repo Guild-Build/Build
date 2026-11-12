@@ -1,0 +1,11 @@
+[
+ {"name": "exit 0, sandbox on", "input": {"command": "echo hi"}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}}},
+ {"name": "exit 3, sandbox on", "input": {"command": "echo out; echo err >&2; exit 3"}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}}},
+ {"name": "grep miss, sandbox on", "input": {"command": "grep zzz /dev/null"}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}}},
+ {"name": "PreToolUse hook exits 2", "input": {"command": "git status"}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}, "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo 'test hook: blocked' >&2; exit 2"}]}]}}},
+ {"name": "PreToolUse hook denies by JSON", "input": {"command": "git status"}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}, "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"json hook says no\"}}'"}]}]}}},
+ {"name": "malformed input", "input": {"cmd": "ls"}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}}},
+ {"name": "long sleep", "input": {"command": "sleep 120"}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}}},
+ {"name": "asks to run outside the sandbox", "input": {"command": "echo hi", "dangerouslyDisableSandbox": true}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false}}},
+ {"name": "required sandbox, socat hidden from PATH", "input": {"command": "echo hi"}, "settings": {"sandbox": {"enabled": true, "allowUnsandboxedCommands": false, "failIfUnavailable": true}}, "hideSocat": true}
+]
