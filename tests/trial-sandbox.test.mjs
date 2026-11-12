@@ -328,7 +328,8 @@ test('the CLI under the self-test gets the stand-in and its placeholder key, nev
 // every run in the report at the first run's trace, `linkTrace` ('symbolic' or 'hard') makes every later run's trace a
 // link to the first run's while the report names each run's own path, `record` replaces the record each result gets,
 // `firstResultTwice` makes the first run answer the stand-in with two copies of its result in one request while the
-// second run never sends its own, `firstLineOnly` keeps only each trace's first line, and `replayFirstResult` and
+// second run never sends its own, `firstLineOnly` keeps only each trace's first line, `blankLine` puts a blank line
+// after it, and `replayFirstResult` and
 // `readWithFirstId` put the first run's result, or a Read call under the first run's call id, into every later trace.
 const stubClaude = `#!${process.execPath}
 const { appendFileSync, linkSync, mkdirSync, symlinkSync, writeFileSync } = require('node:fs');
@@ -358,7 +359,9 @@ if (plan.noReport) process.exit(1);
     if (plan.readWithFirstId && i > 0) lines.push({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: first.call.id, name: 'Read', input: { file_path: '/x' } }] } }, { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: first.call.id, content: 'x' }] } });
     lines.push({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } }, { type: 'result', subtype: 'success', is_error: false, result: 'done', result_index: 0 });
     const written = !plan.noTrace && !(plan.shareTrace && i > 0) && !(plan.linkTrace && i > 0);
-    if (written) writeFileSync(join(out, 'trace.jsonl'), (plan.firstLineOnly ? lines.slice(0, 1) : lines).map(e => JSON.stringify(e)).join('\\n') + '\\n');
+    const text = (plan.firstLineOnly ? lines.slice(0, 1) : lines).map(e => JSON.stringify(e));
+    if (plan.blankLine) text.splice(1, 0, '');
+    if (written) writeFileSync(join(out, 'trace.jsonl'), text.join('\\n') + '\\n');
     if (plan.linkTrace && i > 0) (plan.linkTrace === 'hard' ? linkSync : symlinkSync)(firstTrace, join(out, 'trace.jsonl'));
     const answer = plan.firstResultTwice ? (i === 0 ? [result, result] : null) : [result];
     if (answer) await post({ ...ask, messages: [...ask.messages, { role: 'assistant', content: [call] }, { role: 'user', content: answer }] });
@@ -433,6 +436,9 @@ test('the self-test runs the CLI against the stand-in only, and its verdict foll
   assert.equal(firstLine.status, 0);
   assert.equal(firstLine.verdict.pass, false);
   assert.match(firstLine.verdict.problems.join('\n'), /agent run \(run-one-command, with the build\): its trace is not complete: it does not end with Claude Code's final result event/);
+  const blankLine = await run('blank-line', { text: working('x'), blankLine: true });
+  assert.equal(blankLine.verdict.pass, false);
+  assert.match(blankLine.verdict.problems.join('\n'), /agent run \(run-one-command, with the build\): its trace is not complete: 1 line that is not a JSON object/);
   const replayed = await run('replayed', { text: working('x'), replayFirstResult: true });
   assert.equal(replayed.verdict.pass, false);
   assert.match(replayed.verdict.problems.join('\n'), /agent run \(run-one-command, without the build\): its trace is not complete: 1 tool result answering no request in the trace/);
@@ -537,7 +543,9 @@ test('a trace is read in full: its requests, their results, and every line that 
   assert.equal(completeness(trace([bash('npm test', undefined, undefined)])).unanswered, 1);
   assert.equal(completeness(`${trace([bash('ls', false, 'a')])}5\nnull\n[1]\n{"type":`).unreadable, 4);
   assert.equal(completeness('').empty, true);
-  assert.equal(completeness('\n \n').empty, true);
+  // A file of blank and whitespace-only lines is not empty: each such line is a line that is not a JSON object, and its
+  // last line is no final result event.
+  assert.deepEqual(gaps(completeness('\n \n')), ['2 lines that are not a JSON object', "it does not end with Claude Code's final result event"]);
   assert.equal(completeness('{not json').empty, false);
   // Results written as text blocks are read like plain text, and other tools are not Bash requests, though rule (a)
   // still wants each of them answered.
@@ -680,6 +688,33 @@ test('a complete trace, by rule (a): the real traces meet it, and a cut-off, a r
   assert.equal(verdict({ ...real, 'claude-eval-hnda4k': readInto(REAL['claude-eval-hnda4k'], 'toolu_sandbox_self_test_1') }, twoRuns).sentence, 'This run is not a measurement: 1 tool request id appears more than once across the traces; 1 tool result id appears more than once across the traces.');
 });
 
+test('part (1) of rule (a) is every line: a blank or whitespace-only line in a trace fails it, its one terminating newline does not', t => {
+  // No real trace held has a blank line: the pilot's and the self-test's end without a newline, the streams with one.
+  for (const name of Object.keys(REAL)) assert.equal(linesOf(REAL[name]).length, REAL[name].trimEnd().split('\n').length, name);
+  const real = REAL['claude-eval-hnda4k'];
+  const blank = '1 line that is not a JSON object';
+  // The fifth review's reproduction: an event replaced by a whitespace-only line. Then a blank line put in, and two
+  // newlines at the end.
+  const replaced = `${linesOf(real).map((l, i) => (i === 3 ? ' \t' : l)).join('\n')}\n`;
+  const inserted = `${linesOf(real).flatMap((l, i) => (i === 1 ? ['', l] : [l])).join('\n')}\n`;
+  for (const text of [replaced, inserted]) assert.deepEqual(gaps(completeness(text)), [blank]);
+  // A second newline at the end leaves a blank last line, so the trace no longer ends with its final event either.
+  assert.deepEqual(gaps(completeness(`${real.trimEnd()}\n\n`)), [blank, "it does not end with Claude Code's final result event"]);
+  // The file's one terminating newline, or none, is fine.
+  for (const text of [real.trimEnd(), `${real.trimEnd()}\n`]) assert.deepEqual(gaps(completeness(text)), []);
+  // Through the verdict and the checker's command line.
+  const raw = report([['run-one-command', 'with', 'claude-eval-SNdjrw'], ['run-one-command', 'without', 'claude-eval-hnda4k']]);
+  const traces = { 'claude-eval-SNdjrw': REAL['claude-eval-SNdjrw'], 'claude-eval-hnda4k': replaced };
+  assert.equal(verdict(traces, raw).sentence, 'This run is not a measurement: 1 trace line could not be read.');
+  const dir = temp(t, 'bg-part-one-');
+  for (const [name, text] of Object.entries(traces)) { mkdirSync(join(dir, name, 'out'), { recursive: true }); writeFileSync(join(dir, name, 'out', 'trace.jsonl'), text); }
+  writeFileSync(join(dir, 'raw.json'), JSON.stringify(raw));
+  writeFileSync(join(dir, 'output'), '');
+  const r = spawnSync(process.execPath, [join(root, '.github/scripts/shell-starts.mjs'), dir, join(dir, 'raw.json')], { encoding: 'utf8', env: { PATH: process.env.PATH, GITHUB_OUTPUT: join(dir, 'output') } });
+  assert.equal(r.status, 1);
+  assert.equal(readFileSync(join(dir, 'output'), 'utf8'), 'measurement=false\nsentence=This run is not a measurement: 1 trace line could not be read.\n');
+});
+
 test('part (2) of rule (a) on the real streams: every turn closed in order, and every background task ended once', t => {
   // Accepted: one turn (the pilot's shape), and the two-turn streams of a background command, a command past its
   // timeout, and a Task subagent whose Bash call pairs in the parent trace.
@@ -734,6 +769,9 @@ test("the self-test reads the real traces by the same rule, and checks each prob
   assert.match(failing(realSelf({ 'claude-eval-SNdjrw': firstLineOf(REAL['claude-eval-SNdjrw']), 'claude-eval-hnda4k': REAL['claude-eval-hnda4k'] })), /^agent run \(run-one-command, with the build\): its trace is not complete: it does not end with Claude Code's final result event; its result events do not close the turns it opened one for one, numbered from 0 in order$/m);
   assert.match(failing(realSelf({ 'claude-eval-SNdjrw': REAL['claude-eval-SNdjrw'], 'claude-eval-hnda4k': replayInto(REAL['claude-eval-hnda4k'], REAL['claude-eval-SNdjrw']) })), /^agent run \(run-one-command, without the build\): its trace is not complete: 1 tool result answering no request in the trace$/m);
   assert.match(failing(realSelf({ 'claude-eval-SNdjrw': REAL['claude-eval-SNdjrw'], 'claude-eval-hnda4k': readInto(REAL['claude-eval-hnda4k'], 'toolu_sandbox_self_test_1') })), /the after-trial check would not accept this run: This run is not a measurement: 1 tool request id appears more than once across the traces; 1 tool result id appears more than once across the traces/);
+  // The fifth review's reproduction: the second trace's closing reply replaced by a whitespace-only line.
+  const blankReply = `${linesOf(REAL['claude-eval-hnda4k']).map((l, i) => (i === 3 ? ' \t' : l)).join('\n')}\n`;
+  assert.match(failing(realSelf({ 'claude-eval-SNdjrw': REAL['claude-eval-SNdjrw'], 'claude-eval-hnda4k': blankReply })), /^agent run \(run-one-command, without the build\): its trace is not complete: 1 line that is not a JSON object$/m);
   // Only the second probe's output is wrong: the second run fails on its own, and nothing is said of the first.
   const second = failing(selfRuns(undefined, folder => folder === 'claude-eval-b' ? 'probe=42\nuserns=user:[7]' : working(folder)));
   assert.match(second, /^agent run \(run-one-command, without the build\): no line seccomp=2/m);
@@ -941,7 +979,7 @@ test('the workflow header and the README say what each check proves, the rule an
       assert.ok(where.includes(phrase), `${phrase} (${where === shells ? 'workflow' : 'README'})`);
     }
   }
-  for (const phrase of ['**Before the key is fetched**', '**After the trial**', 'no model is asked and nothing is spent', 'exactly the two agent runs that trial asks for, one with the build and one without', 'received each call\'s result exactly once, under the call\'s own id', 'each command must have exited 0, by Claude Code\'s own record of it', 'A trial whose agents asked for no shell command at all is still a measurement.', 'To move a pin on purpose:', 'The sandbox self-test workflow runs on that pull request at no cost. Merge only if it passes.', 'For a new Claude Code release, also check again how it writes a Bash result, against its source.', '`bwrap: <message>`', '`apply-seccomp: <step>: <error>`', 'with each of the three Claude Code releases tried (2.1.309, 2.1.311 and 2.1.322)', 'reads exit status 1 as success for `grep`, `find`, `diff` and `test`']) {
+  for (const phrase of ['**Before the key is fetched**', '**After the trial**', 'no model is asked and nothing is spent', 'exactly the two agent runs that trial asks for, one with the build and one without', 'received each call\'s result exactly once, under the call\'s own id', 'each command must have exited 0, by Claude Code\'s own record of it', 'A trial whose agents asked for no shell command at all is still a measurement.', 'To move a pin on purpose:', 'The sandbox self-test workflow runs on that pull request at no cost. Merge only if it passes.', 'For a new Claude Code release, also check again how it writes a Bash result, against its source.', "only the file's one terminating newline is allowed", 'it does not prove that no matched pair of events was lost from its middle', '`bwrap: <message>`', '`apply-seccomp: <step>: <error>`', 'with each of the three Claude Code releases tried (2.1.309, 2.1.311 and 2.1.322)', 'reads exit status 1 as success for `grep`, `find`, `diff` and `test`']) {
     assert.ok(text.includes(phrase), phrase);
   }
   for (const stale of ['never matches', 'whatever the Claude Code release', 'word for word apart from the reason', 'came back as a success']) {

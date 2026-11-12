@@ -116,15 +116,18 @@ each run checks the sandbox twice:
      naming a trace of its own: no run names none, no trace is named twice or is missing, every trace found belongs to
      a listed run, and no two run folders hold one trace file through a symbolic or hard link, found by resolved path
      and by device and inode. Each trace must be complete. The file is not empty and every line in it is a JSON
-     object. It ends with Claude Code's final result event, and it closes every turn it opened: each `system/init`
+     object: a blank or whitespace-only line counts against it, and only the file's one terminating newline is
+     allowed. It ends with Claude Code's final result event, and it closes every turn it opened: each `system/init`
      event is followed by its own result event, numbered 0, 1, … in order. Every background task it started, such as a
      command run in the background or a subagent, reports its start and its end in it exactly once each
      (`task_started` and `task_notification`, matched by `task_id`). Every tool request in it, of any tool, has
      exactly one result in it, and every tool result in it answers a request in it. Across all the job's traces no
-     tool request id or tool result id appears more than once. A complete trace with no shell command in it is fine,
-     and so is a run that uses a subagent or a background command when its trace shows every turn and every task
-     ended. An agent run that ends without Claude Code's final result event, for any reason including the eval's own
-     time limit, makes the job not a measurement, and the run has to be repeated.
+     tool request id or tool result id appears more than once. This shows that a trace closes structurally (its tail
+     is there, every turn and task ended, every request is answered and no id repeats); it does not prove that no
+     matched pair of events was lost from its middle. A complete trace with no shell command in it is fine, and so is
+     a run that uses a subagent or a background command when its trace shows every turn and every task ended. An agent
+     run that ends without Claude Code's final result event, for any reason including the eval's own time limit, makes
+     the job not a measurement, and the run has to be repeated.
   2. A Bash result is an error that is not a process exit, meaning Claude Code returned an error for the call without
      the command running to an exit status. In the pinned release a command that ran and exited non-zero is the one
      error whose text begins "Exit code <n>". Every other error counts, whatever its wording, Claude Code's own
