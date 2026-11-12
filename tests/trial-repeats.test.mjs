@@ -207,24 +207,28 @@ test('the workflow calls the script, runs one job at a time and names a repeated
   assert.match(workflow, /\n      max-parallel: 1\n/);
   assert.match(workflow, /\n      repeat:\n        description: [^\n]+\n        required: false\n        default: "1"\n/);
   assert.match(workflow, /\n          BG_REPEAT: \$\{\{ inputs\.repeat \}\}\n/);
-  assert.equal(workflow.match(/BG_REP: \$\{\{ matrix\.rep \}\}/g).length, 2);
+  assert.equal(workflow.match(/BG_REP: \$\{\{ matrix\.rep \}\}/g).length, 3);
   assert.match(workflow, /--out "evidence-\$BG_BUILD-\$BG_TRIAL\$SUFFIX\.json" --raw-out "raw-\$BG_BUILD-\$BG_TRIAL\$SUFFIX\.json" --work-dir "\$RUNNER_TEMP\/trial-run" --keep-temp "\$\{REP_ARGS\[@\]\}"\n/);
-  assert.match(workflow, /for f in "evidence-\$BG_BUILD-\$BG_TRIAL\$SUFFIX\.json" "raw-\$BG_BUILD-\$BG_TRIAL\$SUFFIX\.json"; do/);
-  assert.match(workflow, /name: evidence-\$\{\{ matrix\.build \}\}-\$\{\{ matrix\.trial \}\}\$\{\{ matrix\.rep && format\('-rep\{0\}', matrix\.rep\) \|\| '' \}\}\n/);
+  assert.match(workflow, /\n          EVIDENCE="evidence-\$BG_BUILD-\$BG_TRIAL\$SUFFIX\.json"\n/);
+  assert.match(workflow, /\n          if \[ -f "raw-\$BG_BUILD-\$BG_TRIAL\$SUFFIX\.json" \]; then cp -L "raw-\$BG_BUILD-\$BG_TRIAL\$SUFFIX\.json" "\$OUT_DIR\/"; fi\n/);
+  assert.match(workflow, /name: \$\{\{ steps\.shells\.outputs\.measurement != 'true' && 'not-' \|\| '' \}\}evidence-\$\{\{ matrix\.build \}\}-\$\{\{ matrix\.trial \}\}\$\{\{ matrix\.rep && format\('-rep\{0\}', matrix\.rep\) \|\| '' \}\}\n/);
 });
 
-// Evaluates a workflow line's expressions for the two forms its names use, and refuses any other form. As GitHub's contexts
-// reference says, a matrix property the entry does not have reads as an empty string.
-const evaluate = (line, matrix) => line.replace(/\$\{\{ (.+?) \}\}/g, (_, expr) => {
+// Evaluates a workflow line's expressions for the three forms its names use, and refuses any other form. As GitHub's
+// contexts reference says, a matrix property the entry does not have, or a step output never set, reads as an empty
+// string.
+const evaluate = (line, matrix, outputs = { measurement: 'true' }) => line.replace(/\$\{\{ (.+?) \}\}/g, (_, expr) => {
   let m = expr.match(/^matrix\.([a-z_]+)$/);
   if (m) return matrix[m[1]] ?? '';
   m = expr.match(/^matrix\.([a-z_]+) && format\('([^']*)', matrix\.([a-z_]+)\) \|\| ''$/);
   if (m && m[1] === m[3]) return matrix[m[1]] ? m[2].replace('{0}', matrix[m[1]]) : '';
+  m = expr.match(/^steps\.shells\.outputs\.([a-z_]+) != '([^']*)' && '([^']*)' \|\| ''$/);
+  if (m) return (outputs[m[1]] ?? '') !== m[2] ? m[3] : '';
   throw new Error(`no evaluator for the expression ${expr}`);
 });
 
 test("the upload step names each artifact by the plan's rule, so the plan's name check covers what is uploaded", () => {
-  const uploads = workflow.match(/\n {10}name: (evidence-[^\n]+)\n/g);
+  const uploads = workflow.match(/\n {10}name: ([^\n]*evidence-[^\n]+)\n/g);
   assert.equal(uploads.length, 1);
   const line = uploads[0].trim().slice('name: '.length);
   for (const run of [
@@ -232,12 +236,17 @@ test("the upload step names each artifact by the plan's rule, so the plan's name
     entry('lean-start', 'guild-smoke-v1', { rep: '1' }),
     entry('lean-start', 'guild-smoke-v1-rep1'),
     entry('measured-delivery', 'calibration-shell-v1', { rep: '5', verify_only: 'true' }),
-  ]) assert.equal(evaluate(line, run), artifactName(run), JSON.stringify(run));
+  ]) {
+    // Only a run the shell check called a measurement uploads under the plan's name; any other run, the check's output
+    // missing included, takes the same name with not- in front, which is just as unique.
+    assert.equal(evaluate(line, run, { measurement: 'true' }), artifactName(run), JSON.stringify(run));
+    for (const measurement of ['false', '']) assert.equal(evaluate(line, run, { measurement }), `not-${artifactName(run)}`, JSON.stringify(run));
+  }
 });
 
 test('the run step names files and passes --rep only for a repeated run', t => {
   // The step's own shell lines, run by bash with node replaced by a stub that prints its arguments.
-  const step = workflow.slice(workflow.indexOf('          mkdir -p "$RUNNER_TEMP/evaltmp"'), workflow.indexOf('      - name: Gather the files to upload'));
+  const step = workflow.slice(workflow.indexOf('          mkdir -p "$RUNNER_TEMP/evaltmp"'), workflow.indexOf("      - name: Check that the sandbox started the agents' shell commands"));
   const root = mkdtempSync(join(tmpdir(), 'bg-trial-step-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   writeFileSync(join(root, 'node'), '#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done\n', { mode: 0o700 });

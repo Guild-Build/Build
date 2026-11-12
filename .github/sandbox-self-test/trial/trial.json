@@ -1,0 +1,18 @@
+{
+  "schema": "buildguild.trial.v1",
+  "slug": "sandbox-self-test",
+  "name": "Sandbox self-test",
+  "version": "1.0.0",
+  "kind": "calibration",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "summary": "One Bash call through the agent's own tool, for the Season trial workflow's sandbox self-test; never published and never evidence.",
+  "categories": ["tools"],
+  "measures": ["tools"],
+  "cases": [
+    { "name": "run-one-command", "dimension": "tools", "runs": 1 }
+  ],
+  "tolerance": { "overall": 0.1, "dimension": 0.25 },
+  "hiddenSlice": { "count": 0, "published": null },
+  "runner": "claude plugin eval"
+}

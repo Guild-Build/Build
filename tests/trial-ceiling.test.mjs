@@ -142,8 +142,10 @@ test('the summary says what a ceiling covers and how it is split, and a verify-o
 test('every claude call in the trial job has a budget: each key check its own, the trial its share of the ceiling', () => {
   const job = workflow.slice(workflow.indexOf('\n  trial:\n'));
   const commands = job.split('\n').filter(line => !/^\s*#/.test(line)).flatMap(line => [...line.matchAll(/(?:^|[\s;&|(])claude(?=\s)(.*)$/g)].map(m => m[1]));
-  // claude --version prints the version and calls no model; every other call is a key check with its budget.
-  assert.deepEqual(commands.map(rest => rest.startsWith(' --version') ? 'version' : rest.startsWith(' -p ') ? 'check' : rest), ['version', 'check']);
+  // The install script's claude --version prints the version and calls no model; the only claude call in the job
+  // itself is the key check, with its budget (the self-test's agent runs answer to a stand-in on 127.0.0.1; see
+  // trial-sandbox.test.mjs).
+  assert.deepEqual(commands.map(rest => rest.startsWith(' -p ') ? 'check' : rest), ['check']);
   for (const rest of commands.filter(c => c.startsWith(' -p '))) assert.match(rest, / --max-turns 1 --max-budget-usd "\$BG_KEY_CHECK_BUDGET_USD" 2>"\$ERRFILE"\)/);
   const trials = job.split('\n').filter(line => /node cli\/buildguild\.mjs test /.test(line));
   assert.equal(trials.length, 1);
