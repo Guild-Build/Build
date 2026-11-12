@@ -1,0 +1,13 @@
+{
+  "schema": "buildguild.build.v1",
+  "slug": "sandbox-self-test",
+  "version": "1.0.0",
+  "branches": [
+    "claude-code"
+  ],
+  "category": "delivery",
+  "modules": [],
+  "name": "Sandbox self-test",
+  "summary": "An empty build for the Season trial workflow's sandbox self-test: it adds nothing, so the self-test measures only the runner.",
+  "license": "Apache-2.0"
+}

@@ -1,0 +1,32 @@
+name: Sandbox self-test
+# A free check on GitHub's runners that an agent's shell commands can start inside Claude Code's sandbox on the image
+# and Claude Code release the Season trial job is pinned to. It runs the trial job's own install script and sandbox
+# self-test (see the header of trial.yml): no secret, no environment, no key and no model call, because the self-test's
+# stand-in for the model answers on 127.0.0.1. It runs on pull requests and pushes to main that change what the trial
+# job installs or runs, and on demand from the Actions tab, so a change that would stop the sandbox shows up here before
+# anyone pays for a trial.
+on:
+  pull_request:
+    paths: ['.github/workflows/trial.yml', '.github/workflows/sandbox.yml', '.github/scripts/**', '.github/sandbox-self-test/**', 'cli/**']
+  push:
+    branches: [main]
+    paths: ['.github/workflows/trial.yml', '.github/workflows/sandbox.yml', '.github/scripts/**', '.github/sandbox-self-test/**', 'cli/**']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  self-test:
+    # The trial job's image; a test keeps the two equal.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Install what the trial job installs
+        run: bash .github/scripts/install-trial-tools.sh
+      - name: Self-test the sandbox through the agent's own Bash tool
+        run: node .github/scripts/sandbox-self-test.mjs --model claude-sonnet-5-5

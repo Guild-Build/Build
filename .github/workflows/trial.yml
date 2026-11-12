@@ -18,6 +18,18 @@ name: Season trial
 # rest. Claude Code holds each budget to its own cost estimate: the key check can pass its budget by the one reply that
 # reaches it, and the trial can pass its budget by every agent run already under way when it is reached, up to the
 # request's concurrency (1 unless the request says otherwise).
+#
+# An agent's shell commands run inside Claude Code's sandbox, and a run whose commands never started measures nothing.
+# The trial job is pinned to the ubuntu-24.04 image and to the Claude Code release in
+# .github/scripts/install-trial-tools.sh, because a newer image or release can stop the sandbox without anything
+# failing: on ubuntu-26.04, AppArmor's bwrap-userns-restrict profile keeps the sandbox's seccomp helper from starting
+# any command. Before Azure and the key, the sandbox self-test (.github/scripts/sandbox-self-test.mjs) runs the trial's
+# own path with a stand-in for the model on 127.0.0.1, so no model is asked and nothing is spent. It passes only when
+# every agent run's Bash call exited 0 inside the sandbox and printed what it was asked to: the arithmetic it was given,
+# a seccomp filter on, and a user namespace other than the runner's. Otherwise the job stops there. After the trial,
+# .github/scripts/shell-starts.mjs reads every agent trace. If the sandbox kept any shell command from starting, or no
+# trace was left, the run is not a measurement. The job then fails and says why in its summary, and its files upload as
+# not-evidence-<build>-<trial>, with the record renamed not-evidence-<build>-<trial>.json beside NOT-A-MEASUREMENT.txt.
 on:
   push:
     branches: [main]
@@ -86,7 +98,9 @@ jobs:
     # GitHub evaluates this before it expands the matrix, so an empty plan skips the job: no approval request, no Azure
     # sign-in, and the workflow ends green.
     if: ${{ needs.plan.outputs.matrix != '[]' }}
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: on ubuntu-26.04 the sandbox cannot start a command (see the header). The sandbox check
+    # in .github/workflows/sandbox.yml runs on the same image, and a test keeps the two equal.
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     environment: trials
     permissions:
@@ -108,6 +122,23 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '22'
+      - name: Install Claude Code and the Linux sandbox backend it needs for Bash-granting runs
+        if: ${{ matrix.verify_only != 'true' }}
+        # bubblewrap and socat, the one system setting the sandbox needs (the script names it and says why), and
+        # Claude Code at the pinned release, which the script checks it really installed.
+        run: bash .github/scripts/install-trial-tools.sh
+      - name: Self-test the sandbox through the agent's own Bash tool, before any key or spend
+        if: ${{ matrix.verify_only != 'true' }}
+        env:
+          BG_MODEL: ${{ matrix.model }}
+        # The trial's own path, the CLI's test command and claude plugin eval with the trial's flags, on the one-case
+        # trial in .github/sandbox-self-test/, against a stand-in for the model on 127.0.0.1 with a placeholder key. No
+        # model is asked, nothing is spent, and the real key is not fetched until after this step. It passes only when
+        # every agent run's Bash call exited 0 inside the sandbox with the expected output, and the after-trial check
+        # below reads the same results from the traces. Otherwise the job stops here, before Azure. The shell starts
+        # without the two token variables, as the key check's and the trial's do (see the key check).
+        shell: env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL bash -e {0}
+        run: node .github/scripts/sandbox-self-test.mjs --model "$BG_MODEL"
       - name: Sign in to Azure with the workload identity
         uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2.3.1
         with:
@@ -134,19 +165,6 @@ jobs:
       - name: Stop here when only verifying
         if: ${{ matrix.verify_only == 'true' }}
         run: echo "vault login and key presence verified; no trial run requested"
-      - name: Install Claude Code and the Linux sandbox backend it needs for Bash-granting runs
-        if: ${{ matrix.verify_only != 'true' }}
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap socat >/dev/null
-          # Ubuntu 24.04+ runners restrict unprivileged user namespaces through AppArmor; the sandbox needs them.
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
-          npm install -g @anthropic-ai/claude-code && claude --version && bwrap --version
-      - name: Self-test the sandbox the way the runner uses it
-        if: ${{ matrix.verify_only != 'true' }}
-        run: |
-          bwrap --unshare-all --share-net --dev-bind / / --proc /proc true && echo "bwrap shared-net ok"
-          bwrap --unshare-all --dev-bind / / --proc /proc true && echo "bwrap unshared-net ok (loopback configured)"
       - name: Check the key works with one tiny call
         if: ${{ matrix.verify_only != 'true' }}
         env:
@@ -211,6 +229,7 @@ jobs:
             esac
           fi
       - name: Run the trial
+        id: run
         if: ${{ matrix.verify_only != 'true' }}
         env:
           BG_BUILD: ${{ matrix.build }}
@@ -234,22 +253,37 @@ jobs:
           REP_ARGS=()
           if [ -n "$BG_REP" ]; then REP_ARGS=(--rep "$BG_REP"); fi
           node cli/buildguild.mjs test "bundles/$BG_BUILD" --trial "$BG_TRIAL" --max-cost-usd "$BG_TRIAL_BUDGET_USD" --model "$BG_MODEL" -j "$BG_CONCURRENCY" --runner github-actions --role guild --out "evidence-$BG_BUILD-$BG_TRIAL$SUFFIX.json" --raw-out "raw-$BG_BUILD-$BG_TRIAL$SUFFIX.json" --work-dir "$RUNNER_TEMP/trial-run" --keep-temp "${REP_ARGS[@]}"
+      - name: Check that the sandbox started the agents' shell commands
+        id: shells
+        if: ${{ always() && matrix.verify_only != 'true' && steps.run.outcome != 'skipped' }}
+        # The rule, in .github/scripts/shell-starts.mjs: a Bash call was stopped by the sandbox when the Bash tool
+        # returned an error whose output, after Claude Code's "Exit code N" line, holds a line the sandbox prints when
+        # it cannot start a command (one that begins "bwrap: ", "apply-seccomp: " or "Sandbox is required") and nothing
+        # but such lines and bash's own complaints. A command that started prints its own output, so a failing test or a
+        # script that exits 1 never matches. One such call, or no trace at all, means the run is not a measurement: this
+        # step fails the job, says why in the job summary, and the files below upload as not-evidence-<build>-<trial>.
+        run: node .github/scripts/shell-starts.mjs "$RUNNER_TEMP/evaltmp"
       - name: Gather the files to upload
         if: ${{ always() && matrix.verify_only != 'true' }}
         env:
           BG_BUILD: ${{ matrix.build }}
           BG_TRIAL: ${{ matrix.trial }}
           BG_REP: ${{ matrix.rep }}
+          BG_MEASUREMENT: ${{ steps.shells.outputs.measurement }}
+          BG_WHY_NOT: ${{ steps.shells.outputs.sentence }}
         # One folder holds exactly what is uploaded. It starts empty, and copies follow links, so the scan reads the
-        # bytes the upload sends.
+        # bytes the upload sends. Only a run the check above called a measurement uploads its record under its own name.
+        # Any other run's record is renamed not-evidence-…, beside NOT-A-MEASUREMENT.txt saying why, and the upload
+        # below takes the same not- prefix, so neither can pass for a measurement.
         run: |
           OUT_DIR="$RUNNER_TEMP/upload"
           SUFFIX="${BG_REP:+-rep$BG_REP}"
+          EVIDENCE="evidence-$BG_BUILD-$BG_TRIAL$SUFFIX.json"
+          if [ "$BG_MEASUREMENT" = "true" ]; then KEPT="$EVIDENCE"; else KEPT="not-$EVIDENCE"; fi
           rm -rf "$OUT_DIR"
           mkdir -p "$OUT_DIR"
-          for f in "evidence-$BG_BUILD-$BG_TRIAL$SUFFIX.json" "raw-$BG_BUILD-$BG_TRIAL$SUFFIX.json"; do
-            if [ -f "$f" ]; then cp -L "$f" "$OUT_DIR/"; fi
-          done
+          if [ -f "$EVIDENCE" ]; then cp -L "$EVIDENCE" "$OUT_DIR/$KEPT"; fi
+          if [ -f "raw-$BG_BUILD-$BG_TRIAL$SUFFIX.json" ]; then cp -L "raw-$BG_BUILD-$BG_TRIAL$SUFFIX.json" "$OUT_DIR/"; fi
           if [ -d "$RUNNER_TEMP/trial-run/evals/results" ]; then cp -RL "$RUNNER_TEMP/trial-run/evals/results" "$OUT_DIR/results"; fi
           for trace in "$RUNNER_TEMP"/evaltmp/claude-eval-*/out/trace.jsonl; do
             if [ -f "$trace" ]; then
@@ -257,6 +291,10 @@ jobs:
               mkdir -p "$OUT_DIR/traces/$run_dir" && cp -L "$trace" "$OUT_DIR/traces/$run_dir/"
             fi
           done
+          if [ "$BG_MEASUREMENT" != "true" ] && [ -n "$(find "$OUT_DIR" -mindepth 1)" ]; then
+            printf '%s\n' "${BG_WHY_NOT:-This run was never checked for shell commands the sandbox kept from starting.}" "Nothing in this upload is evidence: these files are for working out what went wrong. Do not submit or import them." > "$OUT_DIR/NOT-A-MEASUREMENT.txt"
+            echo "Once scanned, its files upload as not-evidence-$BG_BUILD-$BG_TRIAL$SUFFIX, for working out what went wrong only." >> "$GITHUB_STEP_SUMMARY"
+          fi
           (cd "$OUT_DIR" && find . -type f | sort)
       - name: Scan the files for the key before anything is uploaded
         id: scan
@@ -303,10 +341,11 @@ jobs:
           echo "only regular files and folders, and neither the key nor the workspace id in any name or file"
       - name: Upload the scanned files
         if: ${{ always() && matrix.verify_only != 'true' && steps.scan.outcome == 'success' }}
-        # Each run's artifact needs its own name, or its upload fails. The plan builds this name the same way (artifactName
-        # in .github/scripts/plan-trial-runs.mjs, kept in step by a test) and refuses two runs that would share one.
+        # Each run's artifact needs its own name, or its upload fails. The plan builds this name the same way
+        # (artifactName in .github/scripts/plan-trial-runs.mjs, kept in step by a test) and refuses two runs that would
+        # share one. A run the check above did not call a measurement uploads under the same name with not- in front.
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: evidence-${{ matrix.build }}-${{ matrix.trial }}${{ matrix.rep && format('-rep{0}', matrix.rep) || '' }}
+          name: ${{ steps.shells.outputs.measurement != 'true' && 'not-' || '' }}evidence-${{ matrix.build }}-${{ matrix.trial }}${{ matrix.rep && format('-rep{0}', matrix.rep) || '' }}
           path: ${{ runner.temp }}/upload/
           if-no-files-found: warn
