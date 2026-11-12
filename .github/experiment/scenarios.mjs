@@ -13,6 +13,7 @@ const base = process.argv[3] || tmpdir();
 function serve(sc) {
   const input = sc.input;
   let calls = 0;
+  const mainSent = [];
   const server = createServer((req, res) => {
     let raw = ''; req.on('data', c => { raw += c; }); req.on('end', () => {
       if (req.headers['x-api-key'] !== KEY) { res.writeHead(401); return res.end('{}'); }
@@ -21,10 +22,18 @@ function serve(sc) {
       const back = (body.messages || []).some(m => Array.isArray(m.content) && m.content.some(b => b.type === 'tool_result'));
       const bash = (body.tools || []).some(t => t.name === 'Bash');
       const has = name => (body.tools || []).some(t => t.name === name);
-      // A scenario with tool Task asks the main agent for one Task call first; every later request with no tool result yet
-      // (the subagent's) gets one Bash call running subInput.
-      const content = !back && sc.tool === 'Task' && calls === 0 && has('Task') ? [{ type: 'tool_use', id: `toolu_scn_${++calls}`, name: 'Task', input }]
-        : !back && bash ? [{ type: 'tool_use', id: `toolu_scn_${++calls}`, name: 'Bash', input: sc.tool === 'Task' ? sc.subInput : input }] : [{ type: 'text', text: 'done' }];
+      const text = [{ type: 'text', text: 'done' }];
+      const call = (name, args) => [{ type: 'tool_use', id: `toolu_scn_${++calls}`, name, input: args }];
+      let content;
+      if (sc.tool === 'Task') {
+        // The subagent's conversation starts with the Task prompt: one Bash call, then text. The main conversation loads
+        // Task through ToolSearch when the request does not offer it, calls it once, then answers with text.
+        const sub = JSON.stringify((body.messages || [])[0] ?? '').includes('echo hi with the Bash tool');
+        if (sub) content = back ? text : call('Bash', sc.subInput);
+        else if (!mainSent.includes('Task') && !has('Task') && !mainSent.includes('ToolSearch')) { content = call('ToolSearch', { query: 'select:Task', max_results: 1 }); mainSent.push('ToolSearch'); }
+        else if (!mainSent.includes('Task')) { content = call('Task', input); mainSent.push('Task'); }
+        else content = text;
+      } else content = !back && bash ? call('Bash', input) : text;
       const stop = content[0].type === 'tool_use' ? 'tool_use' : 'end_turn';
       const usage = { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
       if (!body.stream) { res.writeHead(200, { 'content-type': 'application/json' }); return res.end(JSON.stringify({ id: 'msg_scn', type: 'message', role: 'assistant', model: body.model, content, stop_reason: stop, stop_sequence: null, usage })); }
@@ -62,6 +71,7 @@ for (const sc of scenarios) {
   const results = lines.filter(l => l.type === 'user' && Array.isArray(l.message?.content) && l.message.content.some(b => b.type === 'tool_result'));
   writeFileSync(join(dir, 'trace.jsonl'), out.o);
   console.log(`=== ${sc.name} (claude exit ${out.code})`);
+  console.log(`STREAM-B64 ${Buffer.from(out.o).toString('base64')}`);
   for (const r of results) {
     const b = r.message.content.find(x => x.type === 'tool_result');
     console.log(JSON.stringify({ is_error: b.is_error, content: b.content, tool_use_result: r.tool_use_result, tool_result_meta: r.tool_result_meta }));
