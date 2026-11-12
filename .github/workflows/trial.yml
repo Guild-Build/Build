@@ -26,13 +26,13 @@ name: Season trial
 # any command. Before Azure and the key, the sandbox self-test (.github/scripts/sandbox-self-test.mjs) runs the trial's
 # own path with a stand-in for the model on 127.0.0.1, so no model is asked and nothing is spent. It passes only when
 # both agent runs its trial asks for, one with the build and one without, each ran its Bash call inside the sandbox,
-# with exit 0 and what it was asked to print: the arithmetic it was given, a seccomp filter on, and a user namespace
-# other than the runner's. Otherwise the job stops there. After the trial, .github/scripts/shell-starts.mjs reads the
-# eval's raw report and every agent trace. The run is a measurement only if they are complete and pair one trace to one
-# run, every Bash result is the command's own exit or a refusal made before it ran, no exit holds nothing but the
-# sandbox's setup lines, and at least one command Claude Code tried to run exited 0. Otherwise the job fails and says
-# why in its summary, and its files upload as not-evidence-<build>-<trial>, with the record renamed
-# not-evidence-<build>-<trial>.json beside NOT-A-MEASUREMENT.txt.
+# with exit 0 by Claude Code's own record and what it was asked to print: the arithmetic it was given, a seccomp filter
+# on, and a user namespace other than the runner's. Otherwise the job stops there. After the trial,
+# .github/scripts/shell-starts.mjs reads the eval's raw report and every agent trace. The run is a measurement only if
+# they are complete, pair one trace file to one run and repeat no Bash call id, every Bash result is the command's own
+# exit or a refusal made before it ran, no exit holds nothing but the sandbox's setup lines, and at least one command
+# Claude Code tried to run exited 0. Otherwise the job fails and says why in its summary, and its files upload as
+# not-evidence-<build>-<trial>, with the record renamed not-evidence-<build>-<trial>.json beside NOT-A-MEASUREMENT.txt.
 on:
   push:
     branches: [main]
@@ -265,9 +265,10 @@ jobs:
           BG_REP: ${{ matrix.rep }}
         # The rule, in .github/scripts/shell-starts.mjs, on the raw report the run step wrote and every agent trace. The
         # run is not a measurement when (a) the report or the traces are incomplete or do not pair one trace to one run,
-        # or a Bash request has no result. A run cut off in the middle of a shell command is rejected and has to run
-        # again. (b) A Bash result is an error that is not a process exit: in Claude Code 2.1.322 a command that ran and
-        # exited non-zero is the one error whose text begins "Exit code <n>". Every other error counts, except three
+        # two run folders hold one trace file through a link, a Bash call id appears more than once as a request or a
+        # result, or a Bash request has no result. A run cut off in the middle of a shell command is rejected and has to
+        # run again. (b) A Bash result is an error that is not a process exit: in Claude Code 2.1.322 a command that ran
+        # and exited non-zero is the one error whose text begins "Exit code <n>". Every other error counts, except three
         # refusals made before a command runs: a PreToolUse hook refused the call, the model's input failed validation,
         # or Claude Code blocked a long sleep. (c) A Bash result is a process exit with nothing but the sandbox
         # wrapper's own setup lines, shaped like "bwrap: <message>" or "apply-seccomp: <step>: <error>", plus bash's
@@ -278,7 +279,10 @@ jobs:
         # run, never accept one; and a wrapper failure that exits with a status, prints something besides those shapes
         # and hits only some commands is not detected here, nor is one that hits only commands run in the background
         # (the self-test and the pins guard against it). Any of these fails the job, says why in the job summary, and
-        # the files below upload as not-evidence-<build>-<trial>.
+        # the files below upload as not-evidence-<build>-<trial>. Scope: this check and the self-test guard against a
+        # fault in the environment, such as an image, a release, a bridge or a crash that keeps commands from starting
+        # or cuts the report or traces short, not against someone who can write the eval's report and traces, who could
+        # write the grades too; a forged record, one no Claude Code release writes, is outside what they check.
         run: node .github/scripts/shell-starts.mjs "$RUNNER_TEMP/evaltmp" "raw-$BG_BUILD-$BG_TRIAL${BG_REP:+-rep$BG_REP}.json"
       - name: Gather the files to upload
         if: ${{ always() && matrix.verify_only != 'true' }}

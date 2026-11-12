@@ -104,17 +104,20 @@ each run checks the sandbox twice:
   CLI's `test` command and `claude plugin eval` with the trial's flags, on a one-case trial in
   [`.github/sandbox-self-test/`](.github/sandbox-self-test/). A stand-in for the model on 127.0.0.1 takes the place of
   Anthropic's API, so no model is asked and nothing is spent. It proves that the agent's own Bash tool ran a command
-  inside the sandbox. It passes only when the eval reports exactly the two agent runs that trial asks for, one with the
-  build and one without, each with a trace of its own that holds one Bash call, the self-test command. The stand-in
-  must have received each call's result exactly once, under the call's own id, and each command must have exited 0
-  and printed the arithmetic it was given, a seccomp filter turned on and a user namespace other than the runner's.
-  Otherwise the run stops before Azure and the key.
+  inside the sandbox. It passes only when the eval reports exactly the two agent runs that trial asks for, one with
+  the build and one without, each with a trace of its own that holds one Bash call, the self-test command, under an id
+  that appears nowhere else. The stand-in must have received each call's result exactly once, under the call's own id,
+  and each command must have exited 0, by Claude Code's own record of it as rule 4 below reads it, and printed the
+  arithmetic it was given, a seccomp filter turned on and a user namespace other than the runner's. Otherwise the run
+  stops before Azure and the key.
 - **After the trial**, [`.github/scripts/shell-starts.mjs`](.github/scripts/shell-starts.mjs) reads the eval's raw
   report and every agent trace. The run is not a measurement when any of these holds:
   1. The report or the traces are incomplete or do not match: the report is missing, unreadable or lists no run; a run
      names no trace, or a trace another run also names; a named trace is not found, or a trace found belongs to no
-     run; a trace is empty or holds a line that is not a JSON object; or a shell command has no result. A run cut off
-     in the middle of a shell command is rejected and has to run again.
+     run; two run folders hold one trace file through a symbolic or hard link, found by resolved path and by device
+     and inode; a trace is empty or holds a line that is not a JSON object; a Bash call id appears more than once, as
+     a request or a result, in one trace or across traces; or a shell command has no result. A run cut off in the
+     middle of a shell command is rejected and has to run again.
   2. A Bash result is an error that is not a process exit, meaning Claude Code returned an error for the call without
      the command running to an exit status. In the pinned release a command that ran and exited non-zero is the one
      error whose text begins "Exit code <n>". Every other error counts, whatever its wording, Claude Code's own
@@ -137,6 +140,12 @@ each run checks the sandbox twice:
   wrapper failure that exits with a status, prints something besides those shapes and hits only some commands is not
   detected by this check, nor is one that hits only commands run in the background, whose exit comes later, outside
   their Bash results; the self-test before the key and the pins guard against it.
+
+  Both checks guard against a fault in the environment: a runner image, a tool release, a bridge or a crash that keeps
+  shell commands from starting, or leaves the report or the traces cut short, missing or unreadable. They are no
+  defence against someone who can write the eval's own report and trace files, because whoever can do that can write
+  the grades too, and a sandboxed agent cannot reach those files. A forged record, one no Claude Code release writes,
+  is therefore outside what they check.
 
   When the run is not a measurement, the job fails and its summary names each reason that applied, with counts, and
   quotes the first error. Its files upload as `not-evidence-<build>-<trial>`, with the record renamed

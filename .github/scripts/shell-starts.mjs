@@ -2,8 +2,10 @@
 // traces show it? It reads the eval's raw report and every agent trace the eval kept. A run is not a measurement when:
 //  (a) the report or the traces are incomplete or do not match: the report is missing, unreadable or lists no agent
 //      run; a listed run names no trace, or a trace another run also names; a named trace was not found, or a trace
-//      found belongs to no listed run; a trace file is empty, cannot be opened or holds a line that is not a JSON
-//      object; or a Bash request has no result;
+//      found belongs to no listed run; two run folders hold one trace file (a symbolic or hard link, found by resolved
+//      path and by device and inode); a trace file is empty, cannot be opened or holds a line that is not a JSON
+//      object; a Bash call id appears more than once, as a request or a result, in one trace or across traces; or a
+//      Bash request has no result;
 //  (b) a Bash result is an error that is not a process exit, meaning Claude Code returned an error for the call without
 //      the command running to an exit status. In Claude Code 2.1.322 a shell command that ran and exited non-zero is
 //      the one error whose text begins "Exit code <n>" (its ShellError, written so by the tool dispatcher's error
@@ -27,9 +29,13 @@
 // A wrapper failure that exits with a status, prints something besides those shapes and hits only some commands is
 // not detected here, and neither is one that hits a command run in the background, whose exit comes later, outside its
 // Bash result. The self-test before the key and the pins guard against those.
+// The scope: this check and the self-test guard against a fault in the environment, such as a runner image, a tool
+// release, a bridge or a crash that keeps shell commands from starting or leaves the report or traces cut short, missing
+// or unreadable. They are no defence against someone who can write the eval's own report and trace files, who could
+// write the grades too, so a forged record, one no Claude Code release writes, is out of their scope.
 //
 // Usage: node .github/scripts/shell-starts.mjs <folder holding claude-eval-*/out/trace.jsonl> <the eval's raw report>
-import { appendFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -69,9 +75,10 @@ const textOf = block => typeof block.content === 'string' ? block.content
   : Array.isArray(block.content) ? block.content.map(b => (b && b.type === 'text' ? b.text : '')).join('\n') : '';
 
 // One trace, JSON lines: every Bash request with its result ({ id, command, isError, text, kind, exitedZero }), the
-// requests with no result anywhere in the trace, how many non-blank lines are not a JSON object, and whether the trace
-// is empty. A request answered more than once is judged on its first result and on every later one: the worst kind
-// wins, and it exited 0 only if every one of its results says so.
+// requests with no result anywhere in the trace, the Bash call ids requested or answered more than once, how many
+// non-blank lines are not a JSON object, and whether the trace is empty. A request answered more than once is judged on
+// its first result and on every later one: the worst kind wins, and it exited 0 only if every one of its results says
+// so.
 const WORST = ['success', 'failed', 'refused', 'stopped', 'not-an-exit'];
 export function bashCalls(trace) {
   const entries = [];
@@ -84,9 +91,12 @@ export function bashCalls(trace) {
     entries.push(entry);
   }
   const requests = new Map();
+  const repeated = new Set();
   for (const e of entries) {
     for (const b of e.type === 'assistant' && Array.isArray(e.message?.content) ? e.message.content : []) {
-      if (b?.type === 'tool_use' && b.name === 'Bash' && !requests.has(b.id)) requests.set(b.id, String(b.input?.command ?? ''));
+      if (b?.type !== 'tool_use' || b.name !== 'Bash') continue;
+      if (requests.has(b.id)) repeated.add(b.id);
+      else requests.set(b.id, String(b.input?.command ?? ''));
     }
   }
   const results = new Map();
@@ -102,12 +112,13 @@ export function bashCalls(trace) {
       call.kind = kindOf(call.isError, call.text, meta);
       call.exitedZero = exitZero(call.kind, record);
       const seen = results.get(b.tool_use_id);
+      if (seen) repeated.add(b.tool_use_id);
       if (seen) seen.exitedZero = call.exitedZero = seen.exitedZero && call.exitedZero;
       if (!seen || WORST.indexOf(call.kind) > WORST.indexOf(seen.kind)) results.set(b.tool_use_id, call);
     }
   }
   const unanswered = [...requests].filter(([id]) => !results.has(id)).map(([id, command]) => ({ id, command }));
-  return { calls: [...results.values()], unanswered, unreadable, empty: entries.length === 0 && unreadable === 0 };
+  return { calls: [...results.values()], unanswered, repeated: [...repeated], unreadable, empty: entries.length === 0 && unreadable === 0 };
 }
 
 // How an agent run is named in messages: its case, and whether it ran with the build or without it (the eval's two
@@ -139,8 +150,9 @@ const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const firstLine = text => text.trim().split('\n')[0];
 
 // The verdict: { measurement, sentence, calls, stopped, notAnExit, unanswered, ... }. `traces` maps a run folder name
-// to its trace text (null for a trace file that could not be opened); `raw` is the parsed raw report, or null.
-export function verdict(traces, raw) {
+// to its trace text (null for a trace file that could not be opened); `raw` is the parsed raw report, or null; `linked`
+// lists the run folders whose trace is one file with another folder's (sameFiles).
+export function verdict(traces, raw, linked = []) {
   const names = Object.keys(traces).sort();
   const runs = raw ? runsIn(raw) : null;
   const calls = [];
@@ -148,14 +160,19 @@ export function verdict(traces, raw) {
   const empty = [];
   const unopened = [];
   let unreadable = 0;
+  const repeated = new Set();
+  const tracesOf = new Map();
   for (const name of names) {
     if (traces[name] === null) { unopened.push(name); continue; }
     const read = bashCalls(traces[name]);
     if (read.empty) empty.push(name);
     unreadable += read.unreadable;
+    read.repeated.forEach(id => repeated.add(id));
+    for (const { id } of [...read.calls, ...read.unanswered]) tracesOf.set(id, (tracesOf.get(id) ?? 0) + 1);
     calls.push(...read.calls.map(c => ({ trace: name, ...c })));
     unanswered.push(...read.unanswered.map(u => ({ trace: name, ...u })));
   }
+  for (const [id, n] of tracesOf) if (n > 1) repeated.add(id);
   const of = kind => calls.filter(c => c.kind === kind);
   const stopped = of('stopped');
   const notAnExit = of('not-an-exit');
@@ -172,9 +189,11 @@ export function verdict(traces, raw) {
     if (p.missing.length) reasons.push(`${plural(p.missing.length, 'trace')} the eval's report names ${p.missing.length === 1 ? 'was' : 'were'} not found`);
     if (p.extra.length) reasons.push(`${plural(p.extra.length, 'trace')} found ${p.extra.length === 1 ? 'belongs' : 'belong'} to no agent run in the eval's report`);
   }
+  if (linked.length) reasons.push(`${linked.length} run folders share their trace file with another through a link, so some run left no trace of its own`);
   if (empty.length) reasons.push(`${plural(empty.length, 'trace file')} ${empty.length === 1 ? 'was' : 'were'} empty`);
   if (unopened.length) reasons.push(`${plural(unopened.length, 'trace file')} could not be opened`);
   if (unreadable) reasons.push(`${plural(unreadable, 'trace line')} could not be read`);
+  if (repeated.size) reasons.push(`${plural(repeated.size, 'Bash call id')} ${repeated.size === 1 ? 'appears' : 'appear'} more than once in the traces, as a request or a result, so the traces cannot be read as one result for each command`);
   if (unanswered.length) reasons.push(`${plural(unanswered.length, 'shell command')} the agents asked for got no result in the trace, as when a run is cut off in the middle of a command`);
   // (b)
   if (notAnExit.length) reasons.push(`${plural(notAnExit.length, 'shell command')} ended in an error from Claude Code instead of an exit of the command (the first: ${firstLine(notAnExit[0].text)})`);
@@ -206,6 +225,22 @@ export function tracesIn(dir) {
   return traces;
 }
 
+// The run folders under `dir`, among `names`, whose trace file is also another's: a symbolic or hard link to it, or a
+// link to its folder. Each file is known by its resolved path and by its device and inode.
+export function sameFiles(dir, names) {
+  const owner = new Map();
+  const same = new Set();
+  for (const name of names) {
+    const path = join(dir, name, 'out', 'trace.jsonl');
+    let keys;
+    try { const st = statSync(path); keys = [`path ${realpathSync(path)}`, `inode ${st.dev}:${st.ino}`]; } catch { continue; }
+    for (const key of keys) {
+      if (owner.has(key)) { same.add(owner.get(key)); same.add(name); } else owner.set(key, name);
+    }
+  }
+  return [...same].sort();
+}
+
 // The raw report at `path`, parsed, or null when it is missing or not JSON.
 export function readReport(path) {
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return null; }
@@ -214,7 +249,8 @@ export function readReport(path) {
 function main() {
   const [dir, rawPath] = process.argv.slice(2);
   if (!dir || !rawPath) { console.error('usage: node .github/scripts/shell-starts.mjs <folder holding claude-eval-*/out/trace.jsonl> <the eval\'s raw report>'); process.exit(2); }
-  const v = verdict(tracesIn(resolve(dir)), readReport(resolve(rawPath)));
+  const traces = tracesIn(resolve(dir));
+  const v = verdict(traces, readReport(resolve(rawPath)), sameFiles(resolve(dir), Object.keys(traces)));
   console.log(v.sentence);
   for (const c of [...v.notAnExit, ...v.stopped].slice(0, 10)) console.log(`  ${c.kind}, ${c.trace}: ${JSON.stringify(c.command).slice(0, 160)} -> ${JSON.stringify(c.text).slice(0, 300)}`);
   for (const u of v.unanswered.slice(0, 10)) console.log(`  no result, ${u.trace}: ${JSON.stringify(u.command).slice(0, 160)}`);

@@ -5,14 +5,14 @@
 // stand-in and every claude are local, and no test runs git.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { decide, startStandIn, STAND_IN_KEY } from '../.github/scripts/stand-in-api.mjs';
 import { cliArgs, expectedRuns, judge, PROBE_COMMAND, selfTest, standInEnv } from '../.github/scripts/sandbox-self-test.mjs';
-import { ALLOWED_REFUSALS, bashCalls, kindOf, runsIn, SETUP_LINES, tracesIn, verdict } from '../.github/scripts/shell-starts.mjs';
+import { ALLOWED_REFUSALS, bashCalls, kindOf, runsIn, sameFiles, SETUP_LINES, tracesIn, verdict } from '../.github/scripts/shell-starts.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const read = rel => readFileSync(join(root, rel), 'utf8');
@@ -247,6 +247,35 @@ test('the self-test binds each result to its own call and its own trace: identic
   assert.match(failing(foreign), /the stand-in received 1 result\(s\) for toolu_made_up, a call no reported run's trace holds/);
 });
 
+test('the self-test refuses a trace file two runs share, an id that appears twice, and a probe its record shows no exit 0 for', () => {
+  // The third review's leads. Two run folders holding one trace file through a link, as sameFiles finds them.
+  const linked = selfRuns();
+  linked.traces['claude-eval-b'] = linked.traces['claude-eval-a'];
+  linked.results = [linked.results[0]];
+  const viaLink = failing(linked, { linked: ['claude-eval-a', 'claude-eval-b'] });
+  assert.match(viaLink, /^2 run folders share their trace file with another through a link: claude-eval-a, claude-eval-b$/m);
+  assert.match(viaLink, /the after-trial check would not accept this run: .*2 run folders share their trace file with another through a link/);
+  // The same call id in both runs' traces, which are distinct files, with one result for it.
+  const sameId = selfRuns();
+  sameId.traces['claude-eval-b'] = trace([bash(PROBE_COMMAND, false, working('claude-eval-b'))], 'claude-eval-a');
+  sameId.results = [sameId.results[0]];
+  assert.match(failing(sameId), /agent run \(run-one-command, without the build\): its call id claude-eval-a_0 is also the call of agent run \(run-one-command, with the build\)/);
+  // One trace that asks for its call twice, or answers it twice.
+  const lines = entries([bash(PROBE_COMMAND, false, working('claude-eval-a'))], 'claude-eval-a');
+  for (const repeat of [[lines[0], ...lines], [...lines, lines[1]]]) {
+    const s = selfRuns();
+    s.traces['claude-eval-a'] = repeat.map(e => JSON.stringify(e)).join('\n');
+    assert.match(failing(s), /agent run \(run-one-command, with the build\): its trace holds 1 Bash call\(s\) with a result, 0 without one, 1 id\(s\) requested or answered more than once/);
+  }
+  // A probe with the right output whose record is no exit 0, by the rule the after-trial check's (d) uses: a command run
+  // in the background, an interrupted one, an exit status 1 read as success, and no record at all.
+  for (const record of [RECORD(working('claude-eval-a'), { backgroundTaskId: 'b1' }), RECORD(working('claude-eval-a'), { interrupted: true }), RECORD(working('claude-eval-a'), { returnCodeInterpretation: 'No matches found' }), undefined]) {
+    const s = selfRuns();
+    s.traces['claude-eval-a'] = trace([['Bash', { command: PROBE_COMMAND }, false, working('claude-eval-a'), ACCEPT, record]], 'claude-eval-a');
+    assert.match(failing(s), /^agent run \(run-one-command, with the build\): Claude Code's own record of the result does not show an exit 0/m, JSON.stringify(record));
+  }
+});
+
 test('the self-test passes only on exit 0 with the expected lines, from inside the sandbox', () => {
   // The pilot: the sandbox's helper failed, so the command never started.
   const pilot = failing(selfRuns(undefined, () => PILOT, true));
@@ -290,10 +319,12 @@ test('the CLI under the self-test gets the stand-in and its placeholder key, nev
 // against whatever model API it is given, as Claude Code does, but returns STUB_PLAN's result instead of running the
 // command. It writes each run's trace and the raw report and logs what it was started with. Options: `twice` names an
 // arm whose trace records its call twice, `noTrace` writes no trace, `noReport` writes nothing, `shareTrace` points
-// every run in the report at the first run's trace, and `firstResultTwice` makes the first run answer the stand-in with
-// two copies of its result in one request while the second run never sends its own.
+// every run in the report at the first run's trace, `linkTrace` ('symbolic' or 'hard') makes every later run's trace a
+// link to the first run's while the report names each run's own path, `record` replaces the record each result gets,
+// and `firstResultTwice` makes the first run answer the stand-in with two copies of its result in one request while the
+// second run never sends its own.
 const stubClaude = `#!${process.execPath}
-const { appendFileSync, mkdirSync, writeFileSync } = require('node:fs');
+const { appendFileSync, linkSync, mkdirSync, symlinkSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
 const args = process.argv.slice(2);
 if (args[0] === '--version') { console.log('2.1.322 (Claude Code)'); process.exit(0); }
@@ -310,11 +341,12 @@ if (plan.noReport) process.exit(1);
     const result = { type: 'tool_result', tool_use_id: call.id, content: plan.text, ...(plan.isError ? { is_error: true } : {}) };
     const out = join(process.env.TMPDIR, 'claude-eval-' + i + arm, 'out');
     mkdirSync(out, { recursive: true });
-    const record = plan.isError ? 'Error: ' + plan.text : { stdout: plan.text, stderr: '', interrupted: false, isImage: false, noOutputExpected: false };
+    const record = 'record' in plan ? plan.record : plan.isError ? 'Error: ' + plan.text : { stdout: plan.text, stderr: '', interrupted: false, isImage: false, noOutputExpected: false };
     const lines = [{ type: 'assistant', message: { role: 'assistant', content: [call] } }, { type: 'user', message: { role: 'user', content: [result] }, tool_use_result: record }];
     if (plan.twice === arm) lines.push({ type: 'assistant', message: { role: 'assistant', content: [{ ...call, id: call.id + '_again' }] } }, { type: 'user', message: { role: 'user', content: [{ ...result, tool_use_id: call.id + '_again' }] }, tool_use_result: record });
-    const written = !plan.noTrace && !(plan.shareTrace && i > 0);
+    const written = !plan.noTrace && !(plan.shareTrace && i > 0) && !(plan.linkTrace && i > 0);
     if (written) writeFileSync(join(out, 'trace.jsonl'), lines.map(e => JSON.stringify(e)).join('\\n') + '\\n');
+    if (plan.linkTrace && i > 0) (plan.linkTrace === 'hard' ? linkSync : symlinkSync)(firstTrace, join(out, 'trace.jsonl'));
     const answer = plan.firstResultTwice ? (i === 0 ? [result, result] : null) : [result];
     if (answer) await post({ ...ask, messages: [...ask.messages, { role: 'assistant', content: [call] }, { role: 'user', content: answer }] });
     if (i === 0) firstTrace = join(out, 'trace.jsonl');
@@ -374,6 +406,17 @@ test('the self-test runs the CLI against the stand-in only, and its verdict foll
   assert.deepEqual(firstTwice.results.map(r => r.id), ['toolu_sandbox_self_test_1', 'toolu_sandbox_self_test_1']);
   assert.match(firstTwice.verdict.problems.join('\n'), /the stand-in received 2 results for toolu_sandbox_self_test_1, not one/);
   assert.match(firstTwice.verdict.problems.join('\n'), /never received the result of its call toolu_sandbox_self_test_2/);
+  // The third review's leads through the real CLI: the second run's trace file a link to the first's, and records that
+  // show no exit 0 although the output is right.
+  for (const linkTrace of ['symbolic', 'hard']) {
+    const viaLink = await run(`link-${linkTrace}`, { text: working('x'), linkTrace });
+    assert.equal(viaLink.status, 0);
+    assert.equal(viaLink.verdict.pass, false);
+    assert.match(viaLink.verdict.problems.join('\n'), /2 run folders share their trace file with another through a link/);
+  }
+  const background = await run('background', { text: working('x'), record: { stdout: working('x'), stderr: '', interrupted: false, isImage: false, noOutputExpected: false, backgroundTaskId: 'b1' } });
+  assert.equal(background.verdict.pass, false);
+  assert.match(background.verdict.problems.join('\n'), /agent run \(run-one-command, with the build\): Claude Code's own record of the result does not show an exit 0/);
   // An extra run, and a run whose trace records its call twice.
   const extra = await run('extra', { text: working('x'), arms: ['with', 'without', 'with'] });
   assert.match(extra.verdict.problems[0], /^the eval reported 3 agent runs /);
@@ -399,6 +442,13 @@ test("the after-trial rule reads each result's shape: a process exit, an allowed
   // On the broken image: the helper's line, behind "Exit code 1" or as the whole output of a grep read as success.
   for (const v of Object.values(BROKEN)) assert.equal(kind(v), 'stopped', v[1]);
   assert.equal(kindOf(true, PILOT, ACCEPT), 'stopped');
+  // bubblewrap's own lines, as the first two rounds held them, and each as the whole output of a result Claude Code did
+  // not mark an error (the way a grep or a git diff comes back).
+  assert.equal(kindOf(true, `Exit code 1\n${BASHRC}\nbwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n`, ACCEPT), 'stopped');
+  assert.equal(kindOf(true, 'Exit code 1\nbwrap: setting up uid map: Permission denied', ACCEPT), 'stopped');
+  for (const line of ['bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted', 'bwrap: setting up uid map: Permission denied', SECCOMP_HELPER]) {
+    assert.equal(kindOf(false, `${BASHRC}\n${line}`, ACCEPT), 'stopped', line);
+  }
   // Errors that are no process exit, whatever their wording: the review's bridge error, Claude Code's refusals and an
   // interrupted command. None of them is matched by its text.
   for (const text of FROM_SOURCE) assert.equal(kindOf(true, text, ACCEPT), 'not-an-exit', text);
@@ -408,10 +458,13 @@ test("the after-trial rule reads each result's shape: a process exit, an allowed
   assert.equal(kindOf(true, '<tool_use_error>Blocked: no reason given</tool_use_error>', undefined), 'not-an-exit');
   assert.equal(kindOf(true, '<tool_use_error>Error calling tool (Bash): spawn E2BIG</tool_use_error>', undefined), 'not-an-exit');
   // Ordinary failures of a command that ran stay failures.
-  for (const text of [`Exit code 1\n${BASHRC}\n${BASHRC}\nFAIL tests/sum.test.js\n  expected 3, got 4`, 'Exit code 1', `Exit code 1\n${BASHRC}`, 'Exit code 127\n/bin/bash: line 1: pytest: command not found', 'Exit code 1\nchecking the sandbox\nbwrap: No permissions to create a new namespace', 'Exit code 1\napply-seccomp: oops', 'Exit code 1\nlog: apply-seccomp: write /proc/self/setgroups: Permission denied']) {
+  for (const text of [`Exit code 1\n${BASHRC}\n${BASHRC}\nFAIL tests/sum.test.js\n  expected 3, got 4\nTests: 1 failed, 4 passed`, 'Exit code 1', `Exit code 1\n${BASHRC}`, 'Exit code 1\nerror: config.yaml not found', 'Exit code 127\n/bin/bash: line 1: pytest: command not found', 'Exit code 1\nSandbox is required', 'Exit code 1\nSandbox is required but failed to initialize: bwrap missing.', 'Exit code 1\nchecking the sandbox\nbwrap: No permissions to create a new namespace', 'Exit code 1\napply-seccomp: oops', 'Exit code 1\nlog: apply-seccomp: write /proc/self/setgroups: Permission denied']) {
     assert.equal(kindOf(true, text, ACCEPT), 'failed', text);
   }
   assert.equal(kindOf(false, `${BASHRC}\nREADME.md`, ACCEPT), 'success');
+  // Claude Code's refusal words printed by a command that exited 0 are that command's own output, as the first two
+  // rounds held.
+  assert.equal(kindOf(false, FROM_SOURCE[2], ACCEPT), 'success');
   assert.deepEqual(SETUP_LINES.map(String), ['/^bwrap: \\S/', '/^apply-seccomp: .+: \\S/']);
   assert.equal(ALLOWED_REFUSALS.length, 3);
 });
@@ -506,10 +559,12 @@ test('the after-trial verdict: a measurement only on positive evidence, and one 
 });
 
 test('the after-trial verdict: the report and the traces must be complete and pair one trace to one run', () => {
-  const not = (traces, raw) => { const v = verdict(traces, raw); assert.equal(v.measurement, false); return v.sentence; };
+  const not = (traces, raw, linked) => { const v = verdict(traces, raw, linked); assert.equal(v.measurement, false); return v.sentence; };
   const pilotTrace = trace([bash('git status', true, `Exit code 1\n${SECCOMP_HELPER}`)], 'claude-eval-a').trimEnd();
   const raw1 = report([['c', 'with', 'claude-eval-a']]);
   const one = text => ({ 'claude-eval-a': text });
+  // The pilot's own result, alone in one complete trace.
+  assert.equal(not(one(pilotTrace), raw1), `This run is not a measurement: the sandbox kept 1 of the 1 shell commands Claude Code tried to run from starting, in 1 of 1 agent run, so every grader that needed one of them failed (the first ended with: ${SECCOMP_HELPER}); Claude Code tried to run 1 shell command for the agents and not one exited 0.`);
   // The first review's three traces: the result line cut short, a request with no result, a wholly malformed trace.
   assert.equal(not(one(pilotTrace.slice(0, -1)), raw1), 'This run is not a measurement: 1 trace line could not be read; 1 shell command the agents asked for got no result in the trace, as when a run is cut off in the middle of a command.');
   assert.equal(not(one(pilotTrace.split('\n')[0]), raw1), 'This run is not a measurement: 1 shell command the agents asked for got no result in the trace, as when a run is cut off in the middle of a command.');
@@ -523,10 +578,41 @@ test('the after-trial verdict: the report and the traces must be complete and pa
   // A run that names no trace, a named trace not found, a trace of no run, no report, and a report of no runs.
   assert.equal(not(one(good), report([['c', 'with', 'claude-eval-a'], ['c', 'without', null]])), "This run is not a measurement: 1 agent run in the eval's report names no trace.");
   assert.equal(not(one(good), report([['c', 'with', 'claude-eval-a'], ['d', 'with', 'claude-eval-b']])), "This run is not a measurement: 1 trace the eval's report names was not found.");
-  assert.equal(not({ 'claude-eval-a': good, 'claude-eval-z': good }, raw1), "This run is not a measurement: 1 trace found belongs to no agent run in the eval's report.");
+  assert.equal(not({ 'claude-eval-a': good, 'claude-eval-z': trace([bash('ls', false, 'a')], 'claude-eval-z') }, raw1), "This run is not a measurement: 1 trace found belongs to no agent run in the eval's report.");
   assert.equal(not(one(good), null), 'This run is not a measurement: the eval left no readable report of its agent runs, so nothing shows that each one left its trace.');
   assert.equal(not({}, { cases: [] }), "This run is not a measurement: the eval's report lists no agent runs.");
   assert.equal(not({}, raw1), "This run is not a measurement: 1 trace the eval's report names was not found.");
+  // The third review's leads. A Bash call id asked for twice in one trace, answered twice in one trace, or found in two
+  // traces: the traces cannot be read, whatever the results say.
+  const lines = entries([bash('ls', false, 'a')], 'claude-eval-a');
+  const join2 = list => list.map(e => JSON.stringify(e)).join('\n');
+  const twoRuns = report([['c', 'with', 'claude-eval-a'], ['c', 'without', 'claude-eval-b']]);
+  const repeatedIds = 'This run is not a measurement: 1 Bash call id appears more than once in the traces, as a request or a result, so the traces cannot be read as one result for each command.';
+  assert.equal(not(one(join2([lines[0], ...lines])), raw1), repeatedIds);
+  assert.equal(not(one(join2([...lines, lines[1]])), raw1), repeatedIds);
+  assert.equal(not({ 'claude-eval-a': trace([bash('ls', false, 'a')], 'x'), 'claude-eval-b': trace([bash('pwd', false, '/')], 'x') }, twoRuns), repeatedIds);
+  assert.deepEqual(bashCalls(join2([lines[0], ...lines, lines[1]])).repeated, ['claude-eval-a_0']);
+  // Two run folders that share one trace file through a link, as sameFiles finds them.
+  const distinct = { 'claude-eval-a': trace([bash('ls', false, 'a')], 'claude-eval-a'), 'claude-eval-b': trace([bash('ls', false, 'a')], 'claude-eval-b') };
+  assert.equal(verdict(distinct, twoRuns).measurement, true);
+  assert.equal(not(distinct, twoRuns, ['claude-eval-a', 'claude-eval-b']), 'This run is not a measurement: 2 run folders share their trace file with another through a link, so some run left no trace of its own.');
+});
+
+test('sameFiles finds two run folders holding one trace file: a symbolic link to the file or to its folder, or a hard link', t => {
+  const dir = temp(t, 'bg-same-files-');
+  const write = name => { mkdirSync(join(dir, name, 'out'), { recursive: true }); writeFileSync(join(dir, name, 'out', 'trace.jsonl'), trace([bash('ls', false, 'a')], name)); };
+  const path = name => join(dir, name, 'out', 'trace.jsonl');
+  write('claude-eval-a');
+  write('claude-eval-c');
+  write('claude-eval-f');
+  mkdirSync(join(dir, 'claude-eval-b', 'out'), { recursive: true });
+  symlinkSync(path('claude-eval-a'), path('claude-eval-b'));
+  symlinkSync(join(dir, 'claude-eval-a'), join(dir, 'claude-eval-d'));
+  mkdirSync(join(dir, 'claude-eval-e', 'out'), { recursive: true });
+  linkSync(path('claude-eval-c'), path('claude-eval-e'));
+  assert.deepEqual(Object.keys(tracesIn(dir)), ['claude-eval-a', 'claude-eval-b', 'claude-eval-c', 'claude-eval-d', 'claude-eval-e', 'claude-eval-f']);
+  assert.deepEqual(sameFiles(dir, Object.keys(tracesIn(dir))), ['claude-eval-a', 'claude-eval-b', 'claude-eval-c', 'claude-eval-d', 'claude-eval-e']);
+  assert.deepEqual(sameFiles(dir, ['claude-eval-a', 'claude-eval-c', 'claude-eval-f', 'claude-eval-missing']), []);
 });
 
 test('the after-trial check fails the job and says why in its log, the job summary and the step outputs', t => {
@@ -557,6 +643,7 @@ test('the after-trial check fails the job and says why in its log, the job summa
   const pilotTrace = trace([bash('git status', true, `Exit code 1\n${SECCOMP_HELPER}`)], 'claude-eval-a').trimEnd();
   for (const [traces, raw] of [
     ...[pilotTrace.slice(0, -1), pilotTrace.split('\n')[0], '{"type":"assistant","message":\nnot json at all\n', ''].map(text => [{ 'claude-eval-a': text }, raw1]),
+    [{}, raw1],
     [{ 'claude-eval-a': trace([bash('ls', false, 'a')], 'claude-eval-a') }, report([['c', 'with', 'claude-eval-a'], ['c', 'without', 'claude-eval-a']])],
     [{ 'claude-eval-a': trace([bash('ls', true, FROM_SOURCE[0])], 'claude-eval-a') }, raw1],
   ]) {
@@ -564,6 +651,18 @@ test('the after-trial check fails the job and says why in its log, the job summa
     assert.equal(failed.status, 1, JSON.stringify(traces));
     assert.match(failed.output, /^measurement=false\nsentence=This run is not a measurement: /);
     assert.match(failed.summary, /^### Not a measurement\n/);
+  }
+  // Two run folders that share one trace file, through a symbolic link and through a hard link, fail it too.
+  for (const link of [symlinkSync, linkSync]) {
+    const folder = mkdtempSync(join(dir, 'linked-'));
+    mkdirSync(join(folder, 'claude-eval-a', 'out'), { recursive: true });
+    mkdirSync(join(folder, 'claude-eval-b', 'out'), { recursive: true });
+    writeFileSync(join(folder, 'claude-eval-a', 'out', 'trace.jsonl'), trace([bash('ls', false, 'a')], 'claude-eval-a'));
+    link(join(folder, 'claude-eval-a', 'out', 'trace.jsonl'), join(folder, 'claude-eval-b', 'out', 'trace.jsonl'));
+    writeFileSync(join(folder, 'raw.json'), JSON.stringify(report([['c', 'with', 'claude-eval-a'], ['c', 'without', 'claude-eval-b']])));
+    const linked = spawnSync(process.execPath, [join(root, '.github/scripts/shell-starts.mjs'), folder, join(folder, 'raw.json')], { encoding: 'utf8', env: { PATH: process.env.PATH } });
+    assert.equal(linked.status, 1, link.name);
+    assert.match(linked.stdout, /^This run is not a measurement: 2 run folders share their trace file with another through a link/m);
   }
   // A missing or unreadable raw report fails the check.
   for (const raw of [undefined, '{"cases": [']) {
@@ -682,11 +781,11 @@ test('the workflow header and the README say what each check proves, the rule an
   const text = readme.replace(/\s+/g, ' ');
   // The same rule and the same limits, in the step's comment and in the README.
   for (const where of [shells, text]) {
-    for (const phrase of ['error whose text begins "Exit code <n>"', 'a PreToolUse hook refused the call', "the model's input failed validation", 'Claude Code blocked a long sleep', 'nothing but the sandbox wrapper\'s own setup lines', 'not one of them exited 0', 'runs past its timeout', 'can only reject a run, never accept one', 'prints something besides those shapes and hits only some commands is not detected', 'nor is one that hits only commands run in the background', 'A run cut off in the middle of a shell command is rejected']) {
+    for (const phrase of ['error whose text begins "Exit code <n>"', 'a PreToolUse hook refused the call', "the model's input failed validation", 'Claude Code blocked a long sleep', 'nothing but the sandbox wrapper\'s own setup lines', 'not one of them exited 0', 'runs past its timeout', 'can only reject a run, never accept one', 'prints something besides those shapes and hits only some commands is not detected', 'nor is one that hits only commands run in the background', 'A run cut off in the middle of a shell command is rejected', 'two run folders hold one trace file through a', 'a Bash call id appears more than once', 'guard against a fault in the environment', 'write the grades too', 'forged record, one no Claude Code release writes']) {
       assert.ok(where.includes(phrase), `${phrase} (${where === shells ? 'workflow' : 'README'})`);
     }
   }
-  for (const phrase of ['**Before the key is fetched**', '**After the trial**', 'no model is asked and nothing is spent', 'exactly the two agent runs that trial asks for, one with the build and one without', 'received each call\'s result exactly once, under the call\'s own id', 'A trial whose agents asked for no shell command at all is still a measurement.', 'To move a pin on purpose:', 'The sandbox self-test workflow runs on that pull request at no cost. Merge only if it passes.', 'For a new Claude Code release, also check again how it writes a Bash result, against its source.', 'with each of the three Claude Code releases tried (2.1.309, 2.1.311 and 2.1.322)', 'reads exit status 1 as success for `grep`, `find`, `diff` and `test`']) {
+  for (const phrase of ['**Before the key is fetched**', '**After the trial**', 'no model is asked and nothing is spent', 'exactly the two agent runs that trial asks for, one with the build and one without', 'received each call\'s result exactly once, under the call\'s own id', 'each command must have exited 0, by Claude Code\'s own record of it', 'A trial whose agents asked for no shell command at all is still a measurement.', 'To move a pin on purpose:', 'The sandbox self-test workflow runs on that pull request at no cost. Merge only if it passes.', 'For a new Claude Code release, also check again how it writes a Bash result, against its source.', '`bwrap: <message>`', '`apply-seccomp: <step>: <error>`', 'with each of the three Claude Code releases tried (2.1.309, 2.1.311 and 2.1.322)', 'reads exit status 1 as success for `grep`, `find`, `diff` and `test`']) {
     assert.ok(text.includes(phrase), phrase);
   }
   for (const stale of ['never matches', 'whatever the Claude Code release', 'word for word apart from the reason', 'came back as a success']) {
