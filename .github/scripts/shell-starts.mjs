@@ -2,20 +2,24 @@
 // looks at each result the Bash tool returned. A call counts as stopped by the sandbox when the Bash tool returned an
 // error and its output, after Claude Code's own "Exit code N" line, holds at least one line the sandbox prints when it
 // cannot start a command (it begins "bwrap: ", bubblewrap's prefix, "apply-seccomp: ", the prefix of the sandbox's
-// seccomp helper, or "Sandbox is required", Claude Code's refusal), and nothing but such lines and bash's own complaints
-// (lines that begin "bash: " or "/bin/bash: "). Those lines all come before the command exists: the helper and
-// bubblewrap print one line and exit when they fail, and the shell that would have started the command prints its own
-// complaints first. A command that started prints its own output, which is none of these, so a failing test or a script
-// that exits 1 never matches; a command that failed silently leaves no sandbox line, which the rule needs. If any call
-// matches, the run is not a measurement.
+// seccomp helper, or "Sandbox is required", Claude Code's refusal), and nothing but such lines and bash's own
+// complaints (lines that begin "bash: " or "/bin/bash: "). Those lines all come before the command exists: the helper
+// and bubblewrap print one line and exit when they fail, and the shell that would have started the command prints its
+// own complaints first. A command that started prints its own output, which is none of these, so a failing test or a
+// script that exits 1 never matches; a command that failed silently leaves no sandbox line, which the rule needs. If
+// any call matches, the run is not a measurement.
 //
 // Usage: node .github/scripts/shell-starts.mjs <folder holding claude-eval-*/out/trace.jsonl> [<evidence id>]
 import { appendFileSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const SANDBOX_LINE = /^(bwrap: |apply-seccomp: |Sandbox is required)/;
-const BASH_LINE = /^(\/usr)?(\/bin\/)?bash: /;
+// How each line the sandbox prints when it cannot start a command begins: bubblewrap's prefix, the prefix of every
+// message from the sandbox's seccomp helper (apply-seccomp, in @anthropic-ai/sandbox-runtime), and Claude Code's
+// refusal of a command when a required sandbox is unavailable.
+export const SANDBOX_PREFIXES = ['bwrap: ', 'apply-seccomp: ', 'Sandbox is required'];
+const isSandboxLine = line => SANDBOX_PREFIXES.some(prefix => line.startsWith(prefix));
+const BASH_LINE = /^(?:(?:\/usr)?\/bin\/)?bash: /;
 const EXIT_LINE = /^Exit code -?\d+$/;
 
 // The text of a tool result, which Claude Code writes as a string or as a list of text blocks.
@@ -27,7 +31,7 @@ export function stoppedBySandbox(isError, text) {
   if (!isError) return false;
   const lines = text.split('\n').map(l => l.trimEnd()).filter(l => l.trim() !== '');
   const body = EXIT_LINE.test(lines[0] ?? '') ? lines.slice(1) : lines;
-  return body.some(l => SANDBOX_LINE.test(l)) && body.every(l => SANDBOX_LINE.test(l) || BASH_LINE.test(l));
+  return body.some(l => isSandboxLine(l)) && body.every(l => isSandboxLine(l) || BASH_LINE.test(l));
 }
 
 // Every Bash call in one trace (JSON lines) with its result: { id, command, isError, text, stopped }. A call with no
@@ -54,8 +58,10 @@ export function bashCalls(trace) {
   return { calls, unreadable };
 }
 
-// The verdict over every trace: { calls, stopped, unreadable, measurement, sentence }. `traces` maps a name to its text.
+// The verdict over every trace: { calls, stopped, unreadable, measurement, sentence }. `traces` maps a name to its
+// text. A run with no trace at all is not a measurement either: nothing shows what its agents did.
 export function verdict(traces) {
+  const runs = Object.keys(traces).length;
   let calls = 0;
   let unreadable = 0;
   const stopped = [];
@@ -65,11 +71,13 @@ export function verdict(traces) {
     unreadable += read.unreadable;
     for (const c of read.calls) if (c.stopped) stopped.push({ trace: name, ...c });
   }
-  const measurement = stopped.length === 0;
-  const first = stopped[0] ? stopped[0].text.split('\n').map(l => l.trim()).filter(l => SANDBOX_LINE.test(l))[0] : '';
-  const sentence = measurement
-    ? `The sandbox started every shell command the agents asked for (${calls} of ${calls} across ${Object.keys(traces).length} agent run(s)).`
-    : `This run is not a measurement: the sandbox kept ${stopped.length} of ${calls} shell commands the agents asked for from starting, in ${new Set(stopped.map(s => s.trace)).size} of ${Object.keys(traces).length} agent run(s), so any grader that needed one failed in both arms. The first one ended with: ${first}`;
+  const measurement = runs > 0 && stopped.length === 0;
+  const first = stopped[0] ? stopped[0].text.split('\n').map(l => l.trim()).filter(l => isSandboxLine(l))[0] : '';
+  const sentence = runs === 0
+    ? 'This run is not a measurement: the trial left no agent traces, so nothing shows what its agents did or that their shell commands ran.'
+    : measurement
+      ? `The sandbox started every shell command the agents asked for: ${calls} of ${calls}, across ${runs} agent run(s).`
+      : `This run is not a measurement: the sandbox kept ${stopped.length} of the ${calls} shell commands the agents asked for from starting, in ${new Set(stopped.map(s => s.trace)).size} of ${runs} agent run(s), so every grader that needed one of them failed. The first one ended with: ${first}`;
   return { calls, stopped, unreadable, measurement, sentence };
 }
 
@@ -92,7 +100,9 @@ function main() {
   if (v.unreadable) console.log(`note: ${v.unreadable} trace line(s) were not JSON and were skipped`);
   for (const s of v.stopped.slice(0, 10)) console.log(`  ${s.trace}: ${JSON.stringify(s.command).slice(0, 160)} -> ${JSON.stringify(s.text).slice(0, 300)}`);
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${v.measurement ? '' : '### Not a measurement\n\n'}${v.sentence}\n\n`);
-  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `measurement=${v.measurement ? 'true' : 'false'}\n`);
+  // One line each, whatever a trace held: control characters, line breaks included, are dropped.
+  const oneLine = [...v.sentence].filter(ch => ch.charCodeAt(0) >= 32).join('');
+  if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `measurement=${v.measurement ? 'true' : 'false'}\nsentence=${oneLine}\n`);
   if (!v.measurement) { console.log(`::error::${v.sentence}`); process.exit(1); }
 }
 

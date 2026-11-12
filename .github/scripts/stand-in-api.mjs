@@ -1,7 +1,7 @@
-// A stand-in for the Anthropic Messages API, for the sandbox self-test. It listens on 127.0.0.1 only and plays the model:
-// a request that offers the Bash tool gets back one Bash call running the command it was given, and the request that
-// carries that call's result back gets a closing reply. It records each result the Bash tool returned, so the self-test
-// judges what really ran. It accepts only its own placeholder key, calls nothing, and costs nothing.
+// A stand-in for the Anthropic Messages API, for the sandbox self-test. It listens on 127.0.0.1 only and plays the
+// model: a request that offers the Bash tool gets back one Bash call running the command it was given, and the request
+// that carries that call's result back gets a closing reply. It records each result the Bash tool returned, so the
+// self-test judges what really ran. It accepts only its own placeholder key, calls nothing, and costs nothing.
 import { createServer } from 'node:http';
 
 // Not a key: the self-test hands this to Claude Code so that no real key is needed or sent.

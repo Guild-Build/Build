@@ -1,7 +1,8 @@
 name: Sandbox experiment
-# A temporary experiment on GitHub's free runners, on a scratch branch only: which runner image and which Claude Code
-# release let the agent's Bash tool start a command inside the sandbox. No secret, no environment, no model call: the
-# self-test uses a stand-in for the model on 127.0.0.1.
+# A temporary experiment on GitHub's free runners, on a scratch branch only. It runs the pull request's own install
+# script and sandbox self-test on the image the trial job used for its pilot run (ubuntu-26.04, where ubuntu-latest now
+# points) and on the image it is pinned to (ubuntu-24.04), then the after-trial rule on the self-test's own traces. No
+# secret, no environment, no model call: the self-test uses a stand-in for the model on 127.0.0.1.
 on:
   push:
     branches: [claude/sandbox-experiment]
@@ -12,14 +13,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [ubuntu-24.04, ubuntu-26.04]
-        claude: ['2.1.309', '2.1.311', '2.1.322']
-        fix: [none]
-        include:
-          - { image: ubuntu-26.04, claude: '2.1.322', fix: docs-bwrap-profile }
-          - { image: ubuntu-26.04, claude: '2.1.322', fix: unload-bwrap-userns-restrict }
+        image: [ubuntu-26.04, ubuntu-24.04]
     runs-on: ${{ matrix.image }}
-    name: ${{ matrix.image }}, Claude Code ${{ matrix.claude }}, ${{ matrix.fix }}
+    name: ${{ matrix.image }} with the pinned install
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -30,50 +26,17 @@ jobs:
       - name: Runner facts
         run: |
           uname -r; . /etc/os-release; echo "$PRETTY_NAME"; echo "ImageVersion=${ImageVersion:-unknown}"
-          sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone user.max_user_namespaces 2>&1 || true
           ls -la /etc/apparmor.d | grep -i -E 'bwrap|userns|unpriv' || echo "no bwrap profile file in /etc/apparmor.d"
-          sudo aa-status 2>/dev/null | grep -i -E 'bwrap|unpriv|profiles are' || true
-          if [ -f /etc/apparmor.d/bwrap-userns-restrict ]; then echo '--- /etc/apparmor.d/bwrap-userns-restrict'; grep -v '^#' /etc/apparmor.d/bwrap-userns-restrict | grep -v '^[[:space:]]*$'; fi
-      - name: Install as the trial job does
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap socat >/dev/null
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
-          sudo sysctl -w kernel.unprivileged_userns_clone=1 2>/dev/null || true
-          npm install -g "@anthropic-ai/claude-code@${{ matrix.claude }}" && claude --version && bwrap --version && dpkg -s bubblewrap | grep -E '^Version'
-      - name: Apply the fix under test
-        if: ${{ matrix.fix != 'none' }}
-        run: |
-          case "${{ matrix.fix }}" in
-            docs-bwrap-profile)
-              printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' '' 'profile bwrap /usr/bin/bwrap flags=(unconfined) {' '  userns,' '  include if exists <local/bwrap>' '}' | sudo tee /etc/apparmor.d/bwrap >/dev/null
-              sudo systemctl reload apparmor || sudo apparmor_parser -r /etc/apparmor.d/bwrap;;
-            unload-bwrap-userns-restrict)
-              sudo apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict;;
-          esac
           sudo aa-status 2>/dev/null | grep -i -E 'bwrap|unpriv' || echo "no bwrap profile loaded"
-      - name: Nested user namespace inside bubblewrap (what the sandbox's seccomp helper makes)
-        run: |
-          sudo dmesg --clear || true
-          if bwrap --unshare-all --die-with-parent --dev-bind / / --proc /proc -- unshare --user --map-current-user true; then echo "nested user namespace: ok"; else echo "nested user namespace: FAILED"; fi
-          sudo dmesg | grep -i 'apparmor="DENIED"' | tail -5 || true
-      - name: Sandbox self-test through the agent's Bash tool
-        id: selftest
-        continue-on-error: true
+      - name: Install what the trial job installs
+        run: bash .github/scripts/install-trial-tools.sh
+      - name: Self-test the sandbox through the agent's own Bash tool
         run: |
           sudo dmesg --clear || true
           node .github/scripts/sandbox-self-test.mjs --model claude-sonnet-5-5
+      - name: What AppArmor refused during the self-test
+        if: ${{ always() }}
+        run: sudo dmesg | grep -i 'apparmor="DENIED"' | tail -5 || echo "nothing refused"
       - name: The after-trial rule on the self-test's own traces
         if: ${{ always() }}
-        continue-on-error: true
         run: node .github/scripts/shell-starts.mjs "$RUNNER_TEMP/sandbox-self-test/tmp"
-      - name: After the self-test
-        if: ${{ always() }}
-        run: |
-          echo "self-test outcome: ${{ steps.selftest.outcome }}"
-          sudo dmesg | grep -i 'apparmor="DENIED"' | tail -5 || true
-          for d in "$RUNNER_TEMP"/sandbox-self-test/tmp/claude-eval-*; do
-            [ -d "$d" ] || continue
-            chmod 700 "$d" "$d/sealed" 2>/dev/null || true
-            echo "--- $d"; ls -la "$d" "$d/sealed" 2>&1 | head -30
-            chmod 700 "$d/sealed/home" 2>/dev/null || true; ls -la "$d/sealed/home" 2>&1 | head -30
-          done

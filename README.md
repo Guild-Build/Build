@@ -96,6 +96,40 @@ each budget to its own cost estimate: the key check can pass its budget by the o
 can pass its budget by every agent run already under way when it is reached, up to the request's `concurrency` (1
 unless the request says otherwise).
 
+An agent's shell commands run inside Claude Code's sandbox, and a run whose commands never started measures nothing, so
+each run checks the sandbox twice:
+
+- **Before the key is fetched**, the sandbox self-test
+  ([`.github/scripts/sandbox-self-test.mjs`](.github/scripts/sandbox-self-test.mjs)) runs the trial's own path, the
+  CLI's `test` command and `claude plugin eval` with the trial's flags, on a one-case trial in
+  [`.github/sandbox-self-test/`](.github/sandbox-self-test/). A stand-in for the model on 127.0.0.1 takes the place of
+  Anthropic's API, so no model is asked and nothing is spent. It proves that the agent's own Bash tool ran a command
+  inside the sandbox: the self-test passes only when every agent run's command exited 0 and printed the arithmetic it
+  was given, a seccomp filter turned on and a user namespace other than the runner's. Otherwise the run stops before
+  Azure and the key.
+- **After the trial**, [`.github/scripts/shell-starts.mjs`](.github/scripts/shell-starts.mjs) reads every agent trace. A
+  shell command was stopped by the sandbox when the Bash tool returned an error whose output, after Claude Code's
+  `Exit code N` line, holds a line the sandbox prints when it cannot start a command (one that begins `bwrap: `,
+  `apply-seccomp: ` or `Sandbox is required`) and nothing but such lines and bash's own complaints. A command that
+  started prints its own output, so a failing test or a script that exits 1 never matches. If any command matches, or no
+  trace was left, the run is not a measurement. The job fails, its summary says why, and its files upload as
+  `not-evidence-<build>-<trial>` with the record renamed `not-evidence-<build>-<trial>.json` beside
+  `NOT-A-MEASUREMENT.txt`.
+
+The trial job is pinned so that a new runner image or Claude Code release cannot silently stop the sandbox. It runs on
+`ubuntu-24.04`, not `ubuntu-latest`: on `ubuntu-26.04`, AppArmor's `bwrap-userns-restrict` profile keeps the sandbox's
+seccomp helper from starting any command, whatever the Claude Code release. Claude Code is pinned in
+[`.github/scripts/install-trial-tools.sh`](.github/scripts/install-trial-tools.sh), which the trial job and the free
+[sandbox self-test workflow](.github/workflows/sandbox.yml) both run. To move a pin on purpose:
+
+1. Change the version in the install script, or `runs-on` in both `trial.yml` and `sandbox.yml` (a test keeps them
+   equal), in a pull request.
+2. The sandbox self-test workflow runs on that pull request at no cost. Merge only if it passes. If it fails, the pin
+   stays where it is.
+
+Moving to `ubuntu-26.04` also needs its `bwrap-userns-restrict` profile out of the way, which is a change to the
+runner's security settings. That pull request must name the change and give its reason.
+
 A guild record's attestation is the public URL of the run that produced it,
 `https://github.com/Guild-Build/Build/actions/runs/<run id>`. Anyone signed in to GitHub can read the run's log there
 and download its files. The files are the evidence record, the raw report, the results and the agent traces, all
