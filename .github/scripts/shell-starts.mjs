@@ -3,14 +3,15 @@
 //  (a) the report and the traces are not complete or do not match. The report must read and list agent runs, each
 //      naming a trace of its own: no run names none, no trace is named twice or missing, every trace found belongs to a
 //      listed run, and no two run folders hold one trace file (a symbolic or hard link, found by resolved path and by
-//      device and inode). Each trace must be complete (completeness() below): (1) every line is a JSON object and there
-//      is at least one; (2) it ends with Claude Code's final result event, closes every turn it opened with one result
-//      event and saw every background task it started (a command run in the background, a subagent) report its end, so
-//      a trace that stops before that, for any reason including the eval's own time limit, is not complete; a run that
-//      uses a subagent or a background command is fine when its trace shows all of it; (3) every tool request in it, of
-//      any tool, has exactly one result in it, and every tool result in it answers a request in it; and (4) across all
-//      the traces of the job, no tool request id and no tool result id appears more than once. A complete trace with no
-//      shell request in it is fine;
+//      device and inode). Each trace must be complete (completeness() below): (1) every line is a JSON object, a blank
+//      line counting against it and only the file's one terminating newline allowed, and there is at least one; (2) it
+//      ends with Claude Code's final result event, closes every turn it opened with one result event and saw every
+//      background task it started (a command run in the background, a subagent) report its end, so a trace that stops
+//      before that, for any reason including the eval's own time limit, is not complete; a run that uses a subagent or
+//      a background command is fine when its trace shows all of it; (3) every tool request in it, of any tool, has
+//      exactly one result in it, and every tool result in it answers a request in it; and (4) across all the traces of
+//      the job, no tool request id and no tool result id appears more than once. A complete trace with no shell request
+//      in it is fine;
 //  (b) a Bash result is an error that is not a process exit, meaning Claude Code returned an error for the call without
 //      the command running to an exit status. In Claude Code 2.1.322 a shell command that ran and exited non-zero is
 //      the one error whose text begins "Exit code <n>" (its ShellError, written so by the tool dispatcher's error
@@ -80,14 +81,16 @@ const exitZero = (kind, record) => kind === 'success' && record !== null && type
 const textOf = block => typeof block.content === 'string' ? block.content
   : Array.isArray(block.content) ? block.content.map(b => (b && b.type === 'text' ? b.text : '')).join('\n') : '';
 
-// The events of one trace, one JSON object per non-blank line; `unreadable` counts the lines that are not one, and
-// `last` is the last non-blank line's event, or null when that line is not one.
+// The events of one trace, one JSON object per line; `unreadable` counts the lines that are not one, a blank or
+// whitespace-only line included, and `last` is the last line's event, or null when that line is not one. Only the
+// file's one terminating newline is allowed besides the events.
 function eventsOf(trace) {
   const events = [];
   let unreadable = 0;
   let last = null;
-  for (const line of trace.split('\n')) {
-    if (!line.trim()) continue;
+  const lines = trace.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  for (const line of lines) {
     let event = null;
     try { event = JSON.parse(line); } catch {}
     if (event === null || typeof event !== 'object' || Array.isArray(event)) { unreadable++; last = null; continue; }
@@ -99,14 +102,15 @@ function eventsOf(trace) {
 const blocksOf = (event, type) => (Array.isArray(event.message?.content) ? event.message.content : []).filter(b => b?.type === type);
 const isId = id => typeof id === 'string' && id !== '';
 
-// Rule (a): whether one trace is complete. It is complete only when (1) every non-blank line is a JSON object and
-// there is at least one; (2) its last event is a result event, it closes each turn it opened (a system init event)
-// with one result event, in order, the init before its result, their result_index running 0, 1, … with no gap or
-// repeat, and every background task it started (task_started) reported its end (task_notification) in it, each
-// exactly once, by task_id; and (3) every tool request in it, of any tool, has exactly one result in it, and every tool
-// result in it answers a request in it. Part (4), that no tool request id and no tool result id appears more than once
-// across all the traces of the job, needs them all: verdict() checks it on the ids this returns. A result event with
-// no result_index, or a task event with no task_id, fails part (2).
+// Rule (a): whether one trace is complete. It is complete only when (1) every line is a JSON object, a blank or
+// whitespace-only line counting against it and only the file's one terminating newline allowed, and there is at least
+// one; (2) its last event is a result event, it closes each turn it opened (a system init event) with one result event,
+// in order, the init before its result, their result_index running 0, 1, … with no gap or repeat, and every background
+// task it started (task_started) reported its end (task_notification) in it, each exactly once, by task_id; and (3)
+// every tool request in it, of any tool, has exactly one result in it, and every tool result in it answers a request in
+// it. Part (4), that no tool request id and no tool result id appears more than once across all the traces of the job,
+// needs them all: verdict() checks it on the ids this returns. A result event with no result_index, or a task event
+// with no task_id, fails part (2).
 export function completeness(trace) {
   const { events, unreadable, last } = eventsOf(trace);
   // A request with no id can never be answered, and a result with no id answers nothing.
