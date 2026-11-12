@@ -22,16 +22,20 @@ const install = read('.github/scripts/install-trial-tools.sh');
 const readme = read('README.md');
 const temp = (t, prefix) => { const dir = mkdtempSync(join(tmpdir(), prefix)); t.after(() => rmSync(dir, { recursive: true, force: true })); return dir; };
 
-// Bash results as Claude Code 2.1.322 wrote them, sandbox on, when a stand-in model asked for each call (run
-// 43266336234): [is_error, content, its tool_result_meta entry]. Those under BROKEN came from ubuntu-26.04, where the
-// sandbox cannot start a command.
+// Bash results as Claude Code 2.1.322 wrote them, sandbox on, when a stand-in model asked for each call (runs
+// 43266336234 and 43271503569): [is_error, content, its tool_result_meta entry, its tool_use_result record where that
+// matters]. Those under BROKEN came from ubuntu-26.04, where the sandbox cannot start a command.
 const ACCEPT = { permission_decision: { decision: 'accept', source: 'config', reason_type: 'rule' } };
+const RECORD = (stdout, more = {}) => ({ stdout, stderr: '', interrupted: false, isImage: false, noOutputExpected: false, ...more });
 const HOOK = { non_execution_kind: 'permission-rule', permission_decision: { decision: 'reject', source: 'hook', reason_type: 'hook' } };
 const SECCOMP_HELPER = 'apply-seccomp: write /proc/self/setgroups (nested userns is capability-restricted; caller must provide CAP_SYS_ADMIN): Permission denied';
 const OBSERVED = {
-  'exit 0': [false, 'hi', ACCEPT],
-  'exit 3': [true, 'Exit code 3\nout\nerr', ACCEPT],
-  'grep miss': [false, '(Bash completed with no output)', ACCEPT],
+  'exit 0': [false, 'hi', ACCEPT, RECORD('hi')],
+  'exit 3': [true, 'Exit code 3\nout\nerr', ACCEPT, 'Error: Exit code 3\nout\nerr'],
+  'grep miss': [false, '(Bash completed with no output)', ACCEPT, RECORD('', { returnCodeInterpretation: 'No matches found' })],
+  'git diff, files differ': [false, '(Bash completed with no output)', ACCEPT, RECORD('', { returnCodeInterpretation: 'Files differ' })],
+  'started in the background': [false, 'Command running in background with ID: b5gv2xnhr. Output is being written to: /tmp/claude-1001/-home-runner-work--temp-scenarios-scn-kmAPHv-cwd/ecb0498e-8c52-43e7-9993-96ccf8633c46/tasks/b5gv2xnhr.output. You will be notified when it completes. To check interim output, use Read on that file path.', ACCEPT, RECORD('', { backgroundTaskId: 'b5gv2xnhr' })],
+  'runs past its timeout': [false, 'Command did not complete within its 2s timeout and was moved to the background (ID: b4pj2kv63). Output is being written to: /tmp/claude-1001/-home-runner-work--temp-scenarios-scn-QDL2NE-cwd/2960bd1c-c417-4d20-a6b5-d3860061a14b/tasks/b4pj2kv63.output. You will be notified when it completes.', ACCEPT, RECORD('', { backgroundTaskId: 'b4pj2kv63', timedOutAfterMs: 2000 })],
   'hook exits 2': [true, "PreToolUse:Bash hook error: [echo 'test hook: blocked' >&2; exit 2]: test hook: blocked\n", HOOK],
   'hook denies by JSON': [true, 'PreToolUse:Bash hook error: json hook says no', HOOK],
   'malformed input': [true, '<tool_use_error>InputValidationError: Bash failed due to the following issues:\nThe required parameter `command` is missing\nAn unexpected parameter `cmd` was provided</tool_use_error>', undefined],
@@ -39,7 +43,7 @@ const OBSERVED = {
 };
 const BROKEN = {
   'exit 0, sandbox broken': [true, `Exit code 1\n${SECCOMP_HELPER}`, ACCEPT],
-  'grep miss, sandbox broken': [false, SECCOMP_HELPER, ACCEPT],
+  'grep miss, sandbox broken': [false, SECCOMP_HELPER, ACCEPT, RECORD(SECCOMP_HELPER, { returnCodeInterpretation: 'No matches found' })],
 };
 // What the pilot run's Bash tool returned for each of its 30 shell calls (run 43153585543), and results this release's
 // source writes but which a free run cannot produce: its sandbox bridge error, its refusals of a command for a sandbox
@@ -58,15 +62,17 @@ const FROM_SOURCE = [
 const working = folder => `${bashrc(folder)}\n${bashrc(folder)}\nprobe=42\nseccomp=2\nuserns=user:[4026532282]`;
 const HOST = 'user:[4026531837]';
 
-// A trace as Claude Code writes it, one JSON message per line. Each call is [tool, input, isError, text, meta]: a call
-// whose text is undefined has no result, and meta is its tool_result_meta entry. Ids start with `prefix`.
-const entries = (calls, prefix = 'toolu') => calls.flatMap(([tool, input, isError, text, meta], i) => [
+// A trace as Claude Code writes it, one JSON message per line. Each call is [tool, input, isError, text, meta, record]:
+// a call whose text is undefined has no result, meta is its tool_result_meta entry and record its tool_use_result. Ids
+// start with `prefix`.
+const entries = (calls, prefix = 'toolu') => calls.flatMap(([tool, input, isError, text, meta, record], i) => [
   { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: `${prefix}_${i}`, name: tool, input }] } },
-  ...(text === undefined ? [] : [{ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `${prefix}_${i}`, content: text, ...(isError ? { is_error: true } : {}) }] }, ...(meta ? { tool_result_meta: [{ id: `${prefix}_${i}`, ...meta }] } : {}) }]),
+  ...(text === undefined ? [] : [{ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `${prefix}_${i}`, content: text, ...(isError ? { is_error: true } : {}) }] }, ...(meta ? { tool_result_meta: [{ id: `${prefix}_${i}`, ...meta }] } : {}), ...(record === undefined ? {} : { tool_use_result: record }) }]),
 ]);
 const trace = (calls, prefix) => entries(calls, prefix).map(entry => JSON.stringify(entry)).join('\n') + '\n';
-const bash = (command, isError, text, meta = ACCEPT) => ['Bash', { command }, isError, text, meta];
-const shape = ([isError, text, meta], command = 'c') => ['Bash', { command }, isError, text, meta];
+// A Bash call with the record Claude Code writes beside a command's own exit: its error text, or what it printed.
+const bash = (command, isError, text, meta = ACCEPT, record = isError ? `Error: ${text}` : RECORD(text)) => ['Bash', { command }, isError, text, meta, record];
+const shape = ([isError, text, meta, record], command = 'c') => ['Bash', { command }, isError, text, meta, record];
 // A raw report as the eval writes it: each run is [case, arm, run folder], with the trace path the eval gives it.
 const report = runs => {
   const cases = new Map();
@@ -304,8 +310,9 @@ if (plan.noReport) process.exit(1);
     const result = { type: 'tool_result', tool_use_id: call.id, content: plan.text, ...(plan.isError ? { is_error: true } : {}) };
     const out = join(process.env.TMPDIR, 'claude-eval-' + i + arm, 'out');
     mkdirSync(out, { recursive: true });
-    const lines = [{ type: 'assistant', message: { role: 'assistant', content: [call] } }, { type: 'user', message: { role: 'user', content: [result] } }];
-    if (plan.twice === arm) lines.push({ type: 'assistant', message: { role: 'assistant', content: [{ ...call, id: call.id + '_again' }] } }, { type: 'user', message: { role: 'user', content: [{ ...result, tool_use_id: call.id + '_again' }] } });
+    const record = plan.isError ? 'Error: ' + plan.text : { stdout: plan.text, stderr: '', interrupted: false, isImage: false, noOutputExpected: false };
+    const lines = [{ type: 'assistant', message: { role: 'assistant', content: [call] } }, { type: 'user', message: { role: 'user', content: [result] }, tool_use_result: record }];
+    if (plan.twice === arm) lines.push({ type: 'assistant', message: { role: 'assistant', content: [{ ...call, id: call.id + '_again' }] } }, { type: 'user', message: { role: 'user', content: [{ ...result, tool_use_id: call.id + '_again' }] }, tool_use_result: record });
     const written = !plan.noTrace && !(plan.shareTrace && i > 0);
     if (written) writeFileSync(join(out, 'trace.jsonl'), lines.map(e => JSON.stringify(e)).join('\\n') + '\\n');
     const answer = plan.firstResultTwice ? (i === 0 ? [result, result] : null) : [result];
@@ -387,7 +394,7 @@ test("the after-trial rule reads each result's shape: a process exit, an allowed
   const kind = ([isError, text, meta]) => kindOf(isError, text, meta);
   // As Claude Code 2.1.322 wrote them: exits, a grep miss it reads as success, and refusals before the command ran.
   assert.deepEqual(Object.fromEntries(Object.entries(OBSERVED).map(([k, v]) => [k, kind(v)])), {
-    'exit 0': 'success', 'exit 3': 'failed', 'grep miss': 'success', 'hook exits 2': 'refused', 'hook denies by JSON': 'refused', 'malformed input': 'refused', 'long sleep': 'refused',
+    'exit 0': 'success', 'exit 3': 'failed', 'grep miss': 'success', 'git diff, files differ': 'success', 'started in the background': 'success', 'runs past its timeout': 'success', 'hook exits 2': 'refused', 'hook denies by JSON': 'refused', 'malformed input': 'refused', 'long sleep': 'refused',
   });
   // On the broken image: the helper's line, behind "Exit code 1" or as the whole output of a grep read as success.
   for (const v of Object.values(BROKEN)) assert.equal(kind(v), 'stopped', v[1]);
@@ -428,6 +435,21 @@ test('a trace is read in full: its requests, their results, and every line that 
   const readBack = bashCalls(swapped);
   assert.deepEqual(readBack.calls.map(c => [c.command, c.kind]), [['ls', 'success'], ['make', 'stopped']]);
   assert.deepEqual([readBack.unanswered, readBack.unreadable, readBack.empty], [[], 0, false]);
+  // Whether a call exited 0 comes from Claude Code's record beside its result: not an exit status 1 it reads as
+  // success, not a command it ran in the background, not interrupted, and only from a record that is there.
+  const records = bashCalls(trace(['exit 0', 'grep miss', 'git diff, files differ', 'started in the background', 'runs past its timeout', 'exit 3'].map(k => shape(OBSERVED[k]))));
+  assert.deepEqual(records.calls.map(c => c.exitedZero), [true, false, false, false, false, false]);
+  assert.equal(bashCalls(trace([bash('ls', false, 'a', ACCEPT, { ...RECORD('a'), interrupted: true })])).calls[0].exitedZero, false);
+  assert.equal(bashCalls(trace([['Bash', { command: 'ls' }, false, 'a', ACCEPT]])).calls[0].exitedZero, false);
+  assert.equal(bashCalls(trace([bash('ls', false, 'a', ACCEPT, 'a')])).calls[0].exitedZero, false);
+  // A line holding two results has no record that tells them apart, and a request answered twice exited 0 only if
+  // both of its results say so.
+  const two = [{ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'x', name: 'Bash', input: { command: 'ls' } }, { type: 'tool_use', id: 'y', name: 'Bash', input: { command: 'pwd' } }] } }, { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'x', content: 'a' }, { type: 'tool_result', tool_use_id: 'y', content: '/' }] }, tool_use_result: RECORD('a') }];
+  assert.deepEqual(bashCalls(two.map(e => JSON.stringify(e)).join('\n')).calls.map(c => [c.kind, c.exitedZero]), [['success', false], ['success', false]]);
+  const again = entries([bash('ls', false, 'a')]);
+  again.push({ ...again[1], tool_use_result: RECORD('a', { backgroundTaskId: 'b1' }) });
+  assert.deepEqual(bashCalls(again.map(e => JSON.stringify(e)).join('\n')).calls.map(c => [c.kind, c.exitedZero]), [['success', false]]);
+  assert.deepEqual(bashCalls([...again.slice(0, 2), again[1]].map(e => JSON.stringify(e)).join('\n')).calls.map(c => c.exitedZero), [true]);
   // The meta that belongs to a result is the entry with its id.
   const metaRead = bashCalls(trace([shape(OBSERVED['hook exits 2'])]));
   assert.deepEqual([metaRead.calls[0].kind, metaRead.calls[0].meta.permission_decision.source], ['refused', 'hook']);
@@ -452,9 +474,9 @@ test('the after-trial verdict: a measurement only on positive evidence, and one 
   };
   const fine = verdictOf(healthy);
   assert.equal(fine.measurement, true);
-  assert.equal(fine.sentence, "The sandbox started every shell command Claude Code tried to run for the agents: 5 of 5 ran to an exit (2 with success), and 1 more was refused before running, by a hook or an input check; each of the 2 agent runs in the eval's report left its own complete trace.");
+  assert.equal(fine.sentence, "No result shows the sandbox keeping a command from starting: none of the 5 shell commands Claude Code tried to run for the agents was kept from starting or ended in an error from Claude Code, and 1 exited 0 (1 other was refused before running, by a hook or an input check); each of the 2 agent runs in the eval's report left its own complete trace.");
   // A complete trace with no shell command in it is still a measurement, and so is one whose only call a hook stopped.
-  assert.equal(verdictOf({ 'claude-eval-a': [['Read', { file_path: '/x' }, false, 'text']] }).measurement, true);
+  assert.equal(verdictOf({ 'claude-eval-a': [['Read', { file_path: '/x' }, false, 'text']] }).sentence, "No result shows the sandbox keeping a command from starting: Claude Code tried to run no shell command for the agents; each of the 1 agent run in the eval's report left its own complete trace.");
   assert.equal(verdictOf({ 'claude-eval-a': [shape(OBSERVED['hook denies by JSON'])] }).measurement, true);
   const not = byFolder => { const v = verdictOf(byFolder); assert.equal(v.measurement, false); return v.sentence; };
   // Kept from the first round: one stopped call among healthy runs rejects the run.
@@ -466,12 +488,21 @@ test('the after-trial verdict: a measurement only on positive evidence, and one 
   assert.match(not({ ...healthy, 'claude-eval-c': [shape(BROKEN['grep miss, sandbox broken'], 'grep x f')] }), /the sandbox kept 1 of the 6 shell commands/);
   // One error that is no exit among healthy calls, such as the review's bridge error, quoted in the sentence.
   assert.match(not({ ...healthy, 'claude-eval-c': [bash('ls', true, FROM_SOURCE[0])] }), /1 shell command ended in an error from Claude Code instead of an exit of the command \(the first: Linux sandbox HTTP bridge socket is missing \(socat may have died\)\. Restart to retry\.\)/);
-  // Not one shell command came back as a success, in the whole job.
-  assert.equal(not({ 'claude-eval-a': [bash('npm test', true, 'Exit code 1\nFAIL')], 'claude-eval-b': [bash('make', true, 'Exit code 2\nerror')] }), 'This run is not a measurement: Claude Code tried to run 2 shell commands for the agents and not one came back as a success.');
+  // Not one shell command exited 0, in the whole job.
+  assert.equal(not({ 'claude-eval-a': [bash('npm test', true, 'Exit code 1\nFAIL')], 'claude-eval-b': [bash('make', true, 'Exit code 2\nerror')] }), 'This run is not a measurement: Claude Code tried to run 2 shell commands for the agents and not one exited 0.');
+  // Results Claude Code does not mark as errors are no exit 0 either when its record says an exit status 1 was read as
+  // success, or the command went to the background, on request or past its timeout, as 2.1.322 wrote them.
+  const noZero = { 'claude-eval-a': [shape(OBSERVED['grep miss'], 'grep zzz f'), shape(OBSERVED['git diff, files differ'], 'git diff --quiet')], 'claude-eval-b': [shape(OBSERVED['started in the background'], 'npm run dev'), shape(OBSERVED['runs past its timeout'], 'make')] };
+  assert.equal(not(noZero), 'This run is not a measurement: Claude Code tried to run 4 shell commands for the agents and not one exited 0.');
+  // Nor is a command the sandbox stopped, even with a clean record, or a success with no record beside it; one exit 0
+  // anywhere in the job is enough.
+  assert.match(not({ 'claude-eval-a': [bash('echo hi', false, 'bwrap: cannot reach the mirror')] }), /the sandbox kept 1 of the 1 shell commands .*; Claude Code tried to run 1 shell command for the agents and not one exited 0\.$/);
+  assert.match(not({ ...noZero, 'claude-eval-c': [['Bash', { command: 'ls' }, false, 'a', ACCEPT]] }), /tried to run 5 shell commands for the agents and not one exited 0\.$/);
+  assert.equal(verdictOf({ ...noZero, 'claude-eval-c': [shape(OBSERVED['exit 0'], 'echo hi')] }).measurement, true);
   // The pilot: every call stopped, so no success either.
   const pilot = verdictOf({ 'claude-eval-p': [bash('git status', true, PILOT)], 'claude-eval-q': [bash('ls', true, PILOT), bash('make', true, PILOT)], 'claude-eval-r': [['Read', { file_path: '/x' }, false, 'text']] });
   assert.deepEqual([pilot.measurement, pilot.stopped.length], [false, 3]);
-  assert.equal(pilot.sentence, `This run is not a measurement: the sandbox kept 3 of the 3 shell commands Claude Code tried to run from starting, in 2 of 3 agent runs, so every grader that needed one of them failed (the first ended with: ${SECCOMP_HELPER}); Claude Code tried to run 3 shell commands for the agents and not one came back as a success.`);
+  assert.equal(pilot.sentence, `This run is not a measurement: the sandbox kept 3 of the 3 shell commands Claude Code tried to run from starting, in 2 of 3 agent runs, so every grader that needed one of them failed (the first ended with: ${SECCOMP_HELPER}); Claude Code tried to run 3 shell commands for the agents and not one exited 0.`);
 });
 
 test('the after-trial verdict: the report and the traces must be complete and pair one trace to one run', () => {
@@ -651,14 +682,14 @@ test('the workflow header and the README say what each check proves, the rule an
   const text = readme.replace(/\s+/g, ' ');
   // The same rule and the same limits, in the step's comment and in the README.
   for (const where of [shells, text]) {
-    for (const phrase of ['error whose text begins "Exit code <n>"', 'a PreToolUse hook refused the call', "the model's input failed validation", 'Claude Code blocked a long sleep', 'nothing but the sandbox wrapper\'s own setup lines', 'not one of them came back as a success', 'can only reject a run, never accept one', 'prints something besides those shapes and hits only some commands is not detected', 'A run cut off in the middle of a shell command is rejected']) {
+    for (const phrase of ['error whose text begins "Exit code <n>"', 'a PreToolUse hook refused the call', "the model's input failed validation", 'Claude Code blocked a long sleep', 'nothing but the sandbox wrapper\'s own setup lines', 'not one of them exited 0', 'runs past its timeout', 'can only reject a run, never accept one', 'prints something besides those shapes and hits only some commands is not detected', 'nor is one that hits only commands run in the background', 'A run cut off in the middle of a shell command is rejected']) {
       assert.ok(where.includes(phrase), `${phrase} (${where === shells ? 'workflow' : 'README'})`);
     }
   }
-  for (const phrase of ['**Before the key is fetched**', '**After the trial**', 'no model is asked and nothing is spent', 'exactly the two agent runs that trial asks for, one with the build and one without', 'received each call\'s result exactly once, under the call\'s own id', 'A trial whose agents asked for no shell command at all is still a measurement.', 'To move a pin on purpose:', 'The sandbox self-test workflow runs on that pull request at no cost. Merge only if it passes.', 'with each of the three Claude Code releases tried (2.1.309, 2.1.311 and 2.1.322)', 'reads exit status 1 as success for `grep`, `find`, `diff` and `test`']) {
+  for (const phrase of ['**Before the key is fetched**', '**After the trial**', 'no model is asked and nothing is spent', 'exactly the two agent runs that trial asks for, one with the build and one without', 'received each call\'s result exactly once, under the call\'s own id', 'A trial whose agents asked for no shell command at all is still a measurement.', 'To move a pin on purpose:', 'The sandbox self-test workflow runs on that pull request at no cost. Merge only if it passes.', 'For a new Claude Code release, also check again how it writes a Bash result, against its source.', 'with each of the three Claude Code releases tried (2.1.309, 2.1.311 and 2.1.322)', 'reads exit status 1 as success for `grep`, `find`, `diff` and `test`']) {
     assert.ok(text.includes(phrase), phrase);
   }
-  for (const stale of ['never matches', 'whatever the Claude Code release', 'word for word apart from the reason']) {
+  for (const stale of ['never matches', 'whatever the Claude Code release', 'word for word apart from the reason', 'came back as a success']) {
     assert.ok(!text.includes(stale) && !flat(header).includes(stale) && !shells.includes(stale), stale);
   }
 });
