@@ -104,21 +104,40 @@ each run checks the sandbox twice:
   CLI's `test` command and `claude plugin eval` with the trial's flags, on a one-case trial in
   [`.github/sandbox-self-test/`](.github/sandbox-self-test/). A stand-in for the model on 127.0.0.1 takes the place of
   Anthropic's API, so no model is asked and nothing is spent. It proves that the agent's own Bash tool ran a command
-  inside the sandbox: the self-test passes only when every agent run's command exited 0 and printed the arithmetic it
-  was given, a seccomp filter turned on and a user namespace other than the runner's. Otherwise the run stops before
-  Azure and the key.
-- **After the trial**, [`.github/scripts/shell-starts.mjs`](.github/scripts/shell-starts.mjs) reads every agent trace. A
-  shell command was stopped by the sandbox when the Bash tool returned an error whose output, after Claude Code's
-  `Exit code N` line, holds a line the sandbox prints when it cannot start a command (one that begins `bwrap: `,
-  `apply-seccomp: ` or `Sandbox is required`) and nothing but such lines and bash's own complaints. A command that
-  started prints its own output, so a failing test or a script that exits 1 never matches. If any command matches, or no
-  trace was left, the run is not a measurement. The job fails, its summary says why, and its files upload as
-  `not-evidence-<build>-<trial>` with the record renamed `not-evidence-<build>-<trial>.json` beside
-  `NOT-A-MEASUREMENT.txt`.
+  inside the sandbox. It passes only when the eval reports exactly the two agent runs that trial asks for, one with the
+  build and one without. Each must have left its own trace with one Bash call, and each command must have exited 0 and
+  printed the arithmetic it was given, a seccomp filter turned on and a user namespace other than the runner's.
+  Otherwise the run stops before Azure and the key.
+- **After the trial**, [`.github/scripts/shell-starts.mjs`](.github/scripts/shell-starts.mjs) reads the eval's raw
+  report and every agent trace. The run is a measurement only if all of these hold:
+  - every agent run the report lists left its trace, and no trace is left over;
+  - every trace reads in full: no empty file and no line that is not JSON;
+  - every shell command the agents asked for has its result;
+  - no result shows the sandbox keeping its command from starting.
+
+  A run cut off in the middle of a shell command is therefore rejected, and has to be run again. A trial whose agents
+  asked for no shell command at all is still a measurement.
+
+  A result shows the sandbox keeping its command from starting when the Bash tool returned an error and either of
+  these holds:
+  - the error holds one of Claude Code's own refusals for a sandbox reason, word for word apart from the reason it
+    names, such as `Sandbox is required but failed to initialize: … Restart to retry. Running it outside the sandbox
+    (dangerouslyDisableSandbox) is not allowed either.`;
+  - its lines after Claude Code's `Exit code N` line include one shaped like bubblewrap's `bwrap: <message>` or the
+    seccomp helper's `apply-seccomp: <step>: <error>`, and the others are only bash's own complaints.
+
+  Bubblewrap and the helper print such a line and exit when they cannot set up, before the command exists. That rule
+  has a limit: a command that started, failed and printed nothing but lines of those two shapes, plus bash's
+  complaints, is counted as stopped too. That can only reject a run, never accept one.
+
+  When the run is not a measurement, the job fails and its summary says which of these reasons applied, with counts.
+  Its files upload as `not-evidence-<build>-<trial>`, with the record renamed `not-evidence-<build>-<trial>.json`
+  beside `NOT-A-MEASUREMENT.txt`.
 
 The trial job is pinned so that a new runner image or Claude Code release cannot silently stop the sandbox. It runs on
-`ubuntu-24.04`, not `ubuntu-latest`: on `ubuntu-26.04`, AppArmor's `bwrap-userns-restrict` profile keeps the sandbox's
-seccomp helper from starting any command, whatever the Claude Code release. Claude Code is pinned in
+`ubuntu-24.04`, not `ubuntu-latest`: on `ubuntu-26.04`, AppArmor's `bwrap-userns-restrict` profile kept the sandbox's
+seccomp helper from starting any command with each of the three Claude Code releases tried (2.1.309, 2.1.311 and
+2.1.322). Claude Code is pinned in
 [`.github/scripts/install-trial-tools.sh`](.github/scripts/install-trial-tools.sh), which the trial job and the free
 [sandbox self-test workflow](.github/workflows/sandbox.yml) both run. To move a pin on purpose:
 
