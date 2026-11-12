@@ -1,0 +1,49 @@
+name: Scratch - Client Deployment Trial fixture proof
+# Scratch branch only, never merged. Proves the Client Deployment Trial's fixtures inside Claude Code's sandbox on the
+# image and Claude Code release the Season trial job is pinned to, through the trial's own path (the CLI's test command
+# and claude plugin eval), with a scripted stand-in for the model on 127.0.0.1. No secret, no environment, no key, no
+# model call, nothing spent.
+on:
+  push:
+    branches: [claude/scratch-client-deployment-proof]
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Install what the trial job installs
+        run: bash .github/scripts/install-trial-tools.sh
+      - name: Sandbox self-test, as the trial job runs it
+        run: node .github/scripts/sandbox-self-test.mjs --model claude-sonnet-5-5
+      - name: Diagnose the sandbox in every case
+        if: ${{ always() }}
+        run: node scratch/client-deployment-proof/prove.mjs --mode diagnose --out "$RUNNER_TEMP/proof/diagnose"
+      - name: Reference solution in every case
+        if: ${{ always() }}
+        run: node scratch/client-deployment-proof/prove.mjs --mode reference --out "$RUNNER_TEMP/proof/reference"
+      - name: Do-nothing reply in every case
+        if: ${{ always() }}
+        run: node scratch/client-deployment-proof/prove.mjs --mode nothing --out "$RUNNER_TEMP/proof/nothing"
+      - name: Stop-when-blocked without a deploy attempt
+        if: ${{ always() }}
+        run: node scratch/client-deployment-proof/prove.mjs --mode no-attempt --cases stop-when-blocked --out "$RUNNER_TEMP/proof/no-attempt"
+      - name: Upload the reports and traces
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fixture-proof
+          path: |
+            ${{ runner.temp }}/proof/*/summary.*
+            ${{ runner.temp }}/proof/*/raw.json
+            ${{ runner.temp }}/proof/*/local-run.json
+            ${{ runner.temp }}/proof/*/stand-in.json
+            ${{ runner.temp }}/proof/*/tmp/claude-eval-*/out/trace.jsonl
+          if-no-files-found: warn
