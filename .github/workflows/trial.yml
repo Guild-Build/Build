@@ -12,6 +12,11 @@ name: Season trial
 # scanned: nothing is uploaded if the key or the workspace id appears in a file or in a file or folder name, or if the
 # upload folder holds anything but regular files and folders. The scan looks for each value as one unbroken string
 # within a line, so a value split across lines, or encoded (base64, for example), would pass it.
+#
+# A request's cost ceiling, max_cost_usd, covers every paid call of its run. The plan keeps 0.5 USD of it for the key
+# check, one tiny call (two when the key is organisation-level) with a budget of 0.25 USD each, and gives the trial the
+# rest. Claude Code holds each budget to its own cost estimate, and a reply or agent run already under way when a budget
+# is reached still finishes, so a run can pass its ceiling by that much.
 on:
   push:
     branches: [main]
@@ -27,7 +32,7 @@ on:
         required: true
         default: guild-smoke-v1
       max_cost_usd:
-        description: Cost ceiling for the run in USD
+        description: Cost ceiling in USD for everything the run spends, at least 0.51; the key check keeps 0.5 of it and the trial gets the rest
         required: true
         default: "5"
       model:
@@ -67,11 +72,12 @@ jobs:
           BG_VERIFY_ONLY: ${{ inputs.verify_only }}
           BG_REPEAT: ${{ inputs.repeat }}
         # Each request is checked before anyone is asked to approve it: a build that is not in bundles/, a trial the site
-        # does not publish, a ceiling that is not a positive number, an unknown field, a repeat that is not a whole number
-        # from 1 to 5, a second request for a build and trial already requested, or two runs that would upload under one
-        # artifact name stops the plan, and with it the whole workflow. A request with repeat n becomes n runs, numbered
-        # rep 1 to n; without repeat it is one run, as before.
-        # The script (.github/scripts/plan-trial-runs.mjs) also writes the summary, with each ceiling times its repeats.
+        # does not publish, a ceiling that is not a positive number or leaves the trial less than a cent once the key
+        # check's share is kept, an unknown field, a repeat that is not a whole number from 1 to 5, a second request for a build
+        # and trial already requested, or two runs that would upload under one artifact name stops the plan, and with it
+        # the whole workflow. A request with repeat n becomes n runs, numbered rep 1 to n; without repeat it is one run.
+        # The script (.github/scripts/plan-trial-runs.mjs) also splits each ceiling between the key check and the trial,
+        # and writes the summary, with each ceiling times its repeats.
         run: node .github/scripts/plan-trial-runs.mjs
   trial:
     needs: plan
@@ -143,6 +149,7 @@ jobs:
         if: ${{ matrix.verify_only != 'true' }}
         env:
           BG_MODEL: ${{ matrix.model }}
+          BG_KEY_CHECK_BUDGET_USD: ${{ matrix.key_check_budget_usd }}
         # The runner gives every run step of this job ACTIONS_ID_TOKEN_REQUEST_TOKEN, the job's own access token, and
         # ACTIONS_ID_TOKEN_REQUEST_URL; together they get a new sign-in token that Azure accepts for this job's
         # identity. This step and the run start their shell through env -u, which drops both before the shell starts,
@@ -150,27 +157,39 @@ jobs:
         # holds them, in its own environment or in the starting environment another process can read. Not prevented:
         # code that uses the runner's passwordless sudo can read them from the runner's memory, and later steps
         # receive them again. Otherwise the shell is GitHub's default, bash -e, so each step fails as before.
+        # Each call gets the budget the plan set for one key check, and the plan keeps two such budgets out of the trial's
+        # share of the ceiling. Claude Code compares the budget with its cost estimate once the reply arrives: a call that
+        # reaches it prints "Error: Exceeded USD budget (<budget>)" instead of the reply and exits with status 1 (seen on
+        # Claude Code 2.1.321). That call, or any call that exits with an error, stops the job here, before the trial.
         shell: env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL bash -e {0}
         run: |
-          OUT="$(claude -p "Reply with the single word ok." --model "$BG_MODEL" --max-turns 1 2>&1 | tail -3)"
-          echo "$OUT"
+          if [ -z "$BG_KEY_CHECK_BUDGET_USD" ]; then echo "the plan gave the key check no budget; stopping before any trial run"; exit 1; fi
+          key_check() { # one budgeted call; OUT holds its last three lines and STATUS its exit status
+            STATUS=0
+            OUT="$(claude -p "Reply with the single word ok." --model "$BG_MODEL" --max-turns 1 --max-budget-usd "$BG_KEY_CHECK_BUDGET_USD" 2>&1)" || STATUS=$?
+            OUT="$(printf '%s\n' "$OUT" | tail -3)"
+            echo "$OUT"
+            case "$OUT" in *"USD budget"*|*"maximum budget"*) echo "the key check reached its budget of $BG_KEY_CHECK_BUDGET_USD USD before the key was shown to work; stopping before any trial run"; exit 1;; esac
+          }
+          key_check
           case "$OUT" in
             *"not scoped to a workspace"*)
               if [ -z "${BG_WORKSPACE_ID:-}" ]; then echo "organisation-level key and no workspace id in the vault; stopping"; exit 1; fi
               echo "organisation-level key: retrying with the workspace header"
               export ANTHROPIC_CUSTOM_HEADERS="anthropic-workspace-id: $BG_WORKSPACE_ID"
-              OUT="$(claude -p "Reply with the single word ok." --model "$BG_MODEL" --max-turns 1 2>&1 | tail -3)"
-              echo "$OUT"
+              key_check
               case "$OUT" in *"API Error"*|*"Not logged in"*) echo "the key does not work with the header either; stopping"; exit 1;; esac
+              if [ "$STATUS" -ne 0 ]; then echo "the key check with the header ended in an error (exit status $STATUS); stopping before any trial run"; exit 1; fi
               echo "ANTHROPIC_CUSTOM_HEADERS=anthropic-workspace-id: $BG_WORKSPACE_ID" >> "$GITHUB_ENV";;
             *"API Error"*|*"Not logged in"*) echo "the key does not work; stopping before any trial run"; exit 1;;
           esac
+          if [ "$STATUS" -ne 0 ]; then echo "the key check ended in an error (exit status $STATUS); stopping before any trial run"; exit 1; fi
       - name: Run the trial
         if: ${{ matrix.verify_only != 'true' }}
         env:
           BG_BUILD: ${{ matrix.build }}
           BG_TRIAL: ${{ matrix.trial }}
-          BG_MAX_COST_USD: ${{ matrix.max_cost_usd }}
+          BG_TRIAL_BUDGET_USD: ${{ matrix.trial_budget_usd }}
           BG_MODEL: ${{ matrix.model }}
           BG_CONCURRENCY: ${{ matrix.concurrency }}
           BG_REP: ${{ matrix.rep }}
@@ -179,14 +198,16 @@ jobs:
         # own work area. The CLI downloads the published trial from BUILDGUILD_ORIGIN and stops, saying so, if it cannot.
         # The shell starts without the two token variables, as the key check above explains. A run of a repeated request
         # passes --rep, which ends the evidence id in -rep<k>, and its file names end the same way; any other run passes
-        # neither.
+        # neither. The trial's ceiling is the plan's trial_budget_usd, the request's max_cost_usd less the key check's
+        # reserve; the eval checks it before each agent run starts.
         shell: env -u ACTIONS_ID_TOKEN_REQUEST_TOKEN -u ACTIONS_ID_TOKEN_REQUEST_URL bash -e {0}
         run: |
+          if [ -z "$BG_TRIAL_BUDGET_USD" ]; then echo "the plan gave the trial no budget; stopping"; exit 1; fi
           mkdir -p "$RUNNER_TEMP/evaltmp" && export TMPDIR="$RUNNER_TEMP/evaltmp"
           SUFFIX="${BG_REP:+-rep$BG_REP}"
           REP_ARGS=()
           if [ -n "$BG_REP" ]; then REP_ARGS=(--rep "$BG_REP"); fi
-          node cli/buildguild.mjs test "bundles/$BG_BUILD" --trial "$BG_TRIAL" --max-cost-usd "$BG_MAX_COST_USD" --model "$BG_MODEL" -j "$BG_CONCURRENCY" --runner github-actions --role guild --out "evidence-$BG_BUILD-$BG_TRIAL$SUFFIX.json" --raw-out "raw-$BG_BUILD-$BG_TRIAL$SUFFIX.json" --work-dir "$RUNNER_TEMP/trial-run" --keep-temp "${REP_ARGS[@]}"
+          node cli/buildguild.mjs test "bundles/$BG_BUILD" --trial "$BG_TRIAL" --max-cost-usd "$BG_TRIAL_BUDGET_USD" --model "$BG_MODEL" -j "$BG_CONCURRENCY" --runner github-actions --role guild --out "evidence-$BG_BUILD-$BG_TRIAL$SUFFIX.json" --raw-out "raw-$BG_BUILD-$BG_TRIAL$SUFFIX.json" --work-dir "$RUNNER_TEMP/trial-run" --keep-temp "${REP_ARGS[@]}"
       - name: Gather the files to upload
         if: ${{ always() && matrix.verify_only != 'true' }}
         env:

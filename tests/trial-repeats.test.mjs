@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { artifactName, planRuns, PlanError } from '../.github/scripts/plan-trial-runs.mjs';
+import { artifactName, KEY_CHECK_BUDGET_USD, planRuns, PlanError, trialBudget } from '../.github/scripts/plan-trial-runs.mjs';
 
 const script = fileURLToPath(new URL('../.github/scripts/plan-trial-runs.mjs', import.meta.url));
 const workflow = readFileSync(fileURLToPath(new URL('../.github/workflows/trial.yml', import.meta.url)), 'utf8');
@@ -17,9 +17,16 @@ const cli = fileURLToPath(new URL('../cli/buildguild.mjs', import.meta.url));
 const builds = new Set(['measured-delivery', 'lean-start']);
 const plan = (requests, options = {}) => planRuns(requests, { buildExists: slug => builds.has(slug), ...options });
 const refused = (requests, message, options) => assert.throws(() => plan(requests, options), err => err instanceof PlanError && err.message === message);
-const entry = (build, trial, extra = {}) => ({ build, trial, max_cost_usd: '5', model: 'claude-sonnet-5-5', concurrency: '1', verify_only: 'false', ...extra });
+// A matrix entry as the plan writes it: a run that spends also carries its key check's budget and the trial's share of its
+// ceiling (tests/trial-ceiling.test.mjs checks those values), and a repeated run its rep last.
+const entry = (build, trial, { rep, ...extra } = {}) => {
+  const m = { build, trial, max_cost_usd: '5', model: 'claude-sonnet-5-5', concurrency: '1', verify_only: 'false', ...extra };
+  if (m.verify_only === 'false') Object.assign(m, { key_check_budget_usd: KEY_CHECK_BUDGET_USD, trial_budget_usd: trialBudget(m.max_cost_usd) });
+  return rep === undefined ? m : { ...m, rep };
+};
+const split = "A ceiling covers every paid call of its run. The key check keeps 0.5 USD of it: one tiny call, or two when the key is organisation-level, each with a budget of 0.25 USD, and a check that reaches its budget stops the run before the trial. The trial gets the rest%s. Claude Code holds each budget to its own cost estimate, and a reply or agent run already under way when a budget is reached still finishes, so a run can pass its ceiling by that much.";
 
-test('a queue without repeat plans and summarises exactly as before', () => {
+test('a queue without repeat plans one run per request and summarises them in one table', () => {
   const { matrix, summary } = plan([
     { build: 'measured-delivery', trial: 'guild-smoke-v1', max_cost_usd: 3 },
     { build: 'lean-start', trial: 'calibration-shell-v1', max_cost_usd: '2.5', concurrency: 2 },
@@ -31,13 +38,15 @@ test('a queue without repeat plans and summarises exactly as before', () => {
     entry('lean-start', 'guild-smoke-v1', { verify_only: 'true' }),
   ]));
   assert.deepEqual(summary, [
-    '| Build | Trial | Model | Ceiling |',
-    '|---|---|---|---|',
-    '| measured-delivery | guild-smoke-v1 | claude-sonnet-5-5 | 3 USD |',
-    '| lean-start | calibration-shell-v1 | claude-sonnet-5-5 | 2.5 USD |',
-    '| lean-start | guild-smoke-v1 | claude-sonnet-5-5 | verify only, runs nothing |',
+    '| Build | Trial | Model | Ceiling | Trial budget |',
+    '|---|---|---|---|---|',
+    '| measured-delivery | guild-smoke-v1 | claude-sonnet-5-5 | 3 USD | 2.5 USD |',
+    '| lean-start | calibration-shell-v1 | claude-sonnet-5-5 | 2.5 USD | 2 USD |',
+    '| lean-start | guild-smoke-v1 | claude-sonnet-5-5 | verify only, runs nothing | none |',
     '',
     "Each run waits for the owner's approval in the trials environment. Ceilings total 5.5 USD.",
+    '',
+    split.replace('%s', ''),
   ]);
   assert.deepEqual(plan([]), { matrix: [], summary: ['No requests: no trial runs and nothing waits for approval.'] });
 });
@@ -57,25 +66,27 @@ test('repeat n expands one request into n runs numbered rep 1 to n, in order, ne
   const { matrix, summary } = plan([
     { build: 'measured-delivery', trial: 'client-deployment-v1', max_cost_usd: 3, repeat: 5 },
     { build: 'lean-start', trial: 'client-deployment-v1', max_cost_usd: '3', repeat: '2' },
-    { build: 'lean-start', trial: 'guild-smoke-v1', max_cost_usd: 0.5 },
+    { build: 'lean-start', trial: 'guild-smoke-v1', max_cost_usd: 0.75 },
     { build: 'measured-delivery', trial: 'guild-smoke-v1', verify_only: true, repeat: 2 },
   ]);
   assert.deepEqual(matrix, [
     ...['1', '2', '3', '4', '5'].map(rep => entry('measured-delivery', 'client-deployment-v1', { max_cost_usd: '3', rep })),
     ...['1', '2'].map(rep => entry('lean-start', 'client-deployment-v1', { max_cost_usd: '3', rep })),
-    entry('lean-start', 'guild-smoke-v1', { max_cost_usd: '0.5' }),
+    entry('lean-start', 'guild-smoke-v1', { max_cost_usd: '0.75' }),
     ...['1', '2'].map(rep => entry('measured-delivery', 'guild-smoke-v1', { verify_only: 'true', rep })),
   ]);
-  // Each ceiling times its repeats: 3 x 5 + 3 x 2 + 0.5 x 1; a verify-only request spends nothing however often it runs.
+  // Each ceiling times its repeats: 3 x 5 + 3 x 2 + 0.75 x 1; a verify-only request spends nothing however often it runs.
   assert.deepEqual(summary, [
-    '| Build | Trial | Model | Ceiling per run | Repeats |',
-    '|---|---|---|---|---|',
-    '| measured-delivery | client-deployment-v1 | claude-sonnet-5-5 | 3 USD | 5 |',
-    '| lean-start | client-deployment-v1 | claude-sonnet-5-5 | 3 USD | 2 |',
-    '| lean-start | guild-smoke-v1 | claude-sonnet-5-5 | 0.5 USD | 1 |',
-    '| measured-delivery | guild-smoke-v1 | claude-sonnet-5-5 | verify only, runs nothing | 2 |',
+    '| Build | Trial | Model | Ceiling per run | Trial budget per run | Repeats |',
+    '|---|---|---|---|---|---|',
+    '| measured-delivery | client-deployment-v1 | claude-sonnet-5-5 | 3 USD | 2.5 USD | 5 |',
+    '| lean-start | client-deployment-v1 | claude-sonnet-5-5 | 3 USD | 2.5 USD | 2 |',
+    '| lean-start | guild-smoke-v1 | claude-sonnet-5-5 | 0.75 USD | 0.25 USD | 1 |',
+    '| measured-delivery | guild-smoke-v1 | claude-sonnet-5-5 | verify only, runs nothing | none | 2 |',
     '',
-    "Each run waits for the owner's approval in the trials environment, and a request's repeats run one after another. Ceilings total 21.5 USD, each ceiling times its repeats.",
+    "Each run waits for the owner's approval in the trials environment, and a request's repeats run one after another. Ceilings total 21.75 USD, each ceiling times its repeats.",
+    '',
+    split.replace('%s', ', the same on every repeat'),
   ]);
 });
 
@@ -168,7 +179,7 @@ test('the script writes the matrix and summary, and a refusal is a workflow erro
   const matrix = [1, 2].map(rep => entry('lean-start', 'guild-smoke-v1', { verify_only: 'true', rep: String(rep) }));
   assert.equal(ok.output, `matrix=${JSON.stringify(matrix)}\n`);
   assert.equal(ok.stdout, `matrix=${JSON.stringify(matrix)}\n`);
-  assert.match(ok.summary, /^\| Build \| Trial \| Model \| Ceiling per run \| Repeats \|\n/);
+  assert.match(ok.summary, /^\| Build \| Trial \| Model \| Ceiling per run \| Trial budget per run \| Repeats \|\n/);
   assert.match(ok.summary, /Ceilings total 0 USD, each ceiling times its repeats\.\n$/);
 
   const empty = run({ run: 1, requests: [] });
@@ -231,11 +242,11 @@ test('the run step names files and passes --rep only for a repeated run', t => {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   writeFileSync(join(root, 'node'), '#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done\n', { mode: 0o700 });
   const argv = rep => {
-    const r = spawnSync('bash', ['-e', '-c', step], { cwd: root, encoding: 'utf8', env: { PATH: `${root}:${process.env.PATH}`, RUNNER_TEMP: root, BG_BUILD: 'lean-start', BG_TRIAL: 'guild-smoke-v1', BG_MAX_COST_USD: '3', BG_MODEL: 'claude-sonnet-5-5', BG_CONCURRENCY: '1', BG_REP: rep } });
+    const r = spawnSync('bash', ['-e', '-c', step], { cwd: root, encoding: 'utf8', env: { PATH: `${root}:${process.env.PATH}`, RUNNER_TEMP: root, BG_BUILD: 'lean-start', BG_TRIAL: 'guild-smoke-v1', BG_TRIAL_BUDGET_USD: '2.5', BG_MODEL: 'claude-sonnet-5-5', BG_CONCURRENCY: '1', BG_REP: rep } });
     assert.equal(r.status, 0, r.stderr);
     return r.stdout.trim().split('\n');
   };
-  const before = ['cli/buildguild.mjs', 'test', 'bundles/lean-start', '--trial', 'guild-smoke-v1', '--max-cost-usd', '3', '--model', 'claude-sonnet-5-5', '-j', '1', '--runner', 'github-actions', '--role', 'guild', '--out', 'evidence-lean-start-guild-smoke-v1.json', '--raw-out', 'raw-lean-start-guild-smoke-v1.json', '--work-dir', `${root}/trial-run`, '--keep-temp'];
+  const before = ['cli/buildguild.mjs', 'test', 'bundles/lean-start', '--trial', 'guild-smoke-v1', '--max-cost-usd', '2.5', '--model', 'claude-sonnet-5-5', '-j', '1', '--runner', 'github-actions', '--role', 'guild', '--out', 'evidence-lean-start-guild-smoke-v1.json', '--raw-out', 'raw-lean-start-guild-smoke-v1.json', '--work-dir', `${root}/trial-run`, '--keep-temp'];
   assert.deepEqual(argv(''), before);
   assert.deepEqual(argv('4'), [...before.slice(0, 16), 'evidence-lean-start-guild-smoke-v1-rep4.json', '--raw-out', 'raw-lean-start-guild-smoke-v1-rep4.json', ...before.slice(19), '--rep', '4']);
   // The evidence and raw files carry the artifact's name, so a name the plan accepts is also unique for them.
@@ -338,4 +349,13 @@ test('--rep that is not a whole number of at least 1 is refused before anything 
   }
   assert.deepEqual(f.claudeCalls(), []);
   assert.ok(!existsSync(join(f.root, 'work')));
+});
+
+test('buildguild test hands its --max-cost-usd to the eval runner as given, so the trial budget is the eval ceiling', async t => {
+  const f = await cliSetup(t);
+  const result = await f.invoke(['--trial', 'sample-trial', '--max-cost-usd', '2.5']);
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  const [argv] = f.claudeCalls();
+  assert.equal(argv.filter(a => a === '--max-cost-usd').length, 1);
+  assert.equal(argv[argv.indexOf('--max-cost-usd') + 1], '2.5');
 });
