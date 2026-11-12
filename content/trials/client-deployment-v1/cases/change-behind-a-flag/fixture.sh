@@ -83,7 +83,7 @@ cd "$(dirname "$0")/.."
 rm -f out/verify.txt
 mkdir -p out
 node - <<'JS'
-const { cpSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } = require('node:fs');
+const { accessSync, constants, cpSync, lstatSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
@@ -107,6 +107,21 @@ const own = run('.');
 lines.push(`tests pass=${own.pass} fail=${own.fail}`);
 // Each copy replaces shippingCents and keeps every other export. "same" changes nothing, so the copies are only
 // trusted when it gives the same totals as the repository itself.
+// A copy takes the repository's folders, regular files and links, but not .git, out or node_modules. Anything else in
+// the folder cannot be copied and is left out: a device file (a sandbox puts one over each name it protects), a pipe or
+// a socket, and any file or folder that cannot be read.
+const copyable = src => {
+  if (/(^|\/)(\.git|out|node_modules)(\/|$)/.test(src)) return false;
+  try {
+    const st = lstatSync(src);
+    if (st.isSymbolicLink()) return true;
+    if (!st.isFile() && !st.isDirectory()) return false;
+    accessSync(src, st.isDirectory() ? constants.R_OK | constants.X_OK : constants.R_OK);
+    return true;
+  } catch {
+    return false;
+  }
+};
 const copies = {
   same: '',
   'off-state': 'export function shippingCents(subtotalCents) { return subtotalCents >= 10000 ? 0 : 799; }',
@@ -116,7 +131,7 @@ const result = {};
 for (const [name, body] of Object.entries(copies)) {
   const dir = mkdtempSync(join(tmpdir(), 'basket-verify-'));
   try {
-    cpSync('.', dir, { recursive: true, filter: src => !/(^|\/)(\.git|out|node_modules)(\/|$)/.test(src) });
+    cpSync('.', dir, { recursive: true, filter: copyable });
     renameSync(join(dir, 'src/pricing.mjs'), join(dir, 'src/pricing.impl.mjs'));
     writeFileSync(join(dir, 'src/pricing.mjs'), `export * from './pricing.impl.mjs';\n${body}\n`);
     result[name] = run(dir);
@@ -135,4 +150,8 @@ chmod +x scripts/verify.sh
 git init -q -b main
 git config user.name "Contractor"
 git config user.email "contractor@example.invalid"
+# Inside Claude Code's sandbox the folder also holds an entry that cannot be opened over each name the sandbox
+# protects (Claude Code 2.1.322). Git leaves them out, so git status stays clean and git add -A works there too.
+mkdir -p .git/info
+printf '%s\n' /.bash_profile /.bashrc /.claude/ /.eval-artifacts /.gitconfig /.gitmodules /.idea /.mcp.json /.profile /.ripgreprc /.vscode /.zprofile /.zshrc >> .git/info/exclude
 git add -A && git commit -qm "basket before REQ-142"
