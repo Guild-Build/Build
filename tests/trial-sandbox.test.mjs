@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { decide, startStandIn, STAND_IN_KEY } from '../.github/scripts/stand-in-api.mjs';
 import { cliArgs, expectedRuns, judge, PROBE_COMMAND, selfTest, standInEnv } from '../.github/scripts/sandbox-self-test.mjs';
-import { ALLOWED_REFUSALS, bashCalls, kindOf, runsIn, sameFiles, SETUP_LINES, tracesIn, verdict } from '../.github/scripts/shell-starts.mjs';
+import { ALLOWED_REFUSALS, bashCalls, completeness, gaps, kindOf, runsIn, sameFiles, SETUP_LINES, tracesIn, verdict } from '../.github/scripts/shell-starts.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const read = rel => readFileSync(join(root, rel), 'utf8');
@@ -69,7 +69,13 @@ const entries = (calls, prefix = 'toolu') => calls.flatMap(([tool, input, isErro
   { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: `${prefix}_${i}`, name: tool, input }] } },
   ...(text === undefined ? [] : [{ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `${prefix}_${i}`, content: text, ...(isError ? { is_error: true } : {}) }] }, ...(meta ? { tool_result_meta: [{ id: `${prefix}_${i}`, ...meta }] } : {}), ...(record === undefined ? {} : { tool_use_result: record }) }]),
 ]);
-const trace = (calls, prefix) => entries(calls, prefix).map(entry => JSON.stringify(entry)).join('\n') + '\n';
+// The events that open and close Claude Code's one turn in a trace, a trace's events written as its lines, and a
+// complete one-turn trace of the given events.
+const INIT = { type: 'system', subtype: 'init' };
+const FINAL = { type: 'result', subtype: 'success', is_error: false, result: 'done', result_index: 0 };
+const jsonl = events => events.map(entry => JSON.stringify(entry)).join('\n') + '\n';
+const whole = events => jsonl([INIT, ...events, FINAL]);
+const trace = (calls, prefix) => whole(entries(calls, prefix));
 // A Bash call with the record Claude Code writes beside a command's own exit: its error text, or what it printed.
 const bash = (command, isError, text, meta = ACCEPT, record = isError ? `Error: ${text}` : RECORD(text)) => ['Bash', { command }, isError, text, meta, record];
 const shape = ([isError, text, meta, record], command = 'c') => ['Bash', { command }, isError, text, meta, record];
@@ -262,10 +268,10 @@ test('the self-test refuses a trace file two runs share, an id that appears twic
   assert.match(failing(sameId), /agent run \(run-one-command, without the build\): its call id claude-eval-a_0 is also the call of agent run \(run-one-command, with the build\)/);
   // One trace that asks for its call twice, or answers it twice.
   const lines = entries([bash(PROBE_COMMAND, false, working('claude-eval-a'))], 'claude-eval-a');
-  for (const repeat of [[lines[0], ...lines], [...lines, lines[1]]]) {
+  for (const [repeat, gap] of [[[lines[0], ...lines], '1 tool request id used more than once'], [[...lines, lines[1]], '1 tool request answered more than once']]) {
     const s = selfRuns();
-    s.traces['claude-eval-a'] = repeat.map(e => JSON.stringify(e)).join('\n');
-    assert.match(failing(s), /agent run \(run-one-command, with the build\): its trace holds 1 Bash call\(s\) with a result, 0 without one, 1 id\(s\) requested or answered more than once/);
+    s.traces['claude-eval-a'] = whole([...repeat]);
+    assert.match(failing(s), new RegExp(`agent run \\(run-one-command, with the build\\): its trace is not complete: ${gap}`));
   }
   // A probe with the right output whose record is no exit 0, by the rule the after-trial check's (d) uses: a command run
   // in the background, an interrupted one, an exit status 1 read as success, and no record at all.
@@ -321,8 +327,9 @@ test('the CLI under the self-test gets the stand-in and its placeholder key, nev
 // arm whose trace records its call twice, `noTrace` writes no trace, `noReport` writes nothing, `shareTrace` points
 // every run in the report at the first run's trace, `linkTrace` ('symbolic' or 'hard') makes every later run's trace a
 // link to the first run's while the report names each run's own path, `record` replaces the record each result gets,
-// and `firstResultTwice` makes the first run answer the stand-in with two copies of its result in one request while the
-// second run never sends its own.
+// `firstResultTwice` makes the first run answer the stand-in with two copies of its result in one request while the
+// second run never sends its own, `firstLineOnly` keeps only each trace's first line, and `replayFirstResult` and
+// `readWithFirstId` put the first run's result, or a Read call under the first run's call id, into every later trace.
 const stubClaude = `#!${process.execPath}
 const { appendFileSync, linkSync, mkdirSync, symlinkSync, writeFileSync } = require('node:fs');
 const { join } = require('node:path');
@@ -335,6 +342,7 @@ if (plan.noReport) process.exit(1);
   const arms = { with: [], without: [] };
   const post = body => fetch(process.env.ANTHROPIC_BASE_URL + '/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY }, body: JSON.stringify(body) }).then(r => r.json());
   let firstTrace;
+  const first = {};
   for (const [i, arm] of (plan.arms || ['with', 'without']).entries()) {
     const ask = { model: 'claude-sonnet-5-5', max_tokens: 9, tools: [{ name: 'Bash' }], messages: [{ role: 'user', content: 'Run the sandbox self-test command.' }] };
     const call = (await post(ask)).content.find(b => b.type === 'tool_use');
@@ -342,10 +350,15 @@ if (plan.noReport) process.exit(1);
     const out = join(process.env.TMPDIR, 'claude-eval-' + i + arm, 'out');
     mkdirSync(out, { recursive: true });
     const record = 'record' in plan ? plan.record : plan.isError ? 'Error: ' + plan.text : { stdout: plan.text, stderr: '', interrupted: false, isImage: false, noOutputExpected: false };
-    const lines = [{ type: 'assistant', message: { role: 'assistant', content: [call] } }, { type: 'user', message: { role: 'user', content: [result] }, tool_use_result: record }];
+    const answered = { type: 'user', message: { role: 'user', content: [result] }, tool_use_result: record };
+    const lines = [{ type: 'system', subtype: 'init', session_id: 'stub-' + i }, { type: 'assistant', message: { role: 'assistant', content: [call] } }, answered];
     if (plan.twice === arm) lines.push({ type: 'assistant', message: { role: 'assistant', content: [{ ...call, id: call.id + '_again' }] } }, { type: 'user', message: { role: 'user', content: [{ ...result, tool_use_id: call.id + '_again' }] }, tool_use_result: record });
+    if (i === 0) { first.call = call; first.answered = answered; }
+    if (plan.replayFirstResult && i > 0) lines.push(first.answered);
+    if (plan.readWithFirstId && i > 0) lines.push({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: first.call.id, name: 'Read', input: { file_path: '/x' } }] } }, { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: first.call.id, content: 'x' }] } });
+    lines.push({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } }, { type: 'result', subtype: 'success', is_error: false, result: 'done', result_index: 0 });
     const written = !plan.noTrace && !(plan.shareTrace && i > 0) && !(plan.linkTrace && i > 0);
-    if (written) writeFileSync(join(out, 'trace.jsonl'), lines.map(e => JSON.stringify(e)).join('\\n') + '\\n');
+    if (written) writeFileSync(join(out, 'trace.jsonl'), (plan.firstLineOnly ? lines.slice(0, 1) : lines).map(e => JSON.stringify(e)).join('\\n') + '\\n');
     if (plan.linkTrace && i > 0) (plan.linkTrace === 'hard' ? linkSync : symlinkSync)(firstTrace, join(out, 'trace.jsonl'));
     const answer = plan.firstResultTwice ? (i === 0 ? [result, result] : null) : [result];
     if (answer) await post({ ...ask, messages: [...ask.messages, { role: 'assistant', content: [call] }, { role: 'user', content: answer }] });
@@ -414,6 +427,18 @@ test('the self-test runs the CLI against the stand-in only, and its verdict foll
     assert.equal(viaLink.verdict.pass, false);
     assert.match(viaLink.verdict.problems.join('\n'), /2 run folders share their trace file with another through a link/);
   }
+  // The fourth review's findings through the real CLI: traces cut to their first line, a result replayed into the other
+  // run's trace, and a Read call reusing the first run's Bash call id.
+  const firstLine = await run('first-line', { text: working('x'), firstLineOnly: true });
+  assert.equal(firstLine.status, 0);
+  assert.equal(firstLine.verdict.pass, false);
+  assert.match(firstLine.verdict.problems.join('\n'), /agent run \(run-one-command, with the build\): its trace is not complete: it does not end with Claude Code's final result event/);
+  const replayed = await run('replayed', { text: working('x'), replayFirstResult: true });
+  assert.equal(replayed.verdict.pass, false);
+  assert.match(replayed.verdict.problems.join('\n'), /agent run \(run-one-command, without the build\): its trace is not complete: 1 tool result answering no request in the trace/);
+  const crossTool = await run('cross-tool', { text: working('x'), readWithFirstId: true });
+  assert.equal(crossTool.verdict.pass, false);
+  assert.match(crossTool.verdict.problems.join('\n'), /the after-trial check would not accept this run: This run is not a measurement: 1 tool request id appears more than once across the traces; 1 tool result id appears more than once across the traces/);
   const background = await run('background', { text: working('x'), record: { stdout: working('x'), stderr: '', interrupted: false, isImage: false, noOutputExpected: false, backgroundTaskId: 'b1' } });
   assert.equal(background.verdict.pass, false);
   assert.match(background.verdict.problems.join('\n'), /agent run \(run-one-command, with the build\): Claude Code's own record of the result does not show an exit 0/);
@@ -482,12 +507,13 @@ test("the stated limit, with real bash: the review's ordinary script is a failur
 });
 
 test('a trace is read in full: its requests, their results, and every line that cannot be read', () => {
-  // A result before its request still pairs; a request answered twice takes its worst result.
+  // A result before its request still pairs. A request answered twice leaves the trace incomplete (rule (a), part 3),
+  // and its first result is the one read.
   const lines = entries([bash('ls', false, 'a'), bash('make', true, 'Exit code 1\nFAIL')]);
-  const swapped = [lines[1], lines[0], lines[2], lines[3], { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_1', is_error: true, content: `Exit code 1\n${SECCOMP_HELPER}` }] } }].map(e => JSON.stringify(e)).join('\n');
-  const readBack = bashCalls(swapped);
-  assert.deepEqual(readBack.calls.map(c => [c.command, c.kind]), [['ls', 'success'], ['make', 'stopped']]);
-  assert.deepEqual([readBack.unanswered, readBack.unreadable, readBack.empty], [[], 0, false]);
+  const swapped = whole([lines[1], lines[0], lines[2], lines[3], { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_1', is_error: true, content: `Exit code 1\n${SECCOMP_HELPER}` }] } }]);
+  assert.deepEqual(bashCalls(swapped).calls.map(c => [c.command, c.kind]), [['ls', 'success'], ['make', 'failed']]);
+  assert.deepEqual(gaps(completeness(swapped)), ['1 tool request answered more than once']);
+  assert.deepEqual(gaps(completeness(whole([lines[1], lines[0], lines[2], lines[3]]))), []);
   // Whether a call exited 0 comes from Claude Code's record beside its result: not an exit status 1 it reads as
   // success, not a command it ran in the background, not interrupted, and only from a record that is there.
   const records = bashCalls(trace(['exit 0', 'grep miss', 'git diff, files differ', 'started in the background', 'runs past its timeout', 'exit 3'].map(k => shape(OBSERVED[k]))));
@@ -495,26 +521,30 @@ test('a trace is read in full: its requests, their results, and every line that 
   assert.equal(bashCalls(trace([bash('ls', false, 'a', ACCEPT, { ...RECORD('a'), interrupted: true })])).calls[0].exitedZero, false);
   assert.equal(bashCalls(trace([['Bash', { command: 'ls' }, false, 'a', ACCEPT]])).calls[0].exitedZero, false);
   assert.equal(bashCalls(trace([bash('ls', false, 'a', ACCEPT, 'a')])).calls[0].exitedZero, false);
-  // A line holding two results has no record that tells them apart, and a request answered twice exited 0 only if
-  // both of its results say so.
+  // A line holding two results has no record that tells them apart.
   const two = [{ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'x', name: 'Bash', input: { command: 'ls' } }, { type: 'tool_use', id: 'y', name: 'Bash', input: { command: 'pwd' } }] } }, { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'x', content: 'a' }, { type: 'tool_result', tool_use_id: 'y', content: '/' }] }, tool_use_result: RECORD('a') }];
   assert.deepEqual(bashCalls(two.map(e => JSON.stringify(e)).join('\n')).calls.map(c => [c.kind, c.exitedZero]), [['success', false], ['success', false]]);
   const again = entries([bash('ls', false, 'a')]);
   again.push({ ...again[1], tool_use_result: RECORD('a', { backgroundTaskId: 'b1' }) });
-  assert.deepEqual(bashCalls(again.map(e => JSON.stringify(e)).join('\n')).calls.map(c => [c.kind, c.exitedZero]), [['success', false]]);
-  assert.deepEqual(bashCalls([...again.slice(0, 2), again[1]].map(e => JSON.stringify(e)).join('\n')).calls.map(c => c.exitedZero), [true]);
+  // A request answered twice: its first result is the one read, and the trace is not complete.
+  assert.deepEqual(bashCalls(jsonl(again)).calls.map(c => [c.kind, c.exitedZero]), [['success', true]]);
+  assert.equal(completeness(whole([...again])).answeredTwice, 1);
+  assert.deepEqual(bashCalls(jsonl([...again.slice(0, 2), again[1]])).calls.map(c => c.exitedZero), [true]);
   // The meta that belongs to a result is the entry with its id.
   const metaRead = bashCalls(trace([shape(OBSERVED['hook exits 2'])]));
   assert.deepEqual([metaRead.calls[0].kind, metaRead.calls[0].meta.permission_decision.source], ['refused', 'hook']);
-  // A request with no result, lines that are not JSON objects, and empty traces.
-  assert.deepEqual(bashCalls(trace([bash('npm test', undefined, undefined)])).unanswered, [{ id: 'toolu_0', command: 'npm test' }]);
-  assert.equal(bashCalls(`${trace([bash('ls', false, 'a')])}5\nnull\n[1]\n{"type":`).unreadable, 4);
-  assert.equal(bashCalls('').empty, true);
-  assert.equal(bashCalls('\n \n').empty, true);
-  assert.equal(bashCalls('{not json').empty, false);
-  // Results written as text blocks are read like plain text, and other tools are not Bash requests.
-  const blocks = bashCalls(JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'x', name: 'Bash', input: { command: 'c' } }, { type: 'tool_use', id: 'y', name: 'Read', input: {} }] } }) + '\n' + JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'x', is_error: true, content: [{ type: 'text', text: 'Exit code 1' }, { type: 'text', text: SECCOMP_HELPER }] }] } }));
-  assert.deepEqual([blocks.calls.length, blocks.calls[0].kind, blocks.unanswered.length], [1, 'stopped', 0]);
+  // Rule (a)'s counts: a request with no result, lines that are not JSON objects, and empty traces.
+  assert.equal(completeness(trace([bash('npm test', undefined, undefined)])).unanswered, 1);
+  assert.equal(completeness(`${trace([bash('ls', false, 'a')])}5\nnull\n[1]\n{"type":`).unreadable, 4);
+  assert.equal(completeness('').empty, true);
+  assert.equal(completeness('\n \n').empty, true);
+  assert.equal(completeness('{not json').empty, false);
+  // Results written as text blocks are read like plain text, and other tools are not Bash requests, though rule (a)
+  // still wants each of them answered.
+  const blocksText = (JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'x', name: 'Bash', input: { command: 'c' } }, { type: 'tool_use', id: 'y', name: 'Read', input: {} }] } }) + '\n' + JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'x', is_error: true, content: [{ type: 'text', text: 'Exit code 1' }, { type: 'text', text: SECCOMP_HELPER }] }] } }));
+  const blocks = bashCalls(blocksText);
+  assert.deepEqual([blocks.calls.length, blocks.calls[0].kind], [1, 'stopped']);
+  assert.equal(completeness(blocksText).unanswered, 1);
   // The report's runs, named by case and arm, with the folder of each trace.
   assert.deepEqual(runsIn(report([['c', 'with', 'claude-eval-a'], ['c', 'without', 'claude-eval-b']])), [{ name: 'c, with the build', trace: 'claude-eval-a' }, { name: 'c, without the build', trace: 'claude-eval-b' }]);
   assert.deepEqual(runsIn(report([['c', 'with', null]])), [{ name: 'c, with the build', trace: null }]);
@@ -561,14 +591,17 @@ test('the after-trial verdict: a measurement only on positive evidence, and one 
 test('the after-trial verdict: the report and the traces must be complete and pair one trace to one run', () => {
   const not = (traces, raw, linked) => { const v = verdict(traces, raw, linked); assert.equal(v.measurement, false); return v.sentence; };
   const pilotTrace = trace([bash('git status', true, `Exit code 1\n${SECCOMP_HELPER}`)], 'claude-eval-a').trimEnd();
+  const pilotCut = jsonl(entries([bash('git status', true, `Exit code 1\n${SECCOMP_HELPER}`)], 'claude-eval-a')).trimEnd();
   const raw1 = report([['c', 'with', 'claude-eval-a']]);
   const one = text => ({ 'claude-eval-a': text });
   // The pilot's own result, alone in one complete trace.
   assert.equal(not(one(pilotTrace), raw1), `This run is not a measurement: the sandbox kept 1 of the 1 shell commands Claude Code tried to run from starting, in 1 of 1 agent run, so every grader that needed one of them failed (the first ended with: ${SECCOMP_HELPER}); Claude Code tried to run 1 shell command for the agents and not one exited 0.`);
   // The first review's three traces: the result line cut short, a request with no result, a wholly malformed trace.
-  assert.equal(not(one(pilotTrace.slice(0, -1)), raw1), 'This run is not a measurement: 1 trace line could not be read; 1 shell command the agents asked for got no result in the trace, as when a run is cut off in the middle of a command.');
-  assert.equal(not(one(pilotTrace.split('\n')[0]), raw1), 'This run is not a measurement: 1 shell command the agents asked for got no result in the trace, as when a run is cut off in the middle of a command.');
-  assert.equal(not(one('{"type":"assistant","message":\nnot json at all\n'), raw1), 'This run is not a measurement: 2 trace lines could not be read.');
+  const cutShort = "1 trace does not end with Claude Code's final result event, as when a run is cut off, crashes or loses the end of its trace";
+  const noResult = '1 tool request got no result in its trace, as when a run is cut off in the middle of a tool call';
+  assert.equal(not(one(pilotCut.slice(0, -1)), raw1), `This run is not a measurement: 1 trace line could not be read; ${cutShort}; ${noResult}.`);
+  assert.equal(not(one(pilotCut.split('\n')[0]), raw1), `This run is not a measurement: ${cutShort}; ${noResult}.`);
+  assert.equal(not(one('{"type":"assistant","message":\nnot json at all\n'), raw1), `This run is not a measurement: 2 trace lines could not be read; ${cutShort}.`);
   // An empty trace file, or one that could not be opened.
   assert.equal(not(one(''), raw1), 'This run is not a measurement: 1 trace file was empty.');
   assert.equal(not({ 'claude-eval-a': null }, raw1), 'This run is not a measurement: 1 trace file could not be opened.');
@@ -582,20 +615,129 @@ test('the after-trial verdict: the report and the traces must be complete and pa
   assert.equal(not(one(good), null), 'This run is not a measurement: the eval left no readable report of its agent runs, so nothing shows that each one left its trace.');
   assert.equal(not({}, { cases: [] }), "This run is not a measurement: the eval's report lists no agent runs.");
   assert.equal(not({}, raw1), "This run is not a measurement: 1 trace the eval's report names was not found.");
-  // The third review's leads. A Bash call id asked for twice in one trace, answered twice in one trace, or found in two
-  // traces: the traces cannot be read, whatever the results say.
+  // The third review's leads, now parts (3) and (4) of rule (a): a tool request id asked for twice in one trace, a
+  // result given twice in one trace, and the same ids in two traces.
   const lines = entries([bash('ls', false, 'a')], 'claude-eval-a');
-  const join2 = list => list.map(e => JSON.stringify(e)).join('\n');
   const twoRuns = report([['c', 'with', 'claude-eval-a'], ['c', 'without', 'claude-eval-b']]);
-  const repeatedIds = 'This run is not a measurement: 1 Bash call id appears more than once in the traces, as a request or a result, so the traces cannot be read as one result for each command.';
-  assert.equal(not(one(join2([lines[0], ...lines])), raw1), repeatedIds);
-  assert.equal(not(one(join2([...lines, lines[1]])), raw1), repeatedIds);
-  assert.equal(not({ 'claude-eval-a': trace([bash('ls', false, 'a')], 'x'), 'claude-eval-b': trace([bash('pwd', false, '/')], 'x') }, twoRuns), repeatedIds);
-  assert.deepEqual(bashCalls(join2([lines[0], ...lines, lines[1]])).repeated, ['claude-eval-a_0']);
+  const requestTwice = '1 tool request id appears more than once across the traces';
+  const resultTwice = '1 tool result id appears more than once across the traces';
+  assert.equal(not(one(whole([lines[0], ...lines])), raw1), `This run is not a measurement: ${requestTwice}.`);
+  assert.equal(not(one(whole([...lines, lines[1]])), raw1), `This run is not a measurement: 1 tool request got more than one result; ${resultTwice}.`);
+  assert.equal(not({ 'claude-eval-a': trace([bash('ls', false, 'a')], 'x'), 'claude-eval-b': trace([bash('pwd', false, '/')], 'x') }, twoRuns), `This run is not a measurement: ${requestTwice}; ${resultTwice}.`);
+  assert.equal(completeness(whole([lines[0], ...lines, lines[1]])).repeatedRequests, 1);
   // Two run folders that share one trace file through a link, as sameFiles finds them.
   const distinct = { 'claude-eval-a': trace([bash('ls', false, 'a')], 'claude-eval-a'), 'claude-eval-b': trace([bash('ls', false, 'a')], 'claude-eval-b') };
   assert.equal(verdict(distinct, twoRuns).measurement, true);
   assert.equal(not(distinct, twoRuns, ['claude-eval-a', 'claude-eval-b']), 'This run is not a measurement: 2 run folders share their trace file with another through a link, so some run left no trace of its own.');
+});
+
+// Real traces, their bytes as written: one of the pilot's 16 (run 43153585543, an agent run that used Grep, Read and
+// Edit), and the two the self-test wrote on ubuntu-24.04 in run 43282907178. Two streams Claude Code 2.1.322 wrote
+// through the experiment's stand-in in run 43283370814 (job 131410222332): a command started in the background, a
+// command past its 2-second timeout, and a Task subagent that ran one Bash call. Each of those three opens a second turn
+// when its background task ends.
+const fixture = name => readFileSync(join(root, 'tests/fixtures/trial-sandbox', name), 'utf8');
+const REAL = {
+  pilot: fixture('pilot-claude-eval-XhpI8Z.jsonl'),
+  'claude-eval-SNdjrw': fixture('self-test-claude-eval-SNdjrw.jsonl'),
+  'claude-eval-hnda4k': fixture('self-test-claude-eval-hnda4k.jsonl'),
+  background: fixture('stream-background-start.jsonl'),
+  pastTimeout: fixture('stream-past-timeout.jsonl'),
+  subagent: fixture('stream-subagent.jsonl'),
+};
+const firstLineOf = text => text.slice(0, text.indexOf('\n') + 1);
+const linesOf = text => text.split('\n').filter(Boolean);
+// The fourth review's two findings, on a real trace: the first run's result line replayed into the other run's trace,
+// and a Read call that reuses the first run's call id, each placed before the other trace's last reply.
+const replayInto = (target, from) => { const l = linesOf(target); const result = linesOf(from).find(x => x.includes('"tool_result"')); return [...l.slice(0, -2), result, ...l.slice(-2)].join('\n') + '\n'; };
+const readInto = (target, id) => { const l = linesOf(target); return [...l.slice(0, -2), JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Read', input: { file_path: '/x' } }] } }), JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: 'x' }] } }), ...l.slice(-2)].join('\n') + '\n'; };
+
+test('a complete trace, by rule (a): the real traces meet it, and a cut-off, a replayed result and a reused id do not', () => {
+  // Parts (1) to (3) hold for each real trace, which ends with Claude Code's one final result event.
+  for (const name of ['pilot', 'claude-eval-SNdjrw', 'claude-eval-hnda4k']) assert.deepEqual(gaps(completeness(REAL[name])), [], name);
+  // A subagent's own Bash call sits in the parent's trace and pairs there: parts (3) and (4) hold.
+  const sub = completeness(REAL.subagent);
+  assert.deepEqual([sub.unanswered, sub.answeredTwice, sub.orphans, sub.repeatedRequests, sub.requestIds.length, new Set(sub.resultIds).size], [0, 0, 0, 0, 3, 3]);
+  // The fourth review's first finding: each real trace cut to its first line, the system init event, is not complete.
+  const cutTurn = ["it does not end with Claude Code's final result event", 'its result events do not close the turns it opened one for one, numbered from 0 in order'];
+  for (const name of ['pilot', 'claude-eval-SNdjrw']) assert.deepEqual(gaps(completeness(firstLineOf(REAL[name]))), cutTurn, name);
+  const raw1 = report([['c', 'with', 'claude-eval-a']]);
+  assert.equal(verdict({ 'claude-eval-a': REAL.pilot }, raw1).measurement, true);
+  assert.equal(verdict({ 'claude-eval-a': firstLineOf(REAL.pilot) }, raw1).sentence, "This run is not a measurement: 1 trace does not end with Claude Code's final result event, as when a run is cut off, crashes or loses the end of its trace; 1 trace does not close each turn it opened with one result event, numbered from 0 in order.");
+  // Part (2) also fails for an event after the final one, and for a final event in the middle.
+  // (The pilot's trace file has no newline after its last line.)
+  assert.deepEqual(gaps(completeness(`${REAL.pilot.trimEnd()}\n${JSON.stringify({ type: 'system', subtype: 'status' })}\n`)), ["it does not end with Claude Code's final result event"]);
+  // Part (3), for any tool: a request with no result, a result for no request, and blocks with no id.
+  assert.deepEqual(gaps(completeness(whole([...entries([['Read', { file_path: '/x' }, false, undefined]])]))), ['1 tool request with no result']);
+  assert.deepEqual(gaps(completeness(whole([{ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'nowhere', content: 'x' }] } }]))), ['1 tool result answering no request in the trace']);
+  assert.deepEqual(gaps(completeness(whole([{ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: {} }] } }, { type: 'user', message: { content: [{ type: 'tool_result', content: 'x' }] } }]))), ['1 tool request with no result', '1 tool result answering no request in the trace']);
+  // The fourth review's second finding, on the real self-test traces: the first run's result replayed into the other
+  // run's trace, and a Read call reusing the first run's Bash call id. Part (4) holds across all the job's traces.
+  const twoRuns = report([['run-one-command', 'with', 'claude-eval-SNdjrw'], ['run-one-command', 'without', 'claude-eval-hnda4k']]);
+  const real = { 'claude-eval-SNdjrw': REAL['claude-eval-SNdjrw'], 'claude-eval-hnda4k': REAL['claude-eval-hnda4k'] };
+  assert.equal(verdict(real, twoRuns).measurement, true);
+  assert.equal(verdict({ ...real, 'claude-eval-hnda4k': replayInto(REAL['claude-eval-hnda4k'], REAL['claude-eval-SNdjrw']) }, twoRuns).sentence, 'This run is not a measurement: 1 tool result answers no request in its trace; 1 tool result id appears more than once across the traces.');
+  assert.equal(verdict({ ...real, 'claude-eval-hnda4k': readInto(REAL['claude-eval-hnda4k'], 'toolu_sandbox_self_test_1') }, twoRuns).sentence, 'This run is not a measurement: 1 tool request id appears more than once across the traces; 1 tool result id appears more than once across the traces.');
+});
+
+test('part (2) of rule (a) on the real streams: every turn closed in order, and every background task ended once', t => {
+  // Accepted: one turn (the pilot's shape), and the two-turn streams of a background command, a command past its
+  // timeout, and a Task subagent whose Bash call pairs in the parent trace.
+  for (const name of ['pilot', 'background', 'pastTimeout', 'subagent']) assert.deepEqual(gaps(completeness(REAL[name])), [], name);
+  // Rule (a) holds for the subagent's stream, but its Bash result in the parent trace carries no record (2.1.322 writes
+  // tool_use_result only on the main agent's results), so rule (d) does not count it as an exit 0.
+  assert.equal(verdict({ 'claude-eval-a': REAL.subagent }, report([['c', 'with', 'claude-eval-a']])).sentence, 'This run is not a measurement: Claude Code tried to run 1 shell command for the agents and not one exited 0.');
+  // Each rejected case is the real background stream, changed in one way. Its events: 0 init, 1 the Bash call, 2 the
+  // task list, 3 task_started, 4 the call's result, 5 the reply, 6 result 0, 7 task_updated, 8 task_notification,
+  // 9 the task list, 10 init, 11 the reply, 12 result 1.
+  const events = linesOf(REAL.background).map(l => JSON.parse(l));
+  assert.deepEqual(events.map(e => e.subtype ?? e.type), ['init', 'assistant', 'background_tasks_changed', 'task_started', 'user', 'assistant', 'success', 'task_updated', 'task_notification', 'background_tasks_changed', 'init', 'assistant', 'success']);
+  const changed = change => { const copy = events.map(e => structuredClone(e)); change(copy); return jsonl(copy); };
+  const ends = "it does not end with Claude Code's final result event";
+  const turns = 'its result events do not close the turns it opened one for one, numbered from 0 in order';
+  const tasks = n => `${n} background task${n === 1 ? '' : 's'} without exactly one start and one end`;
+  const cases = {
+    'cut after the first result while the task still runs': [changed(e => e.splice(7)), [tasks(1)]],
+    'cut after the second init, before the second result': [changed(e => e.splice(11)), [ends, turns]],
+    'the second result with the wrong index': [changed(e => { e[12].result_index = 0; }), [turns]],
+    'a result with no index': [changed(e => { delete e[6].result_index; }), [turns]],
+    'a second turn opened before the first closed': [changed(e => { e.splice(5, 0, e[10]); e.splice(11, 1); }), []],
+    'a result before its turn opened': [changed(e => { e.unshift(e.splice(6, 1)[0]); }), [turns]],
+    'an end for a task never started': [changed(e => e.splice(3, 1)), [tasks(1)]],
+    'a start with two ends': [changed(e => e.splice(9, 0, e[8])), [tasks(1)]],
+    'a start with no task id': [changed(e => { delete e[3].task_id; }), [tasks(2)]],
+    'a start and an end with no task id': [changed(e => { delete e[3].task_id; delete e[8].task_id; }), [tasks(1)]],
+  };
+  for (const [name, [text, expected]] of Object.entries(cases)) assert.deepEqual(gaps(completeness(text)), expected, name);
+  // Through the verdict and the checker's command line: the stream cut while its task still runs.
+  const cut = cases['cut after the first result while the task still runs'][0];
+  assert.equal(verdict({ 'claude-eval-a': cut }, report([['c', 'with', 'claude-eval-a']])).sentence, 'This run is not a measurement: 1 background task does not report one start and one end in its trace, as when a run is cut off while a task still runs; Claude Code tried to run 1 shell command for the agents and not one exited 0.');
+  const dir = temp(t, 'bg-part-two-');
+  mkdirSync(join(dir, 'claude-eval-a', 'out'), { recursive: true });
+  writeFileSync(join(dir, 'claude-eval-a', 'out', 'trace.jsonl'), cut);
+  writeFileSync(join(dir, 'raw.json'), JSON.stringify(report([['c', 'with', 'claude-eval-a']])));
+  const r = spawnSync(process.execPath, [join(root, '.github/scripts/shell-starts.mjs'), dir, join(dir, 'raw.json')], { encoding: 'utf8', env: { PATH: process.env.PATH } });
+  assert.equal(r.status, 1);
+  assert.match(r.stdout, /^This run is not a measurement: 1 background task does not report one start and one end in its trace/m);
+});
+
+test("the self-test reads the real traces by the same rule, and checks each probe's output on its own", () => {
+  // The real self-test traces, with the results the stand-in received for them.
+  const resultOf = text => { const block = linesOf(text).map(l => JSON.parse(l)).flatMap(e => e.type === 'user' ? e.message.content : []).find(b => b.type === 'tool_result'); return { id: block.tool_use_id, isError: block.is_error === true, text: block.content }; };
+  const realSelf = (traces = { 'claude-eval-SNdjrw': REAL['claude-eval-SNdjrw'], 'claude-eval-hnda4k': REAL['claude-eval-hnda4k'] }) => ({
+    raw: report([['run-one-command', 'with', 'claude-eval-SNdjrw'], ['run-one-command', 'without', 'claude-eval-hnda4k']]),
+    traces,
+    results: [resultOf(REAL['claude-eval-SNdjrw']), resultOf(REAL['claude-eval-hnda4k'])],
+  });
+  assert.deepEqual(judged(realSelf()), { pass: true, problems: [] });
+  // Cut to its first line, the result replayed into the other trace, and a Read call reusing the first call's id.
+  assert.match(failing(realSelf({ 'claude-eval-SNdjrw': firstLineOf(REAL['claude-eval-SNdjrw']), 'claude-eval-hnda4k': REAL['claude-eval-hnda4k'] })), /^agent run \(run-one-command, with the build\): its trace is not complete: it does not end with Claude Code's final result event; its result events do not close the turns it opened one for one, numbered from 0 in order$/m);
+  assert.match(failing(realSelf({ 'claude-eval-SNdjrw': REAL['claude-eval-SNdjrw'], 'claude-eval-hnda4k': replayInto(REAL['claude-eval-hnda4k'], REAL['claude-eval-SNdjrw']) })), /^agent run \(run-one-command, without the build\): its trace is not complete: 1 tool result answering no request in the trace$/m);
+  assert.match(failing(realSelf({ 'claude-eval-SNdjrw': REAL['claude-eval-SNdjrw'], 'claude-eval-hnda4k': readInto(REAL['claude-eval-hnda4k'], 'toolu_sandbox_self_test_1') })), /the after-trial check would not accept this run: This run is not a measurement: 1 tool request id appears more than once across the traces; 1 tool result id appears more than once across the traces/);
+  // Only the second probe's output is wrong: the second run fails on its own, and nothing is said of the first.
+  const second = failing(selfRuns(undefined, folder => folder === 'claude-eval-b' ? 'probe=42\nuserns=user:[7]' : working(folder)));
+  assert.match(second, /^agent run \(run-one-command, without the build\): no line seccomp=2/m);
+  assert.doesNotMatch(second, /agent run \(run-one-command, with the build\)/);
 });
 
 test('sameFiles finds two run folders holding one trace file: a symbolic link to the file or to its folder, or a hard link', t => {
@@ -640,9 +782,9 @@ test('the after-trial check fails the job and says why in its log, the job summa
   assert.doesNotMatch(good.summary, /Not a measurement/);
   // The reviews' traces fail it through the command line too: three incomplete ones and an empty one, two runs naming
   // one trace, and the bridge error.
-  const pilotTrace = trace([bash('git status', true, `Exit code 1\n${SECCOMP_HELPER}`)], 'claude-eval-a').trimEnd();
+  const pilotCut = jsonl(entries([bash('git status', true, `Exit code 1\n${SECCOMP_HELPER}`)], 'claude-eval-a')).trimEnd();
   for (const [traces, raw] of [
-    ...[pilotTrace.slice(0, -1), pilotTrace.split('\n')[0], '{"type":"assistant","message":\nnot json at all\n', ''].map(text => [{ 'claude-eval-a': text }, raw1]),
+    ...[pilotCut.slice(0, -1), pilotCut.split('\n')[0], '{"type":"assistant","message":\nnot json at all\n', ''].map(text => [{ 'claude-eval-a': text }, raw1]),
     [{}, raw1],
     [{ 'claude-eval-a': trace([bash('ls', false, 'a')], 'claude-eval-a') }, report([['c', 'with', 'claude-eval-a'], ['c', 'without', 'claude-eval-a']])],
     [{ 'claude-eval-a': trace([bash('ls', true, FROM_SOURCE[0])], 'claude-eval-a') }, raw1],
@@ -663,6 +805,20 @@ test('the after-trial check fails the job and says why in its log, the job summa
     const linked = spawnSync(process.execPath, [join(root, '.github/scripts/shell-starts.mjs'), folder, join(folder, 'raw.json')], { encoding: 'utf8', env: { PATH: process.env.PATH } });
     assert.equal(linked.status, 1, link.name);
     assert.match(linked.stdout, /^This run is not a measurement: 2 run folders share their trace file with another through a link/m);
+  }
+  // The fourth review's findings through the command line, on real bytes: the pilot's trace is a complete run with no
+  // shell command, its first line alone is not, and the self-test's traces with a replayed result or a reused id fail.
+  assert.equal(runIn({ 'claude-eval-a': REAL.pilot }, raw1).status, 0);
+  const cut = runIn({ 'claude-eval-a': firstLineOf(REAL.pilot) }, raw1);
+  assert.equal(cut.status, 1);
+  assert.match(cut.output, /^measurement=false\nsentence=This run is not a measurement: 1 trace does not end with Claude Code's final result event/);
+  const realRaw = report([['run-one-command', 'with', 'claude-eval-SNdjrw'], ['run-one-command', 'without', 'claude-eval-hnda4k']]);
+  const realTraces = { 'claude-eval-SNdjrw': REAL['claude-eval-SNdjrw'], 'claude-eval-hnda4k': REAL['claude-eval-hnda4k'] };
+  assert.equal(runIn(realTraces, realRaw).status, 0);
+  for (const other of [replayInto(REAL['claude-eval-hnda4k'], REAL['claude-eval-SNdjrw']), readInto(REAL['claude-eval-hnda4k'], 'toolu_sandbox_self_test_1')]) {
+    const failed = runIn({ ...realTraces, 'claude-eval-hnda4k': other }, realRaw);
+    assert.equal(failed.status, 1);
+    assert.match(failed.output, /^measurement=false\nsentence=This run is not a measurement: .*appears more than once across the traces/);
   }
   // A missing or unreadable raw report fails the check.
   for (const raw of [undefined, '{"cases": [']) {
@@ -774,14 +930,14 @@ test('the gather step renames the record of a run that is not a measurement, bes
 test('the workflow header and the README say what each check proves, the rule and its limits, and how to move a pin', () => {
   const header = workflow.slice(0, workflow.indexOf('\non:'));
   const flat = text => text.replace(/\n# ?/g, ' ').replace(/\s+/g, ' ');
-  for (const phrase of ['pinned to the ubuntu-24.04 image and to the Claude Code release in .github/scripts/install-trial-tools.sh', "AppArmor's bwrap-userns-restrict profile keeps the sandbox's seccomp helper from starting any command", 'with a stand-in for the model on 127.0.0.1, so no model is asked and nothing is spent', 'both agent runs its trial asks for, one with the build and one without, each ran its Bash call inside the sandbox', "a user namespace other than the runner's", 'not-evidence-<build>-<trial>.json beside NOT-A-MEASUREMENT.txt']) {
+  for (const phrase of ['pinned to the ubuntu-24.04 image and to the Claude Code release in .github/scripts/install-trial-tools.sh', "AppArmor's bwrap-userns-restrict profile keeps the sandbox's seccomp helper from starting any command", 'with a stand-in for the model on 127.0.0.1, so no model is asked and nothing is spent', 'both agent runs its trial asks for, one with the build and one without, each left a complete trace and ran its Bash call inside the sandbox', 'no Bash result is an error that is neither a process exit nor an allowed refusal', 'if Claude Code tried to run any shell command, at least one exited 0', 'A complete run that asked for no shell command, or whose only calls were refused, is a measurement too.', "a user namespace other than the runner's", 'not-evidence-<build>-<trial>.json beside NOT-A-MEASUREMENT.txt']) {
     assert.ok(flat(header).includes(phrase), phrase);
   }
   const shells = stepText(SHELLS).replace(/\n {8}# ?/g, ' ').replace(/\s+/g, ' ');
   const text = readme.replace(/\s+/g, ' ');
   // The same rule and the same limits, in the step's comment and in the README.
   for (const where of [shells, text]) {
-    for (const phrase of ['error whose text begins "Exit code <n>"', 'a PreToolUse hook refused the call', "the model's input failed validation", 'Claude Code blocked a long sleep', 'nothing but the sandbox wrapper\'s own setup lines', 'not one of them exited 0', 'runs past its timeout', 'can only reject a run, never accept one', 'prints something besides those shapes and hits only some commands is not detected', 'nor is one that hits only commands run in the background', 'A run cut off in the middle of a shell command is rejected', 'two run folders hold one trace file through a', 'a Bash call id appears more than once', 'guard against a fault in the environment', 'write the grades too', 'forged record, one no Claude Code release writes']) {
+    for (const phrase of ['error whose text begins "Exit code <n>"', 'a PreToolUse hook refused the call', "the model's input failed validation", 'Claude Code blocked a long sleep', 'nothing but the sandbox wrapper\'s own setup lines', 'not one of them exited 0', 'runs past its timeout', 'can only reject a run, never accept one', 'prints something besides those shapes and hits only some commands is not detected', 'nor is one that hits only commands run in the background', 'makes the job not a measurement, and the run has to be repeated', 'turn it opened', 'background task', 'every turn and every task ended', 'exactly one result in it', 'two run folders hold one trace file through a', 'no tool request', 'guard against a fault in the environment', 'write the grades too', 'forged record, one no Claude Code release writes']) {
       assert.ok(where.includes(phrase), `${phrase} (${where === shells ? 'workflow' : 'README'})`);
     }
   }

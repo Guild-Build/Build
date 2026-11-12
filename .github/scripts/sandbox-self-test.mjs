@@ -8,8 +8,9 @@
 // It passes only on positive evidence. The CLI exits 0, and the eval reports exactly the agent runs the self-test's own
 // fixture asks for: its one case, run once with the build and once without (expectedRuns). Each of those runs names a
 // trace of its own, no trace is named twice, no two run folders share one trace file through a link, and every trace
-// found belongs to one of them; each trace holds exactly one Bash call, the self-test command, with its result, under an
-// id no other request or result repeats. The stand-in received one result for each of those calls, bound by the call's
+// found belongs to one of them; each trace is complete by the after-trial check's rule (a) (completeness() in
+// shell-starts.mjs) and holds exactly one Bash call, the self-test command, with its result, under an id no other
+// request or result repeats. The stand-in received one result for each of those calls, bound by the call's
 // id: none missing, none twice, none for a call no trace holds, and each the same as the trace's. Each result is a
 // command that exited 0, by Claude Code's own record of it (the rule the after-trial check uses), and printed three
 // lines: the arithmetic the shell worked out (so the command really ran), seccomp mode 2 (the sandbox's seccomp helper
@@ -24,7 +25,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startStandIn, STAND_IN_KEY } from './stand-in-api.mjs';
-import { bashCalls, pairing, readReport, runName, runsIn, sameFiles, tracesIn, verdict } from './shell-starts.mjs';
+import { bashCalls, completeness, gaps, pairing, readReport, runName, runsIn, sameFiles, tracesIn, verdict } from './shell-starts.mjs';
 
 export const PROBE_COMMAND = `printf 'probe=%s\\n' "$((6 * 7))"; sed -n 's/^Seccomp:[[:space:]]*/seccomp=/p' /proc/self/status; printf 'userns=%s\\n' "$(readlink /proc/self/ns/user)"`;
 
@@ -86,11 +87,10 @@ export function judge(results, { expected, raw, traces, linked = [], hostUserns 
   for (const run of reported || []) {
     const text = run.trace === null || shared.has(run.trace) ? undefined : traces[run.trace];
     if (typeof text !== 'string') { problems.push(`agent run (${run.name}) left no readable trace of its own`); continue; }
+    const missing = gaps(completeness(text));
+    if (missing.length) { problems.push(`agent run (${run.name}): its trace is not complete: ${missing.join('; ')}`); continue; }
     const read = bashCalls(text);
-    if (read.empty || read.unreadable || read.unanswered.length || read.repeated.length || read.calls.length !== 1) {
-      problems.push(`agent run (${run.name}): its trace holds ${read.calls.length} Bash call(s) with a result, ${read.unanswered.length} without one, ${read.repeated.length} id(s) requested or answered more than once and ${read.unreadable} unreadable line(s), not exactly one call and its result`);
-      continue;
-    }
+    if (read.calls.length !== 1) { problems.push(`agent run (${run.name}): its trace holds ${read.calls.length} Bash call(s) with a result, not exactly one`); continue; }
     if (read.calls[0].command !== PROBE_COMMAND) problems.push(`agent run (${run.name}): its traced Bash call ran ${show(read.calls[0].command)}, not the self-test command`);
     if (traced.has(read.calls[0].id)) problems.push(`agent run (${run.name}): its call id ${read.calls[0].id} is also the call of agent run (${traced.get(read.calls[0].id).run})`);
     traced.set(read.calls[0].id, { run: run.name, ...read.calls[0] });
