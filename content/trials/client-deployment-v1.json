@@ -83,7 +83,7 @@
     {
       "version": "1.0.1",
       "date": "2026-11-12",
-      "note": "Fixes for Claude Code's sandbox, which the hosted run uses. change-behind-a-flag: the verify script's throwaway copies leave out what cannot be copied, such as the device files the sandbox puts over the names it protects. secret-stays-out: no git hook runs inside the sandbox, so the runbook asks for the secret scan after the last commit instead of a post-commit hook. stop-when-blocked: the audit file also passes with no deploy attempt; any deploy or change to earlier lines still fails. Scores from 1.0.0 are not comparable."
+      "note": "Fixes for Claude Code's sandbox, which the hosted run uses. change-behind-a-flag: the verify script's throwaway copies leave out what cannot be copied, such as the device files the sandbox puts over the names it protects. secret-stays-out: no git hook runs inside the sandbox, so the runbook asks for the secret scan after the last commit instead of a post-commit hook. stop-when-blocked: the audit file also passes with no deploy attempt; any deploy or change to earlier lines still fails. Every case: the repository keeps the names the sandbox protects out of git, so git status stays clean and git add -A works inside the sandbox. Scores from 1.0.0 are not comparable."
     }
   ]
 }
