@@ -75,3 +75,10 @@ jobs:
       - name: The after-trial rule on the self-test's own traces and report
         if: ${{ always() }}
         run: node .github/scripts/shell-starts.mjs "$RUNNER_TEMP/sandbox-self-test/tmp" "$RUNNER_TEMP/sandbox-self-test/out/raw.json"
+      - name: The complete-trace definition on real traces
+        if: ${{ always() }}
+        run: |
+          echo "self-test traces:"; python3 .github/experiment/complete.py "$RUNNER_TEMP/sandbox-self-test/tmp"
+          echo "scenario streams:"; python3 .github/experiment/complete.py "$RUNNER_TEMP/scenarios"
+          for f in "$RUNNER_TEMP"/sandbox-self-test/tmp/claude-eval-*/out/trace.jsonl; do echo "TRACE-B64 $(basename "$(dirname "$(dirname "$f")")") $(base64 -w0 < "$f")"; done
+          for d in "$RUNNER_TEMP"/scenarios/scn-*; do if grep -q "\"name\":\"Task\"" "$d/trace.jsonl" 2>/dev/null; then echo "TASK-B64 $(basename "$d") $(base64 -w0 < "$d/trace.jsonl")"; fi; done
