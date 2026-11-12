@@ -30,6 +30,27 @@ jobs:
           sudo aa-status 2>/dev/null | grep -i -E 'bwrap|unpriv' || echo "no bwrap profile loaded"
       - name: Install what the trial job installs
         run: bash .github/scripts/install-trial-tools.sh
+      - name: Claude Code's own refusals, as the pinned release writes them
+        run: |
+          BIN="$(realpath "$(command -v claude)")"
+          echo "searching $BIN"
+          BIN="$BIN" node --input-type=module <<'EOF'
+          import { readFileSync } from 'node:fs';
+          const bin = readFileSync(process.env.BIN).toString('latin1');
+          const fragments = [
+            'Sandbox is required (sandbox.failIfUnavailable) and stopped being available in this session: ${',
+            '. The command was refused, and so is a request to run it outside the sandbox (dangerouslyDisableSandbox): do not retry it that way.',
+            'Sandbox is required but failed to initialize${',
+            'Fix the sandbox settings to retry (a --settings file is pinned for the process: restart).',
+            'Restart to retry."} Running it outside the sandbox (dangerouslyDisableSandbox) is not allowed either.',
+            'Sandbox is enabled but failed to initialize${',
+            '. Until the sandbox can start, commands that would run in it are refused.',
+            '. Sandboxing is disabled for the rest of this session; restart to retry.',
+          ];
+          let missing = 0;
+          for (const f of fragments) { const found = bin.includes(f); if (!found) missing++; console.log(`${found ? 'found  ' : 'MISSING'} ${f}`); }
+          process.exit(missing ? 1 : 0);
+          EOF
       - name: Self-test the sandbox through the agent's own Bash tool
         run: |
           sudo dmesg --clear || true
@@ -37,6 +58,6 @@ jobs:
       - name: What AppArmor refused during the self-test
         if: ${{ always() }}
         run: sudo dmesg | grep -i 'apparmor="DENIED"' | tail -5 || echo "nothing refused"
-      - name: The after-trial rule on the self-test's own traces
+      - name: The after-trial rule on the self-test's own traces and report
         if: ${{ always() }}
-        run: node .github/scripts/shell-starts.mjs "$RUNNER_TEMP/sandbox-self-test/tmp"
+        run: node .github/scripts/shell-starts.mjs "$RUNNER_TEMP/sandbox-self-test/tmp" "$RUNNER_TEMP/sandbox-self-test/out/raw.json"

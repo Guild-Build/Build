@@ -207,7 +207,7 @@ test('the workflow calls the script, runs one job at a time and names a repeated
   assert.match(workflow, /\n      max-parallel: 1\n/);
   assert.match(workflow, /\n      repeat:\n        description: [^\n]+\n        required: false\n        default: "1"\n/);
   assert.match(workflow, /\n          BG_REPEAT: \$\{\{ inputs\.repeat \}\}\n/);
-  assert.equal(workflow.match(/BG_REP: \$\{\{ matrix\.rep \}\}/g).length, 2);
+  assert.equal(workflow.match(/BG_REP: \$\{\{ matrix\.rep \}\}/g).length, 3);
   assert.match(workflow, /--out "evidence-\$BG_BUILD-\$BG_TRIAL\$SUFFIX\.json" --raw-out "raw-\$BG_BUILD-\$BG_TRIAL\$SUFFIX\.json" --work-dir "\$RUNNER_TEMP\/trial-run" --keep-temp "\$\{REP_ARGS\[@\]\}"\n/);
   assert.match(workflow, /\n          EVIDENCE="evidence-\$BG_BUILD-\$BG_TRIAL\$SUFFIX\.json"\n/);
   assert.match(workflow, /\n          if \[ -f "raw-\$BG_BUILD-\$BG_TRIAL\$SUFFIX\.json" \]; then cp -L "raw-\$BG_BUILD-\$BG_TRIAL\$SUFFIX\.json" "\$OUT_DIR\/"; fi\n/);

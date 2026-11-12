@@ -25,11 +25,13 @@ name: Season trial
 # failing: on ubuntu-26.04, AppArmor's bwrap-userns-restrict profile keeps the sandbox's seccomp helper from starting
 # any command. Before Azure and the key, the sandbox self-test (.github/scripts/sandbox-self-test.mjs) runs the trial's
 # own path with a stand-in for the model on 127.0.0.1, so no model is asked and nothing is spent. It passes only when
-# every agent run's Bash call exited 0 inside the sandbox and printed what it was asked to: the arithmetic it was given,
-# a seccomp filter on, and a user namespace other than the runner's. Otherwise the job stops there. After the trial,
-# .github/scripts/shell-starts.mjs reads every agent trace. If the sandbox kept any shell command from starting, or no
-# trace was left, the run is not a measurement. The job then fails and says why in its summary, and its files upload as
-# not-evidence-<build>-<trial>, with the record renamed not-evidence-<build>-<trial>.json beside NOT-A-MEASUREMENT.txt.
+# both agent runs its trial asks for, one with the build and one without, each ran its Bash call inside the sandbox,
+# with exit 0 and what it was asked to print: the arithmetic it was given, a seccomp filter on, and a user namespace
+# other than the runner's. Otherwise the job stops there. After the trial, .github/scripts/shell-starts.mjs reads the
+# eval's raw report and every agent trace. The run is a measurement only if every agent run the report lists left a
+# trace, every trace reads in full, every shell command the agents asked for has its result, and the sandbox started
+# each one. Otherwise the job fails and says why in its summary, and its files upload as not-evidence-<build>-<trial>,
+# with the record renamed not-evidence-<build>-<trial>.json beside NOT-A-MEASUREMENT.txt.
 on:
   push:
     branches: [main]
@@ -256,13 +258,22 @@ jobs:
       - name: Check that the sandbox started the agents' shell commands
         id: shells
         if: ${{ always() && matrix.verify_only != 'true' && steps.run.outcome != 'skipped' }}
-        # The rule, in .github/scripts/shell-starts.mjs: a Bash call was stopped by the sandbox when the Bash tool
-        # returned an error whose output, after Claude Code's "Exit code N" line, holds a line the sandbox prints when
-        # it cannot start a command (one that begins "bwrap: ", "apply-seccomp: " or "Sandbox is required") and nothing
-        # but such lines and bash's own complaints. A command that started prints its own output, so a failing test or a
-        # script that exits 1 never matches. One such call, or no trace at all, means the run is not a measurement: this
-        # step fails the job, says why in the job summary, and the files below upload as not-evidence-<build>-<trial>.
-        run: node .github/scripts/shell-starts.mjs "$RUNNER_TEMP/evaltmp"
+        env:
+          BG_BUILD: ${{ matrix.build }}
+          BG_TRIAL: ${{ matrix.trial }}
+          BG_REP: ${{ matrix.rep }}
+        # The rule, in .github/scripts/shell-starts.mjs. The run is a measurement only on positive evidence for every
+        # shell command: the raw report the run step wrote exists, every agent run it lists left its trace (and no trace
+        # is left over), every trace line reads, no trace is empty, every Bash request has its result, and no result
+        # shows the sandbox keeping its command from starting. A result shows that when the Bash tool returned an error
+        # that holds one of Claude Code's own refusals for a sandbox reason, word for word, or whose lines after
+        # "Exit code N" include one shaped like bubblewrap's "bwrap: <message>" or the seccomp helper's
+        # "apply-seccomp: <step>: <error>" and are otherwise only bash's own complaints. Limit: a command that started,
+        # failed and printed nothing but lines of those two shapes, plus bash's complaints, is counted as stopped too,
+        # which can only reject a run, never accept one. A run cut off in the middle of a shell command is rejected and
+        # has to run again. Any of these fails the job, says why in the job summary, and the files below upload as
+        # not-evidence-<build>-<trial>.
+        run: node .github/scripts/shell-starts.mjs "$RUNNER_TEMP/evaltmp" "raw-$BG_BUILD-$BG_TRIAL${BG_REP:+-rep$BG_REP}.json"
       - name: Gather the files to upload
         if: ${{ always() && matrix.verify_only != 'true' }}
         env:
