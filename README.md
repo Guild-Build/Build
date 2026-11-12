@@ -87,6 +87,15 @@ end in `-rep<k>`, and a queue may name each build and trial pair only once. A ma
 from the Actions tab with the same fields. Either way the project owner approves each run in the `trials` environment before
 it reads the key or spends anything, and an empty queue starts nothing.
 
+A request's `max_cost_usd`, in dollars and cents (the plan refuses more than two decimal places), covers every paid call
+of its run. The run first checks the key with one tiny call, or two when the key is organisation-level, and each check
+has a budget of 0.25 USD. So 0.5 USD of each ceiling is kept for the check and the trial gets the rest: a 3 USD ceiling
+gives the trial 2.5 USD, on every repeat. The plan refuses a ceiling below 0.51 USD, which would leave the trial
+nothing, and the run stops before the trial unless a check gets the reply `ok` within its budget. Claude Code holds
+each budget to its own cost estimate: the key check can pass its budget by the one reply that reaches it, and the trial
+can pass its budget by every agent run already under way when it is reached, up to the request's `concurrency` (1
+unless the request says otherwise).
+
 A guild record's attestation is the public URL of the run that produced it,
 `https://github.com/Guild-Build/Build/actions/runs/<run id>`. Anyone signed in to GitHub can read the run's log there
 and download its files. The files are the evidence record, the raw report, the results and the agent traces, all

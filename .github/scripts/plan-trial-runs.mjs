@@ -12,6 +12,42 @@ const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 // be set against how much one build's score moves from run to run.
 const REPEAT = /^[1-5]$/;
 
+// A request's ceiling, max_cost_usd, covers every paid call of its run. Before the trial the job checks the key with one
+// tiny call, or two when the key is organisation-level and the first is refused, and trial.yml gives each check this
+// budget through claude --max-budget-usd. The reserve, both checks' budgets together, comes off the ceiling and the trial
+// (buildguild test --max-cost-usd) gets the rest, so the budgets of every claude call in a run add up to its ceiling.
+// Claude Code compares a budget with its own cost estimate once a reply arrives, so a check that reaches its budget ends
+// in an error instead of a reply, and the job stops before the trial. Sized in November 2026: on Claude Code 2.1.321 a
+// check sends about 18,000 prompt tokens, which cost about 0.07 USD on claude-sonnet-5-5 and 0.14 USD on
+// claude-opus-5-5 when all of them are written to the 1-hour cache at list price. A cold check on Claude Fable 5.2 costs
+// about 0.29 USD that way, more than this budget, so it would stop its run before the trial.
+export const KEY_CHECK_BUDGET_USD = '0.25';
+export const KEY_CHECK_CALLS = 2;
+// The least a trial is given: a ceiling must leave at least this once the reserve is kept.
+const MIN_TRIAL_BUDGET_USD = '0.01';
+
+// Dollar amounts are decimal text and are added and subtracted digit for digit, as whole numbers of 10^-places dollars,
+// so no floating-point rounding, and no limit on size, reaches a budget or the total the owner approves. A ceiling is
+// dollars and cents (the plan refuses more than two decimal places), so its sums are sums of whole cents.
+const placesOf = (...amounts) => Math.max(...amounts.map(a => (a.split('.')[1] ?? '').length));
+const units = (amount, places) => { const [whole, part = ''] = amount.split('.'); return BigInt(whole + part.padEnd(places, '0')); };
+const usd = (n, places) => {
+  const digits = n.toString().padStart(places + 1, '0');
+  const part = digits.slice(digits.length - places).replace(/0+$/, '');
+  return digits.slice(0, digits.length - places) + (part ? `.${part}` : '');
+};
+const keyCheckPlaces = placesOf(KEY_CHECK_BUDGET_USD, MIN_TRIAL_BUDGET_USD);
+export const KEY_CHECK_RESERVE_USD = usd(units(KEY_CHECK_BUDGET_USD, keyCheckPlaces) * BigInt(KEY_CHECK_CALLS), keyCheckPlaces);
+export const MIN_CEILING_USD = usd(units(KEY_CHECK_RESERVE_USD, keyCheckPlaces) + units(MIN_TRIAL_BUDGET_USD, keyCheckPlaces), keyCheckPlaces);
+
+// The trial's share of a ceiling (a positive amount in dollars and cents, as the plan checks it): the ceiling less the
+// reserve, or null when that would leave the trial less than MIN_TRIAL_BUDGET_USD.
+export function trialBudget(ceiling) {
+  const places = placesOf(ceiling, KEY_CHECK_RESERVE_USD, MIN_TRIAL_BUDGET_USD);
+  const left = units(ceiling, places) - units(KEY_CHECK_RESERVE_USD, places);
+  return left >= units(MIN_TRIAL_BUDGET_USD, places) ? usd(left, places) : null;
+}
+
 // A refusal of the queue or the inputs; main prints it as a workflow error and stops the plan.
 export class PlanError extends Error {}
 const stop = msg => { throw new PlanError(msg); };
@@ -26,9 +62,10 @@ export const artifactName = m => `evidence-${m.build}-${m.trial}${m.rep ? `-rep$
 const runName = m => `${m.build} on ${m.trial}${m.rep ? `, run ${m.rep}` : ''}`;
 
 // requests is the queue's "requests" value, or the one request the dispatch inputs make. Returns the matrix (one entry per
-// run) and the summary lines. A request without repeat, or with repeat 1, gives exactly the entry it always gave; with
-// repeat n it gives n entries that differ only in rep, "1" to "n", which the workflow adds to the run's file and artifact
-// names and passes to `buildguild test --rep`.
+// run) and the summary lines. An entry that spends (verify_only "false") carries key_check_budget_usd, the budget of each
+// key check, and trial_budget_usd, which the run step passes to `buildguild test --max-cost-usd`. A request without
+// repeat, or with repeat 1, gives one entry with no rep; with repeat n it gives n entries that differ only in rep, "1" to
+// "n", which the workflow adds to the run's file and artifact names and passes to `buildguild test --rep`.
 export function planRuns(requests, { dispatched = false, buildExists = slug => existsSync(`bundles/${slug}/buildguild.json`) } = {}) {
   if (!Array.isArray(requests)) stop(`${QUEUE} needs a "requests" list`);
   const first = new Map();
@@ -41,10 +78,19 @@ export function planRuns(requests, { dispatched = false, buildExists = slug => e
     const m = { build: String(r.build ?? ''), trial: String(r.trial ?? ''), max_cost_usd: String(r.max_cost_usd ?? 5), model: String(r.model ?? 'claude-sonnet-5-5'), concurrency: String(r.concurrency ?? 1), verify_only: String(r.verify_only ?? false) };
     if (!SLUG.test(m.build) || !buildExists(m.build)) stop(`${where}: no build at bundles/${m.build}`);
     if (!SLUG.test(m.trial)) stop(`${where}: the trial "${m.trial}" is not a slug`);
-    if (!/^\d+(\.\d+)?$/.test(m.max_cost_usd) || !(Number(m.max_cost_usd) > 0)) stop(`${where}: max_cost_usd must be a positive number of US dollars`);
+    // A ceiling is an amount of money, checked as written: an all-zero amount is not positive, and cents are the smallest unit.
+    if (!/^\d+(\.\d+)?$/.test(m.max_cost_usd) || /^[0.]+$/.test(m.max_cost_usd)) stop(`${where}: max_cost_usd must be a positive number of US dollars`);
+    if (!/^\d+(\.\d{1,2})?$/.test(m.max_cost_usd)) stop(`${where}: max_cost_usd must be in dollars and cents, with at most two decimal places`);
     if (!/^[A-Za-z0-9][A-Za-z0-9._[\]-]*$/.test(m.model)) stop(`${where}: "${m.model}" is not a model id`);
     if (!/^[1-9]\d*$/.test(m.concurrency)) stop(`${where}: concurrency must be a whole number of at least 1`);
     if (m.verify_only !== 'true' && m.verify_only !== 'false') stop(`${where}: verify_only must be true or false`);
+    // A run that spends gets each key check's budget and the trial's share of its ceiling; a verify-only run calls no
+    // model, so its ceiling is not split.
+    if (m.verify_only === 'false') {
+      const trial = trialBudget(m.max_cost_usd);
+      if (trial === null) stop(`${where}: max_cost_usd must be at least ${MIN_CEILING_USD} USD, the smallest usable ceiling: each ceiling keeps ${KEY_CHECK_RESERVE_USD} USD for the key check and gives the trial the rest`);
+      Object.assign(m, { key_check_budget_usd: KEY_CHECK_BUDGET_USD, trial_budget_usd: trial });
+    }
     // A number in the queue or text from the inputs; a list such as [2] would read as "2", so only those two count. A
     // missing repeat or null is one run, as null is the default for the other optional fields.
     const repeat = r.repeat ?? 1;
@@ -68,18 +114,22 @@ export function planRuns(requests, { dispatched = false, buildExists = slug => e
   return { matrix, summary: summarize(planned, matrix) };
 }
 
-// The run page shows this summary where the owner approves, so each approval names what it may spend. Without repeats the
-// lines are the ones the workflow has always written; with repeats the table gains a Repeats column and the total is each
-// ceiling times its repeats.
+// The run page shows this summary where the owner approves, so each approval names what it may spend and what that covers.
+// Each row gives the ceiling and the trial's share of it; with repeats the table gains a Repeats column and the total is
+// each ceiling times its repeats. When any run spends, a last paragraph says how a ceiling is split.
 function summarize(planned, matrix) {
   if (!matrix.length) return ['No requests: no trial runs and nothing waits for approval.'];
-  const ceiling = matrix.filter(m => m.verify_only === 'false').reduce((sum, m) => sum + Number(m.max_cost_usd), 0);
-  const total = `Ceilings total ${Math.round(ceiling * 100) / 100} USD`;
+  const ceilings = matrix.filter(m => m.verify_only === 'false').map(m => m.max_cost_usd);
+  const places = placesOf('0', ...ceilings);
+  const total = `Ceilings total ${usd(ceilings.reduce((sum, c) => sum + units(c, places), 0n), places)} USD`;
   const cost = m => m.verify_only === 'true' ? 'verify only, runs nothing' : `${m.max_cost_usd} USD`;
-  if (planned.every(p => p.repeat === 1)) {
-    return ['| Build | Trial | Model | Ceiling |', '|---|---|---|---|', ...matrix.map(m => `| ${m.build} | ${m.trial} | ${m.model} | ${cost(m)} |`), '', `Each run waits for the owner's approval in the trials environment. ${total}.`];
+  const trial = m => m.verify_only === 'true' ? 'none' : `${m.trial_budget_usd} USD`;
+  const repeated = planned.some(p => p.repeat !== 1);
+  const split = matrix.some(m => m.verify_only === 'false') ? ['', `A ceiling covers every paid call of its run. The key check keeps ${KEY_CHECK_RESERVE_USD} USD of it: one tiny call, or two when the key is organisation-level, each with a budget of ${KEY_CHECK_BUDGET_USD} USD, and the run stops before the trial unless a check gets the reply ok within its budget. The trial gets the rest${repeated ? ', the same on every repeat' : ''}. Claude Code holds each budget to its own cost estimate: the key check can pass its budget by the one reply that reaches it, and the trial can pass its budget by every agent run already under way when it is reached, up to the request's concurrency (1 unless the request says otherwise).`] : [];
+  if (!repeated) {
+    return ['| Build | Trial | Model | Ceiling | Trial budget |', '|---|---|---|---|---|', ...matrix.map(m => `| ${m.build} | ${m.trial} | ${m.model} | ${cost(m)} | ${trial(m)} |`), '', `Each run waits for the owner's approval in the trials environment. ${total}.`, ...split];
   }
-  return ['| Build | Trial | Model | Ceiling per run | Repeats |', '|---|---|---|---|---|', ...planned.map(({ m, repeat }) => `| ${m.build} | ${m.trial} | ${m.model} | ${cost(m)} | ${repeat} |`), '', `Each run waits for the owner's approval in the trials environment, and a request's repeats run one after another. ${total}, each ceiling times its repeats.`];
+  return ['| Build | Trial | Model | Ceiling per run | Trial budget per run | Repeats |', '|---|---|---|---|---|---|', ...planned.map(({ m, repeat }) => `| ${m.build} | ${m.trial} | ${m.model} | ${cost(m)} | ${trial(m)} | ${repeat} |`), '', `Each run waits for the owner's approval in the trials environment, and a request's repeats run one after another. ${total}, each ceiling times its repeats.`, ...split];
 }
 
 async function main(env = process.env) {
