@@ -105,19 +105,26 @@ each run checks the sandbox twice:
   [`.github/sandbox-self-test/`](.github/sandbox-self-test/). A stand-in for the model on 127.0.0.1 takes the place of
   Anthropic's API, so no model is asked and nothing is spent. It proves that the agent's own Bash tool ran a command
   inside the sandbox. It passes only when the eval reports exactly the two agent runs that trial asks for, one with
-  the build and one without, each with a trace of its own that holds one Bash call, the self-test command, under an id
-  that appears nowhere else. The stand-in must have received each call's result exactly once, under the call's own id,
-  and each command must have exited 0, by Claude Code's own record of it as rule 4 below reads it, and printed the
-  arithmetic it was given, a seccomp filter turned on and a user namespace other than the runner's. Otherwise the run
-  stops before Azure and the key.
+  the build and one without, each with a complete trace of its own, by rule 1 below, that holds one Bash call, the
+  self-test command, under an id that appears nowhere else. The stand-in must have received each call's result exactly
+  once, under the call's own id, and each command must have exited 0, by Claude Code's own record of it as rule 4
+  below reads it, and printed the arithmetic it was given, a seccomp filter turned on and a user namespace other than
+  the runner's. Otherwise the run stops before Azure and the key.
 - **After the trial**, [`.github/scripts/shell-starts.mjs`](.github/scripts/shell-starts.mjs) reads the eval's raw
   report and every agent trace. The run is not a measurement when any of these holds:
-  1. The report or the traces are incomplete or do not match: the report is missing, unreadable or lists no run; a run
-     names no trace, or a trace another run also names; a named trace is not found, or a trace found belongs to no
-     run; two run folders hold one trace file through a symbolic or hard link, found by resolved path and by device
-     and inode; a trace is empty or holds a line that is not a JSON object; a Bash call id appears more than once, as
-     a request or a result, in one trace or across traces; or a shell command has no result. A run cut off in the
-     middle of a shell command is rejected and has to run again.
+  1. The report and the traces are not complete or do not match. The report must read and list the agent runs, each
+     naming a trace of its own: no run names none, no trace is named twice or is missing, every trace found belongs to
+     a listed run, and no two run folders hold one trace file through a symbolic or hard link, found by resolved path
+     and by device and inode. Each trace must be complete. The file is not empty and every line in it is a JSON
+     object. It ends with Claude Code's final result event, and it closes every turn it opened: each `system/init`
+     event is followed by its own result event, numbered 0, 1, … in order. Every background task it started, such as a
+     command run in the background or a subagent, reports its start and its end in it exactly once each
+     (`task_started` and `task_notification`, matched by `task_id`). Every tool request in it, of any tool, has
+     exactly one result in it, and every tool result in it answers a request in it. Across all the job's traces no
+     tool request id or tool result id appears more than once. A complete trace with no shell command in it is fine,
+     and so is a run that uses a subagent or a background command when its trace shows every turn and every task
+     ended. An agent run that ends without Claude Code's final result event, for any reason including the eval's own
+     time limit, makes the job not a measurement, and the run has to be repeated.
   2. A Bash result is an error that is not a process exit, meaning Claude Code returned an error for the call without
      the command running to an exit status. In the pinned release a command that ran and exited non-zero is the one
      error whose text begins "Exit code <n>". Every other error counts, whatever its wording, Claude Code's own
@@ -132,8 +139,9 @@ each run checks the sandbox twice:
   4. Claude Code tried to run at least one shell command for the agents and not one of them exited 0. A result Claude
      Code did not mark an error is not always an exit 0: it reads exit status 1 as success for `grep`, `find`, `diff`,
      `test` and a few more, and it answers at once for a command it runs in the background, as it does when a command
-     runs past its timeout. Claude Code's own record of each result in the trace says which, and only a result recorded
-     as neither, and not interrupted, counts.
+     runs past its timeout. Claude Code's own record of each result in the trace says which, and only a result
+     recorded as neither, and not interrupted, counts. A subagent's Bash results carry no such record in the pinned
+     release, so they never count as an exit 0: a job whose only shell commands ran in subagents is not a measurement.
 
   A trial whose agents asked for no shell command at all is still a measurement. The check has two limits. Rule 3 also
   counts a command that started and printed nothing but such lines, which can only reject a run, never accept one. And a
@@ -163,8 +171,10 @@ seccomp helper from starting any command with each of the three Claude Code rele
 2. The sandbox self-test workflow runs on that pull request at no cost. Merge only if it passes. If it fails, the pin
    stays where it is.
 3. For a new Claude Code release, also check again how it writes a Bash result, against its source. Rules 2 and 4 of
-   the after-trial check read results as 2.1.322 writes them, and the self-test only runs a command that exits 0.
-   [Pull request 15](https://github.com/Guild-Build/Build/pull/15) lists where 2.1.322 writes them.
+   the after-trial check read its Bash results and their records as 2.1.322 writes them, and rule 1 reads its result
+   events and their `result_index`, its `system/init` events, and its `task_started` and `task_notification` events
+   with their `task_id`. The self-test only runs a command that exits 0. [Pull request
+   15](https://github.com/Guild-Build/Build/pull/15) lists where 2.1.322 writes them.
 
 Moving to `ubuntu-26.04` also needs its `bwrap-userns-restrict` profile out of the way, which is a change to the
 runner's security settings. That pull request must name the change and give its reason.
