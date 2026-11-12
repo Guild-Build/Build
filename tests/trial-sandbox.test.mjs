@@ -228,6 +228,9 @@ test('the self-test binds each result to its own call and its own trace: identic
   const differs = selfRuns();
   differs.results[1] = { ...differs.results[1], text: working('claude-eval-a') };
   assert.match(failing(differs), /agent run \(run-one-command, without the build\): the result the stand-in received for claude-eval-b_0 differs from the one its trace holds/);
+  const flipped = selfRuns();
+  flipped.results[1] = { ...flipped.results[1], isError: true };
+  assert.match(failing(flipped), /agent run \(run-one-command, without the build\): the result the stand-in received for claude-eval-b_0 differs from the one its trace holds/);
   // A traced call that is not the self-test command, even with passing output.
   const other = selfRuns();
   other.traces['claude-eval-a'] = trace([bash('cat probe-output.txt', false, working('claude-eval-a'))], 'claude-eval-a');
@@ -455,7 +458,10 @@ test('the after-trial verdict: a measurement only on positive evidence, and one 
   assert.equal(verdictOf({ 'claude-eval-a': [shape(OBSERVED['hook denies by JSON'])] }).measurement, true);
   const not = byFolder => { const v = verdictOf(byFolder); assert.equal(v.measurement, false); return v.sentence; };
   // Kept from the first round: one stopped call among healthy runs rejects the run.
-  assert.match(not({ ...healthy, 'claude-eval-c': [bash('ls', false, 'a'), bash('make', true, 'Exit code 1\nbwrap: setting up uid map: Permission denied')] }), /the sandbox kept 1 of the 7 shell commands Claude Code tried to run from starting, in 1 of 3 agent runs/);
+  const mixed = verdictOf({ ...healthy, 'claude-eval-c': [bash('ls', false, 'a'), bash('make', true, 'Exit code 1\nbwrap: setting up uid map: Permission denied')] });
+  assert.equal(mixed.measurement, false);
+  assert.match(mixed.sentence, /the sandbox kept 1 of the 7 shell commands Claude Code tried to run from starting, in 1 of 3 agent runs/);
+  assert.deepEqual(mixed.stopped.map(c => [c.trace, c.command]), [['claude-eval-c', 'make']]);
   // A grep stopped by the sandbox, which Claude Code reads as success, among healthy calls.
   assert.match(not({ ...healthy, 'claude-eval-c': [shape(BROKEN['grep miss, sandbox broken'], 'grep x f')] }), /the sandbox kept 1 of the 6 shell commands/);
   // One error that is no exit among healthy calls, such as the review's bridge error, quoted in the sentence.
