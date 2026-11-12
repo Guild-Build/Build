@@ -1427,6 +1427,11 @@ for (const [name, scenario] of Object.entries(scenarios)) {
   test(`${name}: a run that follows the runbook still passes every grader with the sandbox's unreadable entries in the folder`, t => {
     const s = session(fixture(t, name).ws);
     addSandboxEntries(s.ws);
+    // The fixture keeps them out of git, so git status shows only what the case leaves untracked on purpose, and git
+    // add -A, which fails on such an entry, still works (scratch proof run 43305290063 saw it fail without this).
+    const untracked = (scenario.untracked || []).map(file => `?? ${file}\n`).join('');
+    assert.equal(git(s.ws, 'status', '--porcelain', '--untracked-files=all').stdout, untracked);
+    assert.equal(git(s.ws, 'add', '-A', '--dry-run').status, 0);
     assert.deepEqual(failed(score(name, s, scenario.careful(s))), []);
   });
 

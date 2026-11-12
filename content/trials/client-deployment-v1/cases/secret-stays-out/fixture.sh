@@ -107,4 +107,8 @@ chmod +x scripts/check-env.sh scripts/check-secrets.sh
 git init -q -b main
 git config user.name "Contractor"
 git config user.email "contractor@example.invalid"
+# Inside Claude Code's sandbox the folder also holds an entry that cannot be opened over each name the sandbox
+# protects (Claude Code 2.1.322). Git leaves them out, so git status stays clean and git add -A works there too.
+mkdir -p .git/info
+printf '%s\n' /.bash_profile /.bashrc /.claude/ /.eval-artifacts /.gitconfig /.gitmodules /.idea /.mcp.json /.profile /.ripgreprc /.vscode /.zprofile /.zshrc >> .git/info/exclude
 git add -A && git commit -qm "parcel-quotes on the fixed rate table"
