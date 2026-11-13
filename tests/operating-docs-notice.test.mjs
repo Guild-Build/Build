@@ -248,7 +248,7 @@ test('the text never exceeds 1,200 characters: long names that are admitted are 
   assert.equal(r.text.length, 878);
 });
 
-test('at the bound the whole list is kept, and one character over it the last entry is counted instead', t => {
+test('at the bound the whole list is kept, and with a name one character longer the last entry is counted instead', t => {
   for (const [length, kept] of [[483, true], [484, false]]) {
     const dir = gitRepo(folder(t));
     const doc = `${'a'.repeat(200)}/${'b'.repeat(200)}/runbook-${'c'.repeat(length - 413)}.md`;
