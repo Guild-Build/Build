@@ -1,0 +1,71 @@
+name: Scratch - engaging builds proof
+# Scratch branch only, never merged. Part A of the engaging-builds plan: which always-on plugin mechanisms reach the
+# model in a hosted eval, shown through the trial's own path (the CLI's test command and claude plugin eval) on the
+# Season trial job's pins, with a scripted stand-in for the model on 127.0.0.1 that records where each mechanism's
+# text appears in the agent's requests. Part B: the candidate build's hook text in every case, and the reference
+# solutions with the candidate as the build under test. No secret, no environment, no key, no model call, nothing spent.
+on:
+  push:
+    branches: [claude/scratch-engaging-builds-proof]
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Install what the trial job installs
+        run: bash .github/scripts/install-trial-tools.sh
+      - name: Sandbox self-test, as the trial job runs it
+        run: node .github/scripts/sandbox-self-test.mjs --model claude-sonnet-5-5
+      - name: Write the probe builds
+        run: mkdir -p "$RUNNER_TEMP/probe-logs" && node scratch/engaging-builds/probes.mjs "$RUNNER_TEMP/probes" "$RUNNER_TEMP/probe-logs"
+      - name: P1 SessionStart hook, plain standard output
+        if: ${{ always() }}
+        run: node scratch/client-deployment-proof/prove.mjs --mode reference --cases preflight-then-change --build "$RUNNER_TEMP/probes/p1" --markers BGPROBE-P1 --probe-log "$RUNNER_TEMP/probe-logs/probe-p1.jsonl" --report-only --tag p1 --out "$RUNNER_TEMP/proof/p1"
+      - name: P2 SessionStart hook, additionalContext
+        if: ${{ always() }}
+        run: node scratch/client-deployment-proof/prove.mjs --mode reference --cases preflight-then-change --build "$RUNNER_TEMP/probes/p2" --markers BGPROBE-P2 --probe-log "$RUNNER_TEMP/probe-logs/probe-p2.jsonl" --report-only --tag p2 --out "$RUNNER_TEMP/proof/p2"
+      - name: P3 UserPromptSubmit hook, plain standard output
+        if: ${{ always() }}
+        run: node scratch/client-deployment-proof/prove.mjs --mode reference --cases preflight-then-change --build "$RUNNER_TEMP/probes/p3" --markers BGPROBE-P3 --probe-log "$RUNNER_TEMP/probe-logs/probe-p3.jsonl" --report-only --tag p3 --out "$RUNNER_TEMP/proof/p3"
+      - name: P3J UserPromptSubmit hook, additionalContext
+        if: ${{ always() }}
+        run: node scratch/client-deployment-proof/prove.mjs --mode reference --cases preflight-then-change --build "$RUNNER_TEMP/probes/p3j" --markers BGPROBE-P3J --probe-log "$RUNNER_TEMP/probe-logs/probe-p3j.jsonl" --report-only --tag p3j --out "$RUNNER_TEMP/proof/p3j"
+      - name: P4 Stop hook, decision block with a reason (and a systemMessage)
+        if: ${{ always() }}
+        run: node scratch/client-deployment-proof/prove.mjs --mode reference --cases preflight-then-change --build "$RUNNER_TEMP/probes/p4" --markers BGPROBE-P4-REASON,BGPROBE-P4-SYSMSG --probe-log "$RUNNER_TEMP/probe-logs/probe-p4.jsonl" --report-only --tag p4 --out "$RUNNER_TEMP/proof/p4"
+      - name: P4S Stop hook, systemMessage only
+        if: ${{ always() }}
+        run: node scratch/client-deployment-proof/prove.mjs --mode reference --cases preflight-then-change --build "$RUNNER_TEMP/probes/p4s" --markers BGPROBE-P4S-SYSMSG --probe-log "$RUNNER_TEMP/probe-logs/probe-p4s.jsonl" --report-only --tag p4s --out "$RUNNER_TEMP/proof/p4s"
+      - name: P5 Output style with force-for-plugin
+        if: ${{ always() }}
+        run: node scratch/client-deployment-proof/prove.mjs --mode reference --cases preflight-then-change --build "$RUNNER_TEMP/probes/p5" --markers BGPROBE-P5 --report-only --tag p5 --out "$RUNNER_TEMP/proof/p5"
+      - name: Part B - validate the candidate build with the pinned Claude Code
+        if: ${{ always() }}
+        run: claude plugin validate --strict bundles/runbook-first
+      - name: Part B - the text the hook gives each of the trial's eight repositories
+        if: ${{ always() }}
+        run: node scratch/engaging-builds/expected-context.mjs bundles/runbook-first/scripts/operating-docs-notice.sh "$RUNNER_TEMP/expected"
+      - name: Part B - reference solutions with the candidate as the build under test
+        if: ${{ always() }}
+        run: node scratch/client-deployment-proof/prove.mjs --mode reference --build bundles/runbook-first --markers-file "$RUNNER_TEMP/expected/markers.json" --expect-markers --tag rf --out "$RUNNER_TEMP/proof/runbook-first"
+      - name: Upload the reports, probe logs and traces
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: engaging-builds-proof
+          path: |
+            ${{ runner.temp }}/proof/*/summary.*
+            ${{ runner.temp }}/proof/*/raw.json
+            ${{ runner.temp }}/proof/*/stand-in.json
+            ${{ runner.temp }}/proof/*/tmp/claude-eval-*/out/trace.jsonl
+            ${{ runner.temp }}/probe-logs/*.jsonl
+            ${{ runner.temp }}/expected/*.json
+          if-no-files-found: warn
