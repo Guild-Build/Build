@@ -163,14 +163,16 @@ test('at most eight documents are listed besides the README, and the documents f
   const entries = Object.entries(conventional).map(([name, kind]) => `${name} (${kind})`);
   assert.equal(run(gitRepo(folder(t, files))).text, context(expectedList(entries, 20)));
   assert.match(context(expectedList(entries, 20)), /contributing guide\), and 20 more\.\n/);
-  // No document by conventional name, and a README naming 20 long ones: eight are entries, twelve are counted, and the
-  // whole list does not fit, so the entries that fit stay and the count, now of two digits, covers the rest.
-  const long = Array.from({ length: 20 }, (_, i) => `ops/runbook-${String(i).padStart(2, '0')}-${'y'.repeat(140)}.md`);
-  const dir = gitRepo(folder(t, Object.fromEntries([...long.map(ref => [ref, 'x']), ['README.md', `See ${long.join(' ')}.\n`]])));
-  const listed = long.slice(0, 8);
+  // No document by conventional name; a README naming eight documents of 483 characters, then twelve short ones. The
+  // eight are entries and the twelve are counted. Two entries take 988 characters, which leaves room for an ending of
+  // 12 characters but not for ", and 20 more" (13): the count has two digits, so only the first entry stays.
+  const long = Array.from({ length: 8 }, (_, i) => docPath(483).replace('runbook-c', `runbook-${i}`));
+  const extra = Array.from({ length: 12 }, (_, i) => `ops/runbook-extra-${String(i).padStart(2, '0')}.md`);
+  for (const ref of long) assert.equal(ref.length, 483);
+  const dir = gitRepo(folder(t, Object.fromEntries([...long, ...extra].map(ref => [ref, 'x']).concat([['README.md', `See ${[...long, ...extra].join(' ')}.\n`]]))));
   const r = run(dir);
-  assert.equal(r.text, context(expectedList([...listed.map(ref => `${ref} (runbook)`), `README.md (points to ${listed.join(', ')})`], 12)));
-  assert.match(r.text, /, and 1[0-9] more\.\n/);
+  assert.equal(r.text, context(expectedList([...long.map(ref => `${ref} (runbook)`), `README.md (points to ${long.join(', ')})`], 12)));
+  assert.equal(r.text, context(`${long[0]} (runbook), and 20 more`));
 });
 
 test('unreadable entries, a pipe and a folder under conventional names are left out, and the hook exits 0', t => {
