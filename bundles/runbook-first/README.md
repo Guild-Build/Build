@@ -17,18 +17,20 @@ when it is not a git repository):
   one of the documents above, or another existing `.md` file whose name starts with `runbook`, `contributing`,
   `agents`, `claude` or `copilot-instructions`; such a file is listed too.
 
-A name counts only when it is a regular file the session can read. At most eight documents are listed.
+A name counts only when it is a regular file the session can read. At most eight documents are listed, besides the
+README.
 
 ## When it stays silent
 
-When none of those documents exists, it adds nothing. It also adds nothing if anything goes wrong: it exits 0 in every
-case, so it never stops a session, and its hook entry gives it a five-second timeout.
+When none of those documents exists, it adds nothing. It exits 0 in every case, so it never stops a session: a folder
+it cannot open leaves it silent, and a file it cannot read is left out. Its hook entry gives it a five-second timeout.
 
 ## What it costs
 
-No tool call and no model call. It reads file names and the start of the README, writes nothing and uses no network.
-The text it adds is 200 characters plus the list of names, when a session starts (its matcher is
-`startup|clear|compact`, the session start sources Claude Code names). For example, 264 characters:
+No tool call and no model call. It runs `git rev-parse` to find the top folder, checks the names above, reads the start
+of the README, writes nothing and uses no network.
+The text it adds is 200 characters plus the list of names, when a session starts with a source its matcher names
+(`startup|clear|compact`). For example, 264 characters:
 
 ```
 Operating documents in this repository: docs/RUNBOOK.md (runbook), README.md (points to docs/RUNBOOK.md).
@@ -39,6 +41,6 @@ Run the checks they name, and say in your reply which of these documents you rea
 ## Module
 
 - `operating-docs-notice` (SessionStart hook): `scripts/operating-docs-notice.sh`, Bash 3.2 or later with `head`,
-  `grep` and `tr`; it returns the text as `additionalContext`.
+  `grep` and `tr`, and git when it is installed; it returns the text as `additionalContext`.
 
 Licensed under the Apache License 2.0.
