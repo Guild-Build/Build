@@ -1,0 +1,16 @@
+{
+  "name": "runbook-first",
+  "version": "0.1.0",
+  "description": "At the start of a session, tells the agent which of the repository's own operating documents exist and to read the ones that govern the change before changing anything.",
+  "author": {
+    "name": "GuildBuild",
+    "url": "https://buildguild.gg"
+  },
+  "repository": "https://github.com/Guild-Build/Build",
+  "license": "Apache-2.0",
+  "keywords": [
+    "delivery",
+    "runbook",
+    "hooks"
+  ]
+}
