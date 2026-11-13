@@ -17,8 +17,9 @@ when it is not a git repository):
   one of the documents above, or another existing `.md` file whose name starts with `runbook`, `contributing`,
   `agents`, `claude` or `copilot-instructions`; such a file is listed too.
 
-A name counts only when it is a regular file the session can read. At most eight documents are listed, besides the
-README.
+A name counts only when it is a regular file the session can read, is not a symbolic link, and has no symbolic link
+among the folders on its path below the top folder; a link is skipped even when it points inside the repository. At
+most eight documents are listed, besides the README.
 
 ## When it stays silent
 
@@ -30,7 +31,8 @@ it cannot open leaves it silent, and a file it cannot read is left out. Its hook
 No tool call and no model call. It runs `git rev-parse` to find the top folder, checks the names above, reads the start
 of the README, writes nothing and uses no network.
 The text it adds is 200 characters plus the list of names, when a session starts with a source its matcher names
-(`startup|clear|compact`). For example, 264 characters:
+(`startup|clear|compact`). It never exceeds 1,200 characters: when the whole list would be longer, the list keeps the
+documents that fit, in order and each name whole, and ends with how many more there are. For example, 264 characters:
 
 ```
 Operating documents in this repository: docs/RUNBOOK.md (runbook), README.md (points to docs/RUNBOOK.md).

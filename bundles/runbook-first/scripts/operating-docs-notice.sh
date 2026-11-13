@@ -3,9 +3,10 @@
 # conventional names (agent instructions, a runbook, a contributing guide, and any of these a README points to) and
 # adds a few lines to the agent's context: which documents it found, to read the ones that govern the requested change
 # before changing anything, to run the checks they name, and to say in its reply which it read. It adds nothing when it
-# finds none. It reads file names and the first 64 KB of the README only, writes nothing, makes no network or model
-# call, and exits 0 whatever happens, so it never fails a session. Bash 3.2 or later, with head, grep and tr; git is
-# used when present to find the repository's top folder.
+# finds none. A document or the README counts only when it is a regular file that is not a symbolic link and no folder
+# on its path below the top folder is one. The text never exceeds 1,200 characters. It reads file names and the first
+# 64 KB of the README only, writes nothing, makes no network or model call, and exits 0 whatever happens, so it never
+# fails a session. Bash 3.2 or later, with head, grep and tr; git is used when present to find the top folder.
 trap 'exit 0' EXIT
 
 dir="${CLAUDE_PROJECT_DIR:-$PWD}"
@@ -25,14 +26,29 @@ CONTRIBUTING.md|contributing guide
 docs/CONTRIBUTING.md|contributing guide
 .github/CONTRIBUTING.md|contributing guide'
 
+# True when the path below the root names a readable regular file that is not a symbolic link, and no folder on the
+# way to it below the root is one: a link is skipped even when it points inside the repository. Only file tests are
+# used, so nothing is opened.
+plain_file() {
+  local rest="$1" path="$root" part
+  case "$rest" in ''|/*|*/|*//*|*..*) return 1 ;; esac
+  while :; do
+    part="${rest%%/*}"
+    path="$path/$part"
+    [ -L "$path" ] && return 1
+    [ "$part" = "$rest" ] && break
+    rest="${rest#*/}"
+  done
+  [ -f "$path" ] && [ -r "$path" ]
+}
+
 paths=()
 kinds=()
-# Adds a document once: a readable regular file under the root that is not the same file as one already listed (on a
-# case-insensitive disk RUNBOOK.md and runbook.md are one file). Anything else, such as a device, a pipe or a folder,
-# is left out without being opened.
+# Adds a document once: a plain file (above) that is not the same file as one already listed (on a case-insensitive
+# disk RUNBOOK.md and runbook.md are one file). Anything else, such as a link, a device, a pipe or a folder, is left out.
 add_doc() {
   local q
-  [ -f "$root/$1" ] && [ -r "$root/$1" ] || return 1
+  plain_file "$1" || return 1
   for q in "${paths[@]}"; do [ "$root/$q" -ef "$root/$1" ] && return 0; done
   [ "${#paths[@]}" -lt 8 ] || return 1
   paths+=("$1")
@@ -45,7 +61,7 @@ EOF
 # The README counts when it points to an operating document: by its path, or by the file name of one found above.
 readme=""
 for r in README.md README readme.md Readme.md README.markdown; do
-  if [ -f "$root/$r" ] && [ -r "$root/$r" ]; then readme="$r"; break; fi
+  if plain_file "$r"; then readme="$r"; break; fi
 done
 pointed=""
 if [ -n "$readme" ]; then
@@ -54,7 +70,7 @@ if [ -n "$readme" ]; then
     ref="${ref#./}"
     case "$ref" in ''|/*|*..*) continue ;; esac
     target=""
-    if [ -f "$root/$ref" ] && [ -r "$root/$ref" ]; then
+    if plain_file "$ref"; then
       case "$(printf '%s' "$ref" | tr 'A-Z' 'a-z')" in
         *runbook*) kind='runbook' ;;
         *contributing*) kind='contributing guide' ;;
@@ -73,13 +89,27 @@ EOF
 fi
 
 [ "${#paths[@]}" -gt 0 ] || exit 0
-list=""
+items=()
 i=0
 while [ "$i" -lt "${#paths[@]}" ]; do
-  list="${list:+$list, }${paths[$i]} (${kinds[$i]})"
+  items+=("${paths[$i]} (${kinds[$i]})")
   i=$((i + 1))
 done
-[ -n "$pointed" ] && list="$list, $readme (points to $pointed)"
+[ -n "$pointed" ] && items+=("$readme (points to $pointed)")
+# The fixed sentences take 200 characters, so the list may take 1,000 and the text stays within 1,200. When the whole
+# list does not fit, the items that fit are kept in order, each whole, and the list ends with how many more there are;
+# ", and 9 more" (12 characters, at most nine items) is kept free for that ending.
+budget=1000
+list=""
+for item in "${items[@]}"; do list="${list:+$list, }$item"; done
+if [ "${#list}" -gt "$budget" ]; then
+  list=""
+  more=0
+  for item in "${items[@]}"; do
+    if [ $(( ${#list} + ${#item} + 2 + 12 )) -le "$budget" ]; then list="${list:+$list, }$item"; else more=$((more + 1)); fi
+  done
+  if [ -n "$list" ]; then list="$list, and $more more"; else list="$more, with names too long to list"; fi
+fi
 # Every listed name is made of letters, digits and . _ / - only, so the text needs no escaping inside JSON.
 text="Operating documents in this repository: $list.\\nBefore you change anything, read the ones that govern the requested change.\\nRun the checks they name, and say in your reply which of these documents you read."
 printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' "$text"
