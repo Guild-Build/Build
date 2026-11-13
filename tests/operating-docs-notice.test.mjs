@@ -299,9 +299,31 @@ test('with long admitted names the text stays within 1,200 characters, and names
 
 // The bound, swept. For a document that comes first and for one that comes after another, at every path length from
 // well below the point where the whole list stops fitting to beyond the point where the document itself stops fitting:
-// the text is what the rule gives, the document is listed exactly when the shortest text listing it fits in 1,200
-// characters, and no name is cut. The review's 977- and 978-character first documents are among these cases.
-test('the bound, swept: a document is listed exactly when a text listing it fits in 1,200 characters, and none is cut', t => {
+// the text is what the rule gives, the count in it is the number of entries it leaves out, the document is listed
+// exactly when the text listing it after the entries before it is at most 1,200 characters, and no name is cut. The
+// second review's reproduction is one more case, run as that review ran it: in a folder that is not a git repository,
+// with CLAUDE_PROJECT_DIR=., and a README that points to a runbook of 976 to 979 characters under four folders of 200.
+test('the bound, swept: a document is listed exactly when the text listing it is at most 1,200 characters, the count is right, and no name is cut', t => {
+  // Runs the hook with a README that points to doc, after the documents in before; returns whether doc is listed.
+  const check = (dir, before, doc, where, projectDir = dir) => {
+    mkdirSync(join(dir, dirname(doc)), { recursive: true });
+    writeFileSync(join(dir, doc), 'x');
+    writeFileSync(join(dir, 'README.md'), `${doc}\n`);
+    const entries = [...before, `${doc} (runbook)`, `README.md (points to ${doc})`];
+    const r = run(dir, { projectDir });
+    assert.equal(r.status, 0, where);
+    assert.equal(r.text, context(expectedList(entries)), where);
+    const listed = r.text.includes(`${doc} (runbook)`);
+    const whole = FIXED + entries.join(', ').length;
+    const listing = FIXED + [...before, `${doc} (runbook)`].join(', ').length + ', and 1 more'.length;
+    assert.equal(listed, whole <= LIMIT || listing <= LIMIT, where);
+    // The count, read from the text, is the number of entries the text leaves out.
+    const count = /, and (\d+) more\.\n/.exec(r.text) || /: (\d+), with names too long to list\.\n/.exec(r.text);
+    assert.equal(count ? Number(count[1]) : 0, entries.filter(entry => !r.text.includes(entry)).length, `${where}: the count`);
+    // The path is made of runs of one letter; once every whole copy of it is taken out, no such run may be left.
+    assert.doesNotMatch(r.text.split(doc).join(''), /([a-z])\1{19}/, `${where}: a name is cut`);
+    return listed;
+  };
   const dir = mkdtempSync('/tmp/dn-'); // a short top folder, so that the longest paths stay within the system's path limit
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   gitRepo(dir);
@@ -309,23 +331,17 @@ test('the bound, swept: a document is listed exactly when a text listing it fits
     if (before.length) writeFileSync(join(dir, 'AGENTS.md'), 'x\n');
     let listedAt = 0;
     for (let length = 400; length <= 990; length++) {
-      const doc = docPath(length);
-      mkdirSync(join(dir, dirname(doc)), { recursive: true });
-      writeFileSync(join(dir, doc), 'x');
-      writeFileSync(join(dir, 'README.md'), `${doc}\n`);
-      const entries = [...before, `${doc} (runbook)`, `README.md (points to ${doc})`];
-      const where = `${before.length ? 'later' : 'first'} document, ${length} characters`;
-      const text = run(dir).text;
-      assert.equal(text, context(expectedList(entries)), where);
-      const listed = text.includes(`${doc} (runbook)`);
-      const wholeFits = FIXED + entries.join(', ').length <= LIMIT;
-      const shortest = FIXED + [...before, `${doc} (runbook)`].join(', ').length + ', and 1 more'.length;
-      assert.equal(listed, wholeFits || shortest <= LIMIT, where);
-      // The path is made of runs of one letter; once every whole copy of it is taken out, no such run may be left.
-      assert.doesNotMatch(text.split(doc).join(''), /([a-z])\1{19}/, `${where}: a name is cut`);
-      if (listed) listedAt = length;
+      if (check(dir, before, docPath(length), `${before.length ? 'later' : 'first'} document, ${length} characters`)) listedAt = length;
     }
     assert.equal(listedAt, before.length ? 946 : 978); // the last length listed: 1,200 characters exactly
+  }
+  const review = mkdtempSync('/tmp/dn-');
+  t.after(() => rmSync(review, { recursive: true, force: true }));
+  assert.equal(git(review, 'rev-parse', '--show-toplevel').status, 128, 'the review\'s folder must not be inside a git repository');
+  for (const length of [976, 977, 978, 979]) {
+    const doc = ['a', 'b', 'c', 'd'].map(c => c.repeat(200)).join('/') + '/runbook-' + 'x'.repeat(length - 815) + '.md';
+    assert.equal(doc.length, length);
+    assert.equal(check(review, [], doc, `the review's reproduction, ${length} characters`, '.'), length <= 978);
   }
 });
 
