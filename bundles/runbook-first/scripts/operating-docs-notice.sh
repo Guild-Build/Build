@@ -4,9 +4,9 @@
 # adds a few lines to the agent's context: which documents it found, to read the ones that govern the requested change
 # before changing anything, to run the checks they name, and to say in its reply which it read. It adds nothing when it
 # finds none. A document or the README counts only when it is a regular file that is not a symbolic link and no folder
-# on its path below the top folder is one. The text never exceeds 1,200 characters. It reads file names and the first
-# 64 KB of the README only, writes nothing, makes no network or model call, and exits 0 whatever happens, so it never
-# fails a session. Bash 3.2 or later, with head, grep and tr; git is used when present to find the top folder.
+# on its path below the top folder is one. It lists at most eight documents and counts any more. The text never exceeds
+# 1,200 characters. It reads file names and the first 64 KB of the README only, writes nothing, makes no network or
+# model call, and exits 0 whatever happens, so it never fails a session. Bash 3.2 or later, with head, grep and tr; git is used when present to find the top folder.
 trap 'exit 0' EXIT
 
 dir="${CLAUDE_PROJECT_DIR:-$PWD}"
@@ -44,13 +44,16 @@ plain_file() {
 
 paths=()
 kinds=()
-# Adds a document once: a plain file (above) that is not the same file as one already listed (on a case-insensitive
-# disk RUNBOOK.md and runbook.md are one file). Anything else, such as a link, a device, a pipe or a folder, is left out.
+extras=()
+# Adds a document once: a plain file (above) that is not the same file as one already found (on a case-insensitive
+# disk RUNBOOK.md and runbook.md are one file). The first eight are listed and any more only counted. Anything else,
+# such as a link, a device, a pipe or a folder, is left out. Succeeds when the document is listed.
 add_doc() {
   local q
   plain_file "$1" || return 1
   for q in "${paths[@]}"; do [ "$root/$q" -ef "$root/$1" ] && return 0; done
-  [ "${#paths[@]}" -lt 8 ] || return 1
+  for q in "${extras[@]}"; do [ "$root/$q" -ef "$root/$1" ] && return 1; done
+  if [ "${#paths[@]}" -ge 8 ]; then extras+=("$1"); return 1; fi
   paths+=("$1")
   kinds+=("$2")
 }
@@ -96,19 +99,27 @@ while [ "$i" -lt "${#paths[@]}" ]; do
   i=$((i + 1))
 done
 [ -n "$pointed" ] && items+=("$readme (points to $pointed)")
-# The fixed sentences take 200 characters, so the list may take 1,000 and the text stays within 1,200. When the whole
-# list does not fit, the items that fit are kept in order, each whole, and the list ends with how many more there are;
-# ", and 9 more" (12 characters, at most nine items) is kept free for that ending.
+extra=${#extras[@]}
+# The fixed sentences take 200 characters, so the list may take 1,000 and the text stays within 1,200. Documents found
+# beyond the eight listed are counted in an ending ", and N more". When the whole list does not fit, the entries that
+# fit are kept in order, each whole: an entry stays when it fits after the entries kept before it (with ", " only when
+# one precedes it) together with that ending, whose N counts every entry and document left out. N is known only at the
+# end, so the ending (11 characters and N's digits) is sized for a one-digit N, and again for two digits if N reaches 10.
 budget=1000
 list=""
 for item in "${items[@]}"; do list="${list:+$list, }$item"; done
+[ "$extra" -gt 0 ] && list="$list, and $extra more"
 if [ "${#list}" -gt "$budget" ]; then
-  list=""
-  more=0
-  for item in "${items[@]}"; do
-    if [ $(( ${#list} + ${#item} + 2 + 12 )) -le "$budget" ]; then list="${list:+$list, }$item"; else more=$((more + 1)); fi
+  for digits in 1 2; do
+    kept=""
+    more=$extra
+    for item in "${items[@]}"; do
+      next="${kept:+$kept, }$item"
+      if [ $(( ${#next} + 11 + digits )) -le "$budget" ]; then kept="$next"; else more=$((more + 1)); fi
+    done
+    [ "${#more}" -le "$digits" ] && break
   done
-  if [ -n "$list" ]; then list="$list, and $more more"; else list="$more, with names too long to list"; fi
+  if [ -n "$kept" ]; then list="$kept, and $more more"; else list="$more, with names too long to list"; fi
 fi
 # Every listed name is made of letters, digits and . _ / - only, so the text needs no escaping inside JSON.
 text="Operating documents in this repository: $list.\\nBefore you change anything, read the ones that govern the requested change.\\nRun the checks they name, and say in your reply which of these documents you read."

@@ -18,6 +18,31 @@ const READ = 'Before you change anything, read the ones that govern the requeste
 const REPLY = 'Run the checks they name, and say in your reply which of these documents you read.';
 const context = list => `Operating documents in this repository: ${list}.\n${READ}\n${REPLY}`;
 const LIMIT = 1200;
+const FIXED = context('').length; // the sentences around the list: 200 characters
+// The list the hook should give, from its rule: every entry when the whole list fits, ending with ", and N more" for
+// documents found beyond the eight listed; otherwise each entry, in order, that fits after the entries kept before it
+// together with that ending, whose N counts every entry and document left out. The ending's length depends only on
+// how many digits N has.
+function expectedList(entries, beyondEight = 0) {
+  const ending = n => `, and ${n} more`;
+  const whole = entries.join(', ') + (beyondEight ? ending(beyondEight) : '');
+  if (FIXED + whole.length <= LIMIT) return whole;
+  for (const digits of [1, 2]) {
+    const kept = [];
+    for (const entry of entries) if (FIXED + [...kept, entry].join(', ').length + ending('9'.repeat(digits)).length <= LIMIT) kept.push(entry);
+    const more = entries.length - kept.length + beyondEight;
+    if (String(more).length <= digits) return kept.length ? kept.join(', ') + ending(more) : `${more}, with names too long to list`;
+  }
+  throw new Error('more than 99 left out');
+}
+// A path of exactly `length` characters that a README can point to: folders of 150 characters, then a file name that
+// starts with "runbook".
+function docPath(length) {
+  const folders = [];
+  let rest = length;
+  while (rest > 211) { folders.push(String.fromCharCode(97 + folders.length).repeat(150)); rest -= 151; }
+  return [...folders, `runbook-${'c'.repeat(rest - 11)}.md`].join('/');
+}
 const asRoot = process.getuid?.() === 0;
 // The bash the hook runs under, found before any recording folder goes first on PATH.
 const BASH = (process.env.PATH || '').split(':').map(d => join(d, 'bash')).find(p => { try { accessSync(p, constants.X_OK); return true; } catch { return false; } });
@@ -125,15 +150,27 @@ test('several operating documents are named in a fixed order, with what a README
     + 'README.md (points to CONTRIBUTING.md, docs/RUNBOOK.md, ops/runbook-deploy.md)'));
 });
 
-test('at most eight documents are listed besides the README', t => {
-  const files = { 'AGENTS.md': 'a', 'CLAUDE.md': 'c', '.github/copilot-instructions.md': 'g', 'RUNBOOK.md': 'r', 'docs/RUNBOOK.md': 'd', 'CONTRIBUTING.md': 'c',
-    'docs/CONTRIBUTING.md': 'c', '.github/CONTRIBUTING.md': 'c' };
-  let pointers = '';
-  for (let i = 0; i < 30; i++) { files[`ops/runbook-${String(i).padStart(2, '0')}-${'x'.repeat(60)}.md`] = 'x'; pointers += ` ops/runbook-${String(i).padStart(2, '0')}-${'x'.repeat(60)}.md`; }
-  files['README.md'] = `See${pointers}.\n`;
-  const r = run(gitRepo(folder(t, files)));
-  const listed = r.text.split('\n')[0].replace('Operating documents in this repository: ', '').split(/, (?![^()]*\))/);
-  assert.equal(listed.filter(item => !item.startsWith('README.md')).length, 8);
+test('at most eight documents are listed besides the README, and the documents found beyond them are counted', t => {
+  // Eight documents by conventional name, then a README naming 30 more: the hook looks at the first 20 names, which all
+  // exist, so 20 more are counted (a two-digit count, with the whole list fitting).
+  const conventional = { 'AGENTS.md': 'agent instructions', 'CLAUDE.md': 'agent instructions', '.github/copilot-instructions.md': 'agent instructions',
+    'RUNBOOK.md': 'runbook', 'docs/RUNBOOK.md': 'runbook', 'CONTRIBUTING.md': 'contributing guide', 'docs/CONTRIBUTING.md': 'contributing guide',
+    '.github/CONTRIBUTING.md': 'contributing guide' };
+  const files = Object.fromEntries(Object.keys(conventional).map(name => [name, 'x']));
+  const refs = Array.from({ length: 30 }, (_, i) => `ops/runbook-${String(i).padStart(2, '0')}-${'x'.repeat(60)}.md`);
+  for (const ref of refs) files[ref] = 'x';
+  files['README.md'] = `See ${refs.join(' ')}.\n`;
+  const entries = Object.entries(conventional).map(([name, kind]) => `${name} (${kind})`);
+  assert.equal(run(gitRepo(folder(t, files))).text, context(expectedList(entries, 20)));
+  assert.match(context(expectedList(entries, 20)), /contributing guide\), and 20 more\.\n/);
+  // No document by conventional name, and a README naming 20 long ones: eight are entries, twelve are counted, and the
+  // whole list does not fit, so the entries that fit stay and the count, now of two digits, covers the rest.
+  const long = Array.from({ length: 20 }, (_, i) => `ops/runbook-${String(i).padStart(2, '0')}-${'y'.repeat(140)}.md`);
+  const dir = gitRepo(folder(t, Object.fromEntries([...long.map(ref => [ref, 'x']), ['README.md', `See ${long.join(' ')}.\n`]])));
+  const listed = long.slice(0, 8);
+  const r = run(dir);
+  assert.equal(r.text, context(expectedList([...listed.map(ref => `${ref} (runbook)`), `README.md (points to ${listed.join(', ')})`], 12)));
+  assert.match(r.text, /, and 1[0-9] more\.\n/);
 });
 
 test('unreadable entries, a pipe and a folder under conventional names are left out, and the hook exits 0', t => {
@@ -152,7 +189,7 @@ test('unreadable entries, a pipe and a folder under conventional names are left 
   if (process.getuid?.() !== 0) assert.equal(run(dir).text, context('docs/RUNBOOK.md (runbook)'));
 });
 
-test('a very large README is read only to its first 64 KB, and no command reads a 2 GB runbook', t => {
+test('a very large README: no command reads past its first 64 KB, a pointer after it is not followed, and no command reads a 2 GB runbook', t => {
   const dir = gitRepo(folder(t, { 'CONTRIBUTING.md': 'How to contribute.\n', 'ops/runbook-late.md': 'x', 'ops/runbook-early.md': 'x' }));
   writeFileSync(join(dir, 'README.md'), `See ops/runbook-early.md.\n${'filler line\n'.repeat(400_000)}See ops/runbook-late.md and CONTRIBUTING.md.\n`);
   mkdirSync(join(dir, 'docs'));
@@ -175,7 +212,7 @@ test('no command reads any file but the README, and the README only to its first
 // What the shell itself would open is seen through the entry: an open of a pipe blocks until the timeout, and an open
 // of a file or folder nobody may read fails with an error on standard error. Each kind is put under every conventional
 // name and under a name the README points to.
-test('nothing under a conventional or pointed name is opened when it is a pipe, an unreadable file or an unreadable folder', t => {
+test('under every conventional and pointed name, a pipe is never opened, and an unreadable file or folder causes no error and no command', t => {
   const names = ['AGENTS.md', 'CLAUDE.md', '.github/copilot-instructions.md', 'RUNBOOK.md', 'runbook.md', 'docs/RUNBOOK.md', 'docs/runbook.md',
     'CONTRIBUTING.md', 'docs/CONTRIBUTING.md', '.github/CONTRIBUTING.md', 'ops/runbook-x.md'];
   const kinds = { pipe: path => assert.equal(spawnSync('mkfifo', [path]).status, 0),
@@ -195,48 +232,58 @@ test('nothing under a conventional or pointed name is opened when it is a pipe, 
 });
 
 // A document or the README counts only when it is a regular file that is not a symbolic link, under folders that are
-// not symbolic links below the top folder.
-test('a symbolic link is never listed or read: to a document, a folder or a README outside, a file inside, or nothing', t => {
+// not symbolic links below the top folder. Every case records the commands the hook runs, and runs twice: with a
+// regular file behind the link, to see whether it is listed or read by a command, and with a pipe behind it, whose
+// opening would block until the timeout.
+test('a symbolic link is never listed, a pipe behind one is never opened, and no command reads through one', t => {
+  const make = (base, target) => (path, content) => (target === 'pipe'
+    ? assert.equal(spawnSync('mkfifo', [path]).status, 0)
+    : writeFileSync(path, content));
   for (const projectDir of ['set', null]) {
-    const make = () => {
-      const base = folder(t);
-      mkdirSync(join(base, 'repo'));
-      mkdirSync(join(base, 'outside/docs'), { recursive: true });
-      gitRepo(join(base, 'repo'));
-      return [join(base, 'repo'), join(base, 'outside')];
-    };
-    const runIn = (dir, opts = {}) => run(dir, { projectDir: projectDir === null ? null : dir, ...opts });
-    let [dir, outside] = make();
-    writeFileSync(join(outside, 'instructions.md'), 'external instructions\n');
-    symlinkSync('../outside/instructions.md', join(dir, 'AGENTS.md'));
-    assert.equal(runIn(dir).text, null, 'a linked document');
-    [dir, outside] = make();
-    writeFileSync(join(outside, 'docs/RUNBOOK.md'), 'external runbook\n');
-    symlinkSync('../outside/docs', join(dir, 'docs'));
-    assert.equal(runIn(dir).text, null, 'a linked parent folder');
-    [dir, outside] = make();
-    mkdirSync(join(dir, 'ops'));
-    writeFileSync(join(dir, 'ops/runbook-x.md'), 'inside\n');
-    writeFileSync(join(outside, 'README.md'), 'See ops/runbook-x.md.\n');
-    symlinkSync('../outside/README.md', join(dir, 'README.md'));
-    const linkedReadme = runIn(dir, { record: true });
-    assert.equal(linkedReadme.text, null, 'a linked README');
-    assert.equal(onlyReadsReadme(linkedReadme.calls, ''), 0, 'a linked README is not read');
-    [dir] = make();
-    mkdirSync(join(dir, 'docs'));
-    writeFileSync(join(dir, 'docs/RUNBOOK.md'), 'inside\n');
-    symlinkSync('docs/RUNBOOK.md', join(dir, 'CONTRIBUTING.md'));
-    assert.equal(runIn(dir).text, context('docs/RUNBOOK.md (runbook)'), 'a link to a file inside: only the target, by its own name');
-    [dir] = make();
-    symlinkSync('missing.md', join(dir, 'RUNBOOK.md'));
-    assert.equal(runIn(dir).text, null, 'a broken link');
+    for (const target of ['file', 'pipe']) {
+      const setUp = () => {
+        const base = folder(t);
+        mkdirSync(join(base, 'repo'));
+        mkdirSync(join(base, 'outside/docs'), { recursive: true });
+        gitRepo(join(base, 'repo'));
+        return [join(base, 'repo'), join(base, 'outside'), make(base, target)];
+      };
+      const check = (dir, expected, label) => {
+        const r = run(dir, { projectDir: projectDir === null ? null : dir, record: true, timeout: 5000 });
+        assert.deepEqual([r.status, r.signal, r.text, r.stderr], [0, null, expected, ''], `${label} (${target} behind the link)`);
+        assert.equal(onlyReadsReadme(r.calls, ''), 0, `${label}: no command reads anything`);
+      };
+      let [dir, outside, put] = setUp();
+      put(join(outside, 'instructions.md'), 'external instructions\n');
+      symlinkSync('../outside/instructions.md', join(dir, 'AGENTS.md'));
+      check(dir, null, 'a linked document');
+      [dir, outside, put] = setUp();
+      put(join(outside, 'docs/RUNBOOK.md'), 'external runbook\n');
+      symlinkSync('../outside/docs', join(dir, 'docs'));
+      check(dir, null, 'a linked parent folder');
+      [dir, outside, put] = setUp();
+      mkdirSync(join(dir, 'ops'));
+      writeFileSync(join(dir, 'ops/runbook-x.md'), 'inside\n');
+      put(join(outside, 'README.md'), 'See ops/runbook-x.md.\n');
+      symlinkSync('../outside/README.md', join(dir, 'README.md'));
+      check(dir, null, 'a linked README');
+      [dir, outside, put] = setUp();
+      mkdirSync(join(dir, 'docs'));
+      put(join(dir, 'docs/RUNBOOK.md'), 'inside\n');
+      symlinkSync('docs/RUNBOOK.md', join(dir, 'CONTRIBUTING.md'));
+      // A regular target is listed under its own, conventional name; a pipe is listed under none.
+      check(dir, target === 'file' ? context('docs/RUNBOOK.md (runbook)') : null, 'a link to a file inside');
+      [dir] = setUp();
+      symlinkSync('missing.md', join(dir, 'RUNBOOK.md'));
+      check(dir, null, 'a broken link');
+    }
   }
 });
 
 // The text stays within 1,200 characters: when the list does not fit, the documents that fit are kept in order, each
 // whole, and the list ends with how many more there are. The long names here are admitted: they exist and the README
 // points to them (the review's reproduction, 10,828 characters before the bound).
-test('the text never exceeds 1,200 characters: long names that are admitted are left out whole and counted', t => {
+test('with long admitted names the text stays within 1,200 characters, and names that do not fit are left out whole and counted', t => {
   const dir = gitRepo(folder(t));
   const parent = Array.from({ length: 4 }, (_, i) => i + 'x'.repeat(159)).join('/');
   mkdirSync(join(dir, parent), { recursive: true });
@@ -248,22 +295,35 @@ test('the text never exceeds 1,200 characters: long names that are admitted are 
   assert.equal(r.text.length, 878);
 });
 
-test('at the bound the whole list is kept, and with a name one character longer the last entry is counted instead', t => {
-  for (const [length, kept] of [[483, true], [484, false]]) {
-    const dir = gitRepo(folder(t));
-    const doc = `${'a'.repeat(200)}/${'b'.repeat(200)}/runbook-${'c'.repeat(length - 413)}.md`;
-    assert.equal(doc.length, length);
-    mkdirSync(join(dir, dirname(doc)), { recursive: true });
-    writeFileSync(join(dir, doc), 'x');
-    writeFileSync(join(dir, 'README.md'), `${doc}\n`);
-    const r = run(dir);
-    if (kept) {
-      assert.equal(r.text, context(`${doc} (runbook), README.md (points to ${doc})`));
-      assert.equal(r.text.length, LIMIT);
-    } else {
-      assert.equal(r.text, context(`${doc} (runbook), and 1 more`));
-      assert.equal(r.text.length, 706);
+// The bound, swept. For a document that comes first and for one that comes after another, at every path length from
+// well below the point where the whole list stops fitting to beyond the point where the document itself stops fitting:
+// the text is what the rule gives, the document is listed exactly when the shortest text listing it fits in 1,200
+// characters, and no name is cut. The review's 977- and 978-character first documents are among these cases.
+test('the bound, swept: a document is listed exactly when a text listing it fits in 1,200 characters, and none is cut', t => {
+  const dir = mkdtempSync('/tmp/dn-'); // a short top folder, so that the longest paths stay within the system's path limit
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  gitRepo(dir);
+  for (const before of [[], ['AGENTS.md (agent instructions)']]) {
+    if (before.length) writeFileSync(join(dir, 'AGENTS.md'), 'x\n');
+    let listedAt = 0;
+    for (let length = 400; length <= 990; length++) {
+      const doc = docPath(length);
+      mkdirSync(join(dir, dirname(doc)), { recursive: true });
+      writeFileSync(join(dir, doc), 'x');
+      writeFileSync(join(dir, 'README.md'), `${doc}\n`);
+      const entries = [...before, `${doc} (runbook)`, `README.md (points to ${doc})`];
+      const where = `${before.length ? 'later' : 'first'} document, ${length} characters`;
+      const text = run(dir).text;
+      assert.equal(text, context(expectedList(entries)), where);
+      const listed = text.includes(`${doc} (runbook)`);
+      const wholeFits = FIXED + entries.join(', ').length <= LIMIT;
+      const shortest = FIXED + [...before, `${doc} (runbook)`].join(', ').length + ', and 1 more'.length;
+      assert.equal(listed, wholeFits || shortest <= LIMIT, where);
+      // The path is made of runs of one letter; once every whole copy of it is taken out, no such run may be left.
+      assert.doesNotMatch(text.split(doc).join(''), /([a-z])\1{19}/, `${where}: a name is cut`);
+      if (listed) listedAt = length;
     }
+    assert.equal(listedAt, before.length ? 946 : 978); // the last length listed: 1,200 characters exactly
   }
 });
 
@@ -281,7 +341,7 @@ test('a session in a subfolder of a repository gets the documents at its top fol
   assert.equal(run(dir, { cwd: sub, projectDir: null }).text, context('docs/RUNBOOK.md (runbook)'));
 });
 
-test('it never fails a session: a missing or unreadable folder gives no text and exit 0', t => {
+test('a missing or unreadable folder gives no text and exit 0', t => {
   const dir = folder(t, { 'docs/RUNBOOK.md': 'x' });
   assert.deepEqual([run(dir, { projectDir: join(dir, 'gone') }).status, run(dir, { projectDir: join(dir, 'gone') }).text], [0, null]);
   if (process.getuid?.() !== 0) {

@@ -13,13 +13,15 @@ when it is not a git repository):
 - agent instructions: `AGENTS.md`, `CLAUDE.md`, `.github/copilot-instructions.md`
 - a runbook: `RUNBOOK.md`, `runbook.md`, `docs/RUNBOOK.md`, `docs/runbook.md`
 - a contributing guide: `CONTRIBUTING.md`, `docs/CONTRIBUTING.md`, `.github/CONTRIBUTING.md`
-- the README (`README.md`, `README`, `readme.md`, `Readme.md` or `README.markdown`), only when its first 64 KB name
-  one of the documents above, or another existing `.md` file whose name starts with `runbook`, `contributing`,
-  `agents`, `claude` or `copilot-instructions`; such a file is listed too.
+- the README (`README.md`, `README`, `readme.md`, `Readme.md` or `README.markdown`), only when, among the first 20
+  `.md` names in its first 64 KB whose file name starts with `runbook`, `contributing`, `agents`, `claude` or
+  `copilot-instructions`, one names a document above, by its path or file name, or another existing file; such a file
+  is listed too.
 
 A name counts only when it is a regular file the session can read, is not a symbolic link, and has no symbolic link
 among the folders on its path below the top folder; a link is skipped even when it points inside the repository. At
-most eight documents are listed, besides the README.
+most eight documents are listed, besides the README; any more that are found are counted in the list's ending, "and N
+more".
 
 ## When it stays silent
 
