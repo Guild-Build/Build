@@ -1,0 +1,24 @@
+{
+  "schema": "buildguild.build.v1",
+  "slug": "runbook-first",
+  "version": "0.1.0",
+  "branches": [
+    "claude-code"
+  ],
+  "category": "delivery",
+  "modules": [
+    "hook/operating-docs-notice"
+  ],
+  "agentProfiles": [
+    {
+      "role": "builder",
+      "model": "claude-sonnet-5-5",
+      "effort": "default",
+      "tools": "Read, Glob, Grep, Edit, Write, Bash",
+      "limits": "Adds context at the start of a session only; it blocks no action and changes no permission."
+    }
+  ],
+  "name": "Runbook First",
+  "summary": "One SessionStart hook: when a session starts in a repository, the agent is told which of the repository's operating documents exist and to read the ones that govern the change, run the checks they name and say which it read.",
+  "license": "Apache-2.0"
+}
