@@ -1,0 +1,23 @@
+{
+  "slug": "operating-docs-notice",
+  "type": "hook",
+  "name": "Operating Docs Notice",
+  "summary": "A SessionStart hook that tells the agent which of the repository's operating documents exist (agent instructions, a runbook, a contributing guide, a README that points to one) and to read the ones that govern the change. It adds nothing when it finds none.",
+  "status": "available",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "tags": [
+    "hooks",
+    "documentation",
+    "context"
+  ],
+  "category": "delivery",
+  "source": {
+    "kind": "site",
+    "url": "https://buildguild.gg/builds/runbook-first/"
+  },
+  "bundle": "runbook-first"
+}
