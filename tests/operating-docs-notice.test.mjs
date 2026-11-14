@@ -118,6 +118,15 @@ function onlyReadsReadme(calls, readme) {
   }
   return heads;
 }
+// The CPU time, in seconds, that one run of the hook uses together with the commands it starts: the second line bash's
+// times builtin prints, its children's user and system time. Unlike the wall clock, it does not grow when other
+// processes keep the machine busy.
+function cpuSeconds(dir) {
+  const r = spawnSync(BASH, ['-c', '"$0" "$1" >/dev/null 2>&1; times', BASH, HOOK], { cwd: dir, encoding: 'utf8', input: INPUT, timeout: 10_000, env: env(dir, { CLAUDE_PROJECT_DIR: dir }) });
+  const times = (r.stdout.trim().split('\n').at(-1) || '').split(/\s+/).map(t => /^(\d+)m(\d+)[.,](\d+)s$/.exec(t)).filter(Boolean);
+  assert.equal(times.length, 2, `times printed ${JSON.stringify(r.stdout)}`);
+  return times.reduce((sum, [, minutes, seconds, fraction]) => sum + Number(minutes) * 60 + Number(`${seconds}.${fraction}`), 0);
+}
 
 test('a repository with no operating document gets no text', t => {
   for (const files of [{}, { 'README.md': '# Tool\n\nRun `make` to build it.\n' }, { 'docs/guide.md': 'How to use it.\n', 'notes/runbook.txt': 'not markdown\n' }]) {
@@ -200,7 +209,9 @@ test('a very large README: no command reads past its first 64 KB, a pointer afte
   const r = run(dir, { record: true });
   assert.equal(r.text, context('docs/RUNBOOK.md (runbook), CONTRIBUTING.md (contributing guide), ops/runbook-early.md (runbook), README.md (points to ops/runbook-early.md)'));
   assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 1);
-  assert.ok(r.ms < 5000, `${r.ms} ms`);
+  // With both files in place, the hook and the commands it starts use less than half a second of CPU time.
+  const cpu = cpuSeconds(dir);
+  assert.ok(cpu < 0.5, `${cpu} s of CPU time`);
 });
 
 test('no command reads any file but the README, and the README only to its first 64 KB', t => {

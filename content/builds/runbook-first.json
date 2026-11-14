@@ -1,0 +1,41 @@
+{
+  "slug": "runbook-first",
+  "name": "Runbook First",
+  "kind": "guild",
+  "category": "delivery",
+  "summary": "One SessionStart hook: when a session starts in a repository, the agent is told which of the repository's operating documents exist and to read the ones that govern the change, run the checks they name and say which it read.",
+  "modules": [
+    "hook/operating-docs-notice"
+  ],
+  "agentProfiles": [
+    {
+      "role": "builder",
+      "model": "claude-sonnet-5-5",
+      "effort": "default",
+      "tools": "Read, Glob, Grep, Edit, Write, Bash",
+      "limits": "Adds context at the start of a session only; it blocks no action and changes no permission."
+    }
+  ],
+  "tags": [
+    "delivery",
+    "runbook",
+    "documentation",
+    "context"
+  ],
+  "published": "2026-11-13",
+  "updated": "2026-11-13",
+  "changelog": [
+    {
+      "date": "2026-11-13",
+      "note": "First release: one SessionStart hook that tells the agent which of the repository's operating documents exist and to read the ones that govern the change before changing anything. It adds nothing when it finds none, and at most 1,200 characters when it does."
+    }
+  ],
+  "version": "0.1.0",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "branches": [
+    "claude-code"
+  ],
+  "trial": null,
+  "bundle": "runbook-first"
+}
