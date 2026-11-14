@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { cleanGitEnv } from './git-env.mjs';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const BUNDLE = join(repo, 'bundles/runbook-first');
@@ -47,10 +48,9 @@ const asRoot = process.getuid?.() === 0;
 // The bash the hook runs under, found before any recording folder goes first on PATH.
 const BASH = (process.env.PATH || '').split(':').map(d => join(d, 'bash')).find(p => { try { accessSync(p, constants.X_OK); return true; } catch { return false; } });
 
+// The hook and the fixtures run git, so they get none of the caller's git setup.
 function env(home, extra = {}) {
-  const e = { ...process.env, HOME: home, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', ...extra };
-  for (const name of Object.keys(e)) if (/^GIT_(DIR|WORK_TREE|CONFIG_COUNT|CONFIG_KEY_|CONFIG_VALUE_)/.test(name)) delete e[name];
-  return e;
+  return { ...cleanGitEnv(home), ...extra };
 }
 function folder(t, files = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'docs-notice-'));
