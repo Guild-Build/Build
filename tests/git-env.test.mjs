@@ -1,6 +1,7 @@
 // The suite must pass whatever git setup its caller has. These tests break the caller's git setup in each way that can
 // reach a child process, show that each one breaks git for a child that inherits it and that none reaches a child given
-// cleanGitEnv, then run the rest of the suite under a caller broken in all of those ways at once.
+// cleanGitEnv, then run the rest of the suite under a caller broken in all of those ways at once and require every test
+// in that run to pass or be skipped.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
@@ -51,6 +52,26 @@ function probe(t, envFor) {
   return { works: r.status === 0 && r.stdout === `${join(realpathSync(folder), '.git')}\na.txt\n`, said: `exit ${r.status}: ${r.stdout}${r.stderr}` };
 }
 
+// The counts in the closing summary of a run with the TAP reporter.
+const summary = tap => Object.fromEntries(['tests', 'pass', 'fail', 'cancelled', 'skipped', 'todo']
+  .map(name => [name, Number([...tap.matchAll(new RegExp(`^# ${name} (\\d+)$`, 'gm'))].at(-1)?.[1])]));
+
+// Why a `node --test --test-reporter=tap` run does not show every test passing or skipped, with at least one passing;
+// none when it does. A test marked TODO counts against the run whether it passed or failed: Node reports a failing TODO
+// test as `not ok … # TODO`, with fail 0 and exit 0.
+function runProblems(r) {
+  const exit = `exit ${r.status}${r.signal ? ` (${r.signal})` : ''}`;
+  const c = summary(r.stdout);
+  if (Object.values(c).some(Number.isNaN)) return [`${exit}, with no complete TAP summary`];
+  const problems = r.status === 0 ? [] : [exit];
+  if (c.fail) problems.push(`${c.fail} of ${c.tests} tests failed`);
+  if (c.cancelled) problems.push(`${c.cancelled} of ${c.tests} tests were cancelled`);
+  if (c.todo) problems.push(`${c.todo} of ${c.tests} tests are marked TODO`);
+  if (c.pass + c.skipped !== c.tests) problems.push(`${c.pass + c.skipped} of ${c.tests} tests passed or were skipped`);
+  if (!c.pass) problems.push('no test passed');
+  return problems;
+}
+
 test('each way a caller can break git reaches a child that inherits it, and none reaches a child given cleanGitEnv', t => {
   const { ways, all, elsewhere } = brokenSetup(t);
   const plain = probe(t, folder => cleanGitEnv(folder));
@@ -80,11 +101,34 @@ test('the rest of the suite passes under a caller whose git setup is broken in a
   // The files whose tests start git are among them.
   for (const name of ['client-deployment-trial', 'handoff-trial', 'operating-docs-notice']) assert.ok(files.includes(`tests/${name}.test.mjs`), files.join(', '));
   const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...files], { cwd: repo, encoding: 'utf8', env, timeout: 600_000, maxBuffer: 256 * 1024 * 1024 });
-  const count = name => Number(new RegExp(`^# ${name} (\\d+)$`, 'm').exec(r.stdout)?.[1]);
+  const problems = runProblems(r);
   const failures = r.stdout.split('\n').filter(line => /^\s*not ok /.test(line) || /\bfatal: /.test(line)).slice(0, 40).join('\n');
-  assert.equal(r.status, 0, `exit ${r.status} ${r.signal ?? ''}\n${failures}\n${r.stderr.slice(-2000)}`);
-  assert.deepEqual({ fail: count('fail'), cancelled: count('cancelled') }, { fail: 0, cancelled: 0 });
-  assert.ok(count('pass') > 0 && count('pass') + count('skipped') + count('todo') === count('tests'), r.stdout.slice(-400));
+  assert.deepEqual(problems, [], `${problems.join('; ')}\n${failures}\n${r.stderr.slice(-2000)}`);
   assert.equal(existsSync(elsewhere), false, 'a child used the repository the caller\'s GIT_DIR names');
-  t.diagnostic(`${files.length} test files, ${count('pass')} of ${count('tests')} tests passed under the broken caller`);
+  const { pass, tests } = summary(r.stdout);
+  t.diagnostic(`${files.length} test files, ${pass} of ${tests} tests passed under the broken caller`);
+});
+
+// runProblems on real runs of throwaway test files in a temporary folder, failing and passing TODO tests among them.
+test('the nested run counts only tests that pass or are skipped, so a failing TODO test, which Node reports with fail 0 and exit 0, is refused', t => {
+  const dir = mkdtempSync(join(tmpdir(), 'bg-nested-check-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  let files = 0;
+  const run = body => {
+    const file = join(dir, `case-${++files}.test.mjs`);
+    writeFileSync(file, `import test from 'node:test';\nimport assert from 'node:assert/strict';\n${body}`);
+    return spawnSync(process.execPath, ['--test', '--test-reporter=tap', file], { cwd: dir, encoding: 'utf8', env, timeout: 60_000 });
+  };
+  assert.deepEqual(runProblems(run("test('passes', () => {});\ntest('skipped', { skip: true }, () => {});\n")), []);
+  const failingTodo = run("test('passes', () => {});\ntest('fails, marked TODO', { todo: true }, () => assert.fail('broken'));\n");
+  assert.match(failingTodo.stdout, /^not ok 2 - fails, marked TODO # TODO$/m);
+  assert.deepEqual([failingTodo.status, summary(failingTodo.stdout).fail], [0, 0]);
+  assert.deepEqual(runProblems(failingTodo), ['1 of 2 tests are marked TODO', '1 of 2 tests passed or were skipped']);
+  assert.deepEqual(runProblems(run("test('passes', () => {});\ntest('passes, marked TODO', { todo: true }, () => {});\n")),
+    ['1 of 2 tests are marked TODO', '1 of 2 tests passed or were skipped']);
+  assert.deepEqual(runProblems(run("test('fails', () => assert.fail('broken'));\n")),
+    ['exit 1', '1 of 1 tests failed', '0 of 1 tests passed or were skipped', 'no test passed']);
+  assert.deepEqual(runProblems(run("test('skipped', { skip: true }, () => {});\n")), ['no test passed']);
 });
