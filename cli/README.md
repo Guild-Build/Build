@@ -257,6 +257,11 @@ The tests use synthetic inputs and a stubbed runner; they require no model credi
 or credentials. They validate the comparison contract and packaging, not live
 model performance. Legacy public evidence records and season scores are unchanged.
 
+The tests do not depend on how the caller set git up. A test that starts a process
+which may run git gives it `cleanGitEnv` from `tests/git-env.mjs`, and
+`tests/git-env.test.mjs` runs the rest of the suite under a caller whose git setup
+is broken.
+
 `examples/trials/handoff-v2` provides a corrected local handoff test with a bounded
 three-line response format. The original published prose matcher can penalize
 truthful negations. The new task checks an explicit blocked status and the observed
