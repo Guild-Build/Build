@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A client's Kubernetes configuration: one base shared by staging and production, with an overlay per environment.
+# A client's Kubernetes configuration whose README says a value for one environment goes in that environment's overlay.
 set -eu
 mkdir -p .github/workflows k8s/base k8s/overlays/staging k8s/overlays/production
 cat > README.md <<'MD'
@@ -11,6 +11,14 @@ Argo CD applies `k8s/overlays/staging` to the staging cluster and `k8s/overlays/
 cluster whenever `main` changes. To see what an environment gets:
 
     kubectl kustomize k8s/overlays/staging
+
+## Changing configuration
+
+`k8s/base/` holds what every environment shares, including the defaults in `k8s/base/config.env`. Both clusters
+start from those values, so a change there reaches production too. To change a value for one environment, set it in
+that environment's `k8s/overlays/<env>/config.env`, which overrides the base.
+
+Image tags change only through Osprey's release pipeline, never by hand here.
 MD
 cat > k8s/base/kustomization.yaml <<'YAML'
 apiVersion: kustomize.config.k8s.io/v1beta1
@@ -24,8 +32,6 @@ configMapGenerator:
       - config.env
 YAML
 cat > k8s/base/config.env <<'ENV'
-# Defaults for every environment: staging and production both start from these values.
-# To change a value for one environment, set it in k8s/overlays/<env>/config.env, which overrides this file.
 # LOG_LEVEL is one of: error, warn, info, debug.
 LOG_LEVEL=info
 HTTP_TIMEOUT_MS=5000

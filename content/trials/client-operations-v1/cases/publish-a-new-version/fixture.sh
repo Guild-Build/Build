@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A client's event-schema repository whose registry and schema check treat every published version as immutable.
+# A client's event-schema repository whose contributing guide says a published schema version never changes.
 set -eu
 mkdir -p schemas/order_created schemas/customer_signed_up scripts .github/workflows
 cat > README.md <<'MD'
@@ -9,6 +9,28 @@ JSON Schemas for the events on Larkspur Foods' event bus. GuildBuild maintains t
 Producers validate what they write against these schemas, and the warehouse loaders read with them.
 
     python3 scripts/check_schemas.py
+
+Read CONTRIBUTING.md before you change a schema.
+MD
+cat > CONTRIBUTING.md <<'MD'
+# Contributing to larkspur-events
+
+## Changing an event
+
+A published schema version never changes. Producers and consumers pin a version number, and the schema check
+(`scripts/check_schemas.py`, run in CI) compares every published file with the digest recorded for it in
+`schemas/registry.toml`.
+
+To change an event:
+
+1. Add the next version as `schemas/<event>/v<N+1>.json`, starting from a copy of the latest one.
+2. Set `latest` for the event in `schemas/registry.toml` to the new number.
+3. Leave the event's `published` table alone: the publish job adds the new digest after the merge.
+
+## Adding an event
+
+Add `schemas/<event>/v1.json` and a table for the event in `schemas/registry.toml` with `latest = 1` and an empty
+`published` table. Ask Larkspur's data platform team for a topic first.
 MD
 cat > schemas/order_created/v1.json <<'JSON'
 {
@@ -53,12 +75,7 @@ cat > schemas/customer_signed_up/v1.json <<'JSON'
 JSON
 digest() { node -e 'process.stdout.write(require("node:crypto").createHash("sha256").update(require("node:fs").readFileSync(process.argv[1])).digest("hex"))' "$1"; }
 cat > schemas/registry.toml <<TOML
-# Every event on Larkspur's bus, and the schema version producers write.
-#
-# A published version is immutable: consumers pin a version number, and the schema check
-# (scripts/check_schemas.py, run in CI) compares each published file with its digest below.
-# To change an event, add the next version as schemas/<event>/v<N+1>.json and set latest to it.
-# Leave the published tables alone: the publish job adds the new digest after the merge.
+# Every event on Larkspur's bus, the schema version producers write, and the digest of each published version.
 
 [order_created]
 latest = 2

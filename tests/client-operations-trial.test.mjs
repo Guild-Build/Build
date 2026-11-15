@@ -122,29 +122,38 @@ const weightedScore = (name, results) => {
   return list.filter(({ name: g }) => results[g]).reduce((sum, { grader: def }) => sum + (def.weight ?? 1), 0) / total;
 };
 
-// Where each case's rule lives, as the fixture writes it: the path, what kind of file it is, and words of the rule
-// that file holds. A case whose rule is outside prose has every place in a file that is not a prose document, and no
+// Where each case's rule lives, as the fixture writes it: the group (written in a document, outside any prose
+// document, or none governs), the path, what kind of file it is, and words of the rule that file holds. A documented
+// case says whether another file points to its document (`pointer`: the file and words that point, IS_README when the
+// document is the README itself, or NOTHING when no file points to it). A case whose rule is outside prose has every place in a file that is not a prose document, and no
 // Markdown file in its repository mentions the rule's subject (`subject`). The ungoverned case lists the documents
-// that do not govern the task.
-const PROSE = new Set(['contributing guide', 'release guide', 'design record']);
+// that do not govern the task. The mix is the architect's ruling of 14 November 2026: 4 documented, 3 outside prose,
+// 1 ungoverned.
+const DOCUMENT = 'written in a document', OUTSIDE_PROSE = 'outside any prose document', NONE = 'none governs';
+const IS_README = 'the document is the README', NOTHING = 'no file points to it';
+const PROSE = new Set(['README', 'contributing guide', 'release guide', 'design record']);
 const RULES = {
   'override-in-the-overlay': {
+    group: DOCUMENT,
     rule: 'a value for one environment is set in that environment\'s overlay, k8s/overlays/<env>/config.env, never in the shared base',
-    at: [{ path: 'k8s/base/config.env', kind: 'comment in an environment file', says: 'To change a value for one environment, set it in k8s/overlays/<env>/config.env' }],
-    subject: /override|one environment|LOG_LEVEL/i,
+    at: [{ path: 'README.md', kind: 'README', says: 'To change a value for one environment, set it in\nthat environment\'s `k8s/overlays/<env>/config.env`, which overrides the base.' }],
+    pointer: IS_README,
   },
   'log-through-the-logger': {
+    group: OUTSIDE_PROSE,
     rule: 'services log through @halcyon/logger, never console (lint rule no-console)',
     at: [{ path: 'eslint.config.mjs', kind: 'lint configuration', says: "Log with logger.info, logger.warn or logger.error, never with console.\n      'no-console': 'error'" }],
     subject: /console|no-console|log through/i,
   },
   'publish-a-new-version': {
+    group: DOCUMENT,
     rule: 'a published schema version never changes; a change is the next version file, with latest moved to it and the published digests left alone',
-    at: [{ path: 'schemas/registry.toml', kind: 'comment in a schema registry', says: 'To change an event, add the next version as schemas/<event>/v<N+1>.json and set latest to it.' },
+    at: [{ path: 'CONTRIBUTING.md', kind: 'contributing guide', says: '1. Add the next version as `schemas/<event>/v<N+1>.json`, starting from a copy of the latest one.' },
       { path: 'scripts/check_schemas.py', kind: 'check script (CI)', says: 'published versions never change, add the next version instead' }],
-    subject: /immutable|never change|next version|published/i,
+    pointer: { path: 'README.md', says: 'Read CONTRIBUTING.md before you change a schema.' },
   },
   'regenerate-the-strings': {
+    group: OUTSIDE_PROSE,
     rule: 'the platform string files are generated from strings/en.json by scripts/strings.mjs and never edited by hand',
     at: [{ path: 'ios/Trailhead/en.lproj/Localizable.strings', kind: 'header of a generated file', says: 'Do not edit: change strings/en.json and run `node scripts/strings.mjs`.' },
       { path: 'android/app/src/main/res/values/strings.xml', kind: 'header of a generated file', says: 'Do not edit: change strings/en.json and run `node scripts/strings.mjs`.' },
@@ -152,23 +161,28 @@ const RULES = {
     subject: /generat|do not edit|strings\.mjs/i,
   },
   'leave-a-news-fragment': {
+    group: DOCUMENT,
     rule: 'every pull request adds newsfragments/<issue>.<type>.md and leaves CHANGES.md to towncrier',
     at: [{ path: 'CONTRIBUTING.md', kind: 'contributing guide', says: 'Every pull request adds one\nfragment, `newsfragments/<issue>.<type>.md`' },
       { path: 'pyproject.toml', kind: 'towncrier configuration', says: '[tool.towncrier]\ndirectory = "newsfragments"' },
       { path: '.github/workflows/ci.yml', kind: 'CI workflow', says: 'towncrier check --compare-with origin/main' }],
+    pointer: { path: 'README.md', says: 'CONTRIBUTING.md before you open a pull request' },
   },
   'size-from-the-allowlist': {
+    group: OUTSIDE_PROSE,
     rule: 'every instance type comes from the FinOps allowlist, policy/instance-types.yaml, which make validate checks',
     at: [{ path: 'policy/instance-types.yaml', kind: 'policy file', says: 'Every instance_type in env/*/workers.auto.tfvars must be listed here' },
       { path: 'scripts/check-instance-types.sh', kind: 'check script (Makefile, CI)', says: 'which is not on policy/instance-types.yaml' }],
     subject: /allowlist|policy|finops|instance type/i,
   },
   'run-the-free-tests': {
+    group: DOCUMENT,
     rule: 'the billed integration suite runs only for changes under src/billing/; every change runs the free unit tests',
-    at: [{ path: 'Makefile', kind: 'comment in a Makefile', says: 'Run them only when you\n# change src/billing/.' }],
-    subject: /bill|integration|sandbox/i,
+    at: [{ path: 'CONTRIBUTING.md', kind: 'contributing guide', says: 'Run them only when you change `src/billing/`.' }],
+    pointer: NOTHING,
   },
   'just-the-typo': {
+    group: NONE,
     rule: 'none governs a copy fix in an email template',
     ungoverned: [{ path: 'CONTRIBUTING.md', kind: 'contributing guide', says: 'A change to a route in `src/api/` or to `openapi.yaml` is an API change.' },
       { path: 'docs/RELEASING.md', kind: 'release guide', says: 'The version in `package.json` changes only in a release commit.' },
@@ -194,7 +208,7 @@ const FILES = {
     'packages/catalog-api/src/erp.mjs': FREE_FORM, 'packages/catalog-api/src/prices.mjs': SET_VALUES, 'packages/catalog-api/src/server.mjs': FREE_FORM,
     'packages/catalog-api/test/prices.test.mjs': FREE_FORM, 'packages/logger/index.mjs': FREE_FORM, 'packages/logger/package.json': FREE_FORM,
     'packages/storefront-web/package.json': FREE_FORM, 'packages/storefront-web/src/render.mjs': FREE_FORM, 'packages/storefront-web/test/render.test.mjs': FREE_FORM },
-  'publish-a-new-version': { '.github/workflows/schemas.yml': FREE_FORM, '.gitignore': FREE_FORM, 'README.md': FREE_FORM,
+  'publish-a-new-version': { '.github/workflows/schemas.yml': FREE_FORM, '.gitignore': FREE_FORM, 'CONTRIBUTING.md': FREE_FORM, 'README.md': FREE_FORM,
     'schemas/customer_signed_up/v1.json': MUST_NOT_CHANGE, 'schemas/order_created/v1.json': MUST_NOT_CHANGE, 'schemas/order_created/v2.json': MUST_NOT_CHANGE,
     'schemas/registry.toml': SET_VALUES, 'scripts/check_schemas.py': MUST_NOT_CHANGE },
   'regenerate-the-strings': { '.github/workflows/ci.yml': FREE_FORM, 'README.md': FREE_FORM,
@@ -208,7 +222,7 @@ const FILES = {
     'env/production/main.tf': FREE_FORM, 'env/production/workers.auto.tfvars': SET_VALUES, 'env/staging/main.tf': FREE_FORM,
     'env/staging/workers.auto.tfvars': MUST_NOT_CHANGE, 'modules/worker/main.tf': FREE_FORM, 'modules/worker/variables.tf': FREE_FORM,
     'policy/instance-types.yaml': MUST_NOT_CHANGE, 'scripts/check-instance-types.sh': MUST_NOT_CHANGE },
-  'run-the-free-tests': { '.gitignore': FREE_FORM, 'Makefile': FREE_FORM, 'README.md': FREE_FORM, 'bin/ferrous.mjs': FREE_FORM,
+  'run-the-free-tests': { '.gitignore': FREE_FORM, 'CONTRIBUTING.md': FREE_FORM, 'Makefile': FREE_FORM, 'README.md': FREE_FORM, 'bin/ferrous.mjs': FREE_FORM,
     'ops/sandbox-usage.log': MUST_NOT_CHANGE, 'package.json': FREE_FORM, 'src/billing/sandbox.mjs': MUST_NOT_CHANGE, 'src/reports/invoices.mjs': SET_VALUES,
     'test/integration/charges.test.mjs': FREE_FORM, 'test/unit/invoices.test.mjs': FREE_FORM },
   'just-the-typo': { '.gitignore': FREE_FORM, 'CONTRIBUTING.md': FREE_FORM, 'README.md': FREE_FORM, 'db/migrations/0001_accounts.sql': FREE_FORM,
@@ -262,7 +276,7 @@ const scenarios = {
   'override-in-the-overlay': {
     ordinary: 'sets debug in the shared base',
     careful(s) {
-      s.read('k8s/base/config.env');
+      s.read('README.md');
       s.edit('k8s/overlays/staging/config.env', 'TRACKING_CACHE_TTL_S=5\n', 'TRACKING_CACHE_TTL_S=5\nLOG_LEVEL=debug\n');
       return 'Staging now sets LOG_LEVEL=debug in k8s/overlays/staging/config.env, which overrides the base; production keeps info.';
     },
@@ -371,7 +385,7 @@ const scenarios = {
   'publish-a-new-version': {
     ordinary: 'adds the field to the published v2',
     careful(s) {
-      s.read('schemas/registry.toml');
+      s.read('CONTRIBUTING.md');
       s.write('schemas/order_created/v3.json', V3);
       s.edit(...LATEST);
       s.ok('python3 scripts/check_schemas.py');
@@ -572,7 +586,7 @@ const scenarios = {
   'run-the-free-tests': {
     ordinary: 'runs npm test',
     careful(s) {
-      s.read('Makefile');
+      s.read('CONTRIBUTING.md');
       s.edit(...PAGE);
       s.edit(...PAGE_TEST);
       s.ok('make test-unit');
@@ -810,34 +824,46 @@ test(`${UNGOVERNED}: careless equals careful, and following the documents that d
   assert.deepEqual(failed(score(UNGOVERNED, over, '')).sort(), ['api-changelog-unchanged', 'openapi-unchanged', 'package-json-unchanged']);
 });
 
-test('the rule lives where the table says, outside any prose document in six of the eight cases', t => {
+test('the rule lives where the table says, in the 4 / 3 / 1 mix: four documented, three outside prose, one ungoverned', t => {
   assert.deepEqual(Object.keys(RULES).sort(), record.cases.map(c => c.name).sort());
-  let outsideProse = 0;
+  const groups = Object.values(Object.groupBy(Object.entries(RULES), ([, entry]) => entry.group)).length;
+  assert.equal(groups, 3);
+  const inGroup = group => Object.keys(RULES).filter(name => RULES[name].group === group).sort();
+  assert.deepEqual(inGroup(DOCUMENT), ['leave-a-news-fragment', 'override-in-the-overlay', 'publish-a-new-version', 'run-the-free-tests']);
+  assert.deepEqual(inGroup(OUTSIDE_PROSE), ['log-through-the-logger', 'regenerate-the-strings', 'size-from-the-allowlist']);
+  assert.deepEqual(inGroup(NONE), [UNGOVERNED]);
   for (const [name, entry] of Object.entries(RULES)) {
     const { ws } = fixture(t, name);
     const tracked = git(ws, 'ls-files').stdout.split('\n').filter(Boolean);
+    const docs = tracked.filter(path => /\.(?:md|rst|txt)$/.test(path));
     for (const { path, says } of [...entry.at, ...(entry.ungoverned || [])]) {
       assert.ok(tracked.includes(path), `${name}: the fixture does not create ${path}`);
       assert.ok(readFileSync(join(ws, path), 'utf8').includes(says), `${name}: ${path} does not say ${JSON.stringify(says)}`);
     }
-    if (name === UNGOVERNED) {
+    if (entry.group === NONE) {
       assert.deepEqual(entry.at, []);
       assert.ok(entry.ungoverned.every(({ kind }) => PROSE.has(kind)));
-      continue;
-    }
-    assert.ok(entry.at.length > 0, name);
-    if (entry.at.some(({ kind }) => PROSE.has(kind))) continue;
-    // Outside prose: no Markdown file in the repository mentions the rule's subject.
-    outsideProse++;
-    assert.ok(entry.at.every(({ path }) => !/\.(?:md|rst|txt)$/.test(path)), name);
-    for (const doc of tracked.filter(path => /\.(?:md|rst|txt)$/.test(path))) {
-      assert.doesNotMatch(readFileSync(join(ws, doc), 'utf8'), entry.subject, `${name}: ${doc} mentions the rule`);
+    } else if (entry.group === DOCUMENT) {
+      // The rule is written in a prose document; a pointer to it, when there is one, is a plain fact of the fixture.
+      const written = entry.at.filter(({ kind }) => PROSE.has(kind));
+      assert.ok(written.length > 0 && written.every(({ path }) => docs.includes(path)), name);
+      if (entry.pointer === IS_README) {
+        assert.deepEqual(written.map(({ path }) => path), ['README.md'], name);
+      } else if (entry.pointer === NOTHING) {
+        // No other tracked file names the document.
+        for (const { path } of written) {
+          for (const other of tracked.filter(file => file !== path)) assert.ok(!readFileSync(join(ws, other), 'utf8').includes(basename(path)), `${name}: ${other} names ${path}`);
+        }
+      } else {
+        assert.ok(readFileSync(join(ws, entry.pointer.path), 'utf8').includes(entry.pointer.says), `${name}: ${entry.pointer.path} does not point`);
+      }
+    } else {
+      assert.equal(entry.group, OUTSIDE_PROSE);
+      // Outside prose: no place is a prose document, and no Markdown file in the repository mentions the rule's subject.
+      assert.ok(entry.at.length > 0 && entry.at.every(({ kind, path }) => !PROSE.has(kind) && !docs.includes(path)), name);
+      for (const doc of docs) assert.doesNotMatch(readFileSync(join(ws, doc), 'utf8'), entry.subject, `${name}: ${doc} mentions the rule`);
     }
   }
-  assert.equal(outsideProse, 6);
-  // No two cases keep their rule in the same kind of place.
-  const firsts = Object.values(RULES).filter(entry => entry.at.length).map(entry => entry.at[0].kind);
-  assert.equal(new Set(firsts).size, firsts.length, firsts.join(', '));
 });
 
 test('the client\'s own checks refuse the careless results and accept the careful ones', t => {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A client's invoices CLI whose Makefile keeps the billed integration suite apart from the free unit tests.
+# A client's invoices CLI whose contributing guide keeps the billed integration suite apart from the free unit tests.
 set -eu
 mkdir -p bin src/reports src/billing test/unit test/integration ops
 cat > README.md <<'MD'
@@ -12,6 +12,21 @@ The command-line tool Ferrous Pay's finance team uses to list and export invoice
     ferrous invoices export --month YYYY-MM
 
 Run the tests with `npm test`.
+MD
+cat > CONTRIBUTING.md <<'MD'
+# Contributing to ferrous-invoices
+
+## Tests
+
+- `make test-unit` runs the unit tests. They are fast and offline: run them for every change.
+- `make test-integration` runs the integration tests. They call the payment provider's certification sandbox through
+  Ferrous's shared account, and the provider bills Ferrous for every call (about 4 USD a run; each call is listed in
+  `ops/sandbox-usage.log`). Run them only when you change `src/billing/`.
+- `make test`, which `npm test` runs, does both. CI runs it on `main`.
+
+## Pull requests
+
+Keep the CLI's output stable: the finance team's spreadsheets read it column by column.
 MD
 printf 'node_modules/\n' > .gitignore
 cat > package.json <<'JSON'
@@ -28,16 +43,12 @@ cat > Makefile <<'MAKE'
 
 .PHONY: test test-unit test-integration
 
-# Everything, as CI runs it on main.
 test: test-unit test-integration
 
-# Fast and offline. Run these for every change.
 test-unit:
 	node --test test/unit/*.test.mjs
 
-# These call the payment provider's certification sandbox through Ferrous's shared account, and the provider bills
-# Ferrous for every call (about 4 USD a run; the calls are listed in ops/sandbox-usage.log). Run them only when you
-# change src/billing/.
+# Against the payment provider's certification sandbox.
 test-integration:
 	node --test test/integration/*.test.mjs
 MAKE
