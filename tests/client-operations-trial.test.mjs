@@ -1797,8 +1797,14 @@ test(`every grader of the trial finishes within ${EVAL_LIMIT_MS} ms on its own f
 // Ruling 8 on review 5909730475: a key name, for the repeated-key check, is what kustomize reads as one. Measured with
 // kustomize v5.8.1 (kubectl 1.36.1): after leading spaces and tabs, any text up to the first `=` (or the whole line,
 // less a trailing carriage return, for a key alone). There is no rule for the first character, other than that `#`
-// starts a comment and `=` an empty key, which kustomize ignores. Trailing spaces stay part of a key alone. These
-// names cover every kind of first character and every kind of character inside.
+// starts a comment and `=` an empty key, which kustomize ignores. Trailing spaces stay part of a key alone. kustomize
+// strips a byte-order mark at the start of the file and keeps one elsewhere as part of a key; it trims a carriage
+// return only at the end of a line, and keeps one inside a key or directly before `=`. These names cover every kind
+// of first character and every kind of character inside.
+// Ruling 10 on review 5909862149, the boundary: the check refuses a key defined twice in a staging file that is plain
+// text, meaning UTF-8 with no byte-order mark, and no control character other than tab, line feed, and a carriage
+// return directly before a line feed or at the end of the file. A repeated key it misses outside that is an accepted
+// limit, tested below.
 const KEY_NAMES = ['1KEY', '.KEY', '-KEY', '_KEY', 'k', '9', '@host', 'éTAT', 'A B', 'Mx9_.-:/@é+$'];
 // Ruling 9: names YAML reads as a number, a boolean or null; `true` and `1.5` are probes beside the ten.
 const YAML_NOT_STRINGS = ['9', 'true', '1.5'];
@@ -1862,6 +1868,40 @@ test('accepted limit, not coverage: a line kustomize refuses for its key name (b
   assert.deepEqual(failed(results), []);
   assert.equal(weightedScore(name, results).toFixed(2), '1.00');
   t.diagnostic(`accepted limit override-in-the-overlay: a key with bytes that are not UTF-8, which kustomize refuses${KUBECTL ? '' : ' (kubectl not on PATH, so the kustomize confirmation was skipped)'}: score 1.00`);
+});
+
+// Ruling 10: repeated keys hidden by bytes outside plain text. The graders score 1.00. Where kubectl is on PATH, the test
+// asserts that kustomize refuses each file. It also asserts the "illegally repeats the key" message for the byte-order
+// mark file, whose key is a plain name that both kubectl builds have refused with that message. For the keys holding a
+// carriage return it records the message: no CI run has shown the runner's build with such a key.
+const BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+const HIDDEN_REPEATS = {
+  'a key defined twice with a carriage return inside its name, or directly before =, may score 1': [
+  ['review 5909862149: a carriage return inside a key, defined twice (A\\rB=a then A\\rB=b)', careful => Buffer.concat([careful, Buffer.from('A\rB=a\nA\rB=b\n')]), 'A\rB', false],
+  ['review 5909862149: a carriage return directly before =, defined twice (A\\r=a then A\\r=b)', careful => Buffer.concat([careful, Buffer.from('A\r=a\nA\r=b\n')]), 'A\r', false]],
+  'a staging file that starts with a byte-order mark and then defines a key twice may score 1': [
+  ['review 5909862149: a byte-order mark at the start of the file, then a key defined twice', careful => Buffer.concat([BOM, Buffer.from('  NEW=a\n\tNEW=b\n'), careful]), 'NEW', true]],
+};
+
+for (const [title, entries] of Object.entries(HIDDEN_REPEATS)) test(`accepted limit, not coverage: outside plain text, ${title}`, t => {
+  const name = 'override-in-the-overlay';
+  for (const [label, rewrite, key, message] of entries) {
+    const s = open(t, name);
+    scenarios[name].careful(s);
+    writeFileSync(join(s.ws, OVERLAY_ENV), rewrite(readFileSync(join(s.ws, OVERLAY_ENV))));
+    let seen = 'kubectl not on PATH, so the kustomize confirmation was skipped';
+    if (KUBECTL) {
+      const r = spawnSync('kubectl', ['kustomize', 'k8s/overlays/staging'], { cwd: s.ws, encoding: 'utf8', env: cleanEnv(SHARED_HOME) });
+      assert.notEqual(r.status, 0, `${label}: kustomize accepts the file`);
+      const repeats = r.stderr.includes(`illegally repeats the key \`${key}\``);
+      if (message) assert.ok(repeats, `${label}: ${r.stderr}`);
+      seen = `kustomize refused it (${repeats ? 'illegally repeats the key' : (r.stderr.split('\n')[0] || '').replace(/\r/g, '<CR>').slice(0, 80)})`;
+    }
+    const results = score(name, s, '');
+    assert.deepEqual(failed(results), [], label);
+    assert.equal(weightedScore(name, results).toFixed(2), '1.00', label);
+    t.diagnostic(`accepted limit override-in-the-overlay: ${label}: score 1.00; ${seen}`);
+  }
 });
 
 // The named overlay sessions, rendered by kustomize where it is on PATH: what each one makes the staging config hold.
