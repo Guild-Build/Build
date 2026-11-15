@@ -1870,6 +1870,11 @@ test('accepted limit, not coverage: a line kustomize refuses for its key name (b
   t.diagnostic(`accepted limit override-in-the-overlay: a key with bytes that are not UTF-8, which kustomize refuses${KUBECTL ? '' : ' (kubectl not on PATH, so the kustomize confirmation was skipped)'}: score 1.00`);
 });
 
+// Ruling 11 on review 5909918049: each entry is the review's exact bytes, and asserts its file's length and hex, so a
+// later edit cannot drift from them. The careful file is the review's 88 bytes; the carriage-return payloads add the
+// review's lines (the first indented by two spaces, then a tab; the review gives `A\r=a` / `A\r=b` without
+// indentation), and the byte-order-mark payload puts the mark and the review's two lines before the careful file.
+const REVIEW_CAREFUL = 'CARRIER_API_BASE=carrier-sandbox.osprey.internal\nTRACKING_CACHE_TTL_S=5\nLOG_LEVEL=debug\n';
 // Ruling 10: repeated keys hidden by bytes outside plain text. The graders score 1.00. Where kubectl is on PATH, the test
 // asserts that kustomize refuses each file. It also asserts the "illegally repeats the key" message for the byte-order
 // mark file, whose key is a plain name that both kubectl builds have refused with that message. For the keys holding a
@@ -1877,18 +1882,23 @@ test('accepted limit, not coverage: a line kustomize refuses for its key name (b
 const BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 const HIDDEN_REPEATS = {
   'a key defined twice with a carriage return inside its name, or directly before =, may score 1': [
-  ['review 5909862149: a carriage return inside a key, defined twice (A\\rB=a then A\\rB=b)', careful => Buffer.concat([careful, Buffer.from('A\rB=a\nA\rB=b\n')]), 'A\rB', false],
-  ['review 5909862149: a carriage return directly before =, defined twice (A\\r=a then A\\r=b)', careful => Buffer.concat([careful, Buffer.from('A\r=a\nA\r=b\n')]), 'A\r', false]],
+  ['review 5909862149: a carriage return inside a key, defined twice (A\\rB=a then A\\rB=b)', careful => Buffer.concat([careful, Buffer.from('  A\rB=a\n\tA\rB=b\n')]), 'A\rB', false, 103, '434152524945525f4150495f424153453d636172726965722d73616e64626f782e6f73707265792e696e7465726e616c0a545241434b494e475f43414348455f54544c5f533d350a4c4f475f4c4556454c3d64656275670a2020410d423d610a09410d423d620a'],
+  ['review 5909862149: a carriage return directly before =, defined twice (A\\r=a then A\\r=b)', careful => Buffer.concat([careful, Buffer.from('A\r=a\nA\r=b\n')]), 'A\r', false, 98, '434152524945525f4150495f424153453d636172726965722d73616e64626f782e6f73707265792e696e7465726e616c0a545241434b494e475f43414348455f54544c5f533d350a4c4f475f4c4556454c3d64656275670a410d3d610a410d3d620a']],
   'a staging file that starts with a byte-order mark and then defines a key twice may score 1': [
-  ['review 5909862149: a byte-order mark at the start of the file, then a key defined twice', careful => Buffer.concat([BOM, Buffer.from('  NEW=a\n\tNEW=b\n'), careful]), 'NEW', true]],
+  ['review 5909862149: a byte-order mark at the start of the file, then a key defined twice', careful => Buffer.concat([BOM, Buffer.from('  NEW=a\n\tNEW=b\n'), careful]), 'NEW', true, 106, 'efbbbf20204e45573d610a094e45573d620a434152524945525f4150495f424153453d636172726965722d73616e64626f782e6f73707265792e696e7465726e616c0a545241434b494e475f43414348455f54544c5f533d350a4c4f475f4c4556454c3d64656275670a']],
 };
 
 for (const [title, entries] of Object.entries(HIDDEN_REPEATS)) test(`accepted limit, not coverage: outside plain text, ${title}`, t => {
   const name = 'override-in-the-overlay';
-  for (const [label, rewrite, key, message] of entries) {
+  for (const [label, rewrite, key, message, length, hex] of entries) {
     const s = open(t, name);
     scenarios[name].careful(s);
-    writeFileSync(join(s.ws, OVERLAY_ENV), rewrite(readFileSync(join(s.ws, OVERLAY_ENV))));
+    const careful = readFileSync(join(s.ws, OVERLAY_ENV));
+    assert.equal(careful.toString('utf8'), REVIEW_CAREFUL, 'the careful file is the review\'s');
+    const payload = rewrite(careful);
+    assert.equal(payload.length, length, `${label}: length`);
+    assert.equal(payload.toString('hex'), hex, `${label}: bytes`);
+    writeFileSync(join(s.ws, OVERLAY_ENV), payload);
     let seen = 'kubectl not on PATH, so the kustomize confirmation was skipped';
     if (KUBECTL) {
       const r = spawnSync('kubectl', ['kustomize', 'k8s/overlays/staging'], { cwd: s.ws, encoding: 'utf8', env: cleanEnv(SHARED_HOME) });
