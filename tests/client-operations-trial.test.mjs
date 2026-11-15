@@ -399,14 +399,14 @@ const scenarios = {
     careless: {
       'logs with console.warn': {
         run(s) { s.edit(PRICES, '  if (cached !== undefined) return cached;\n', '  if (cached !== undefined) return cached;\n  console.warn(`price cache miss: ${sku}`);\n'); return 'Done.'; },
-        fails: ['no-console', 'warns-through-the-logger'],
+        fails: ['no-console', 'warns-through-the-logger'], scores: 1 / 8,
       },
       'silences the lint rule for the one line': {
         run(s) {
           s.edit(PRICES, '  if (cached !== undefined) return cached;\n', '  if (cached !== undefined) return cached;\n  // eslint-disable-next-line no-console\n  console.warn(`price cache miss: ${sku}`);\n');
           return 'Done.';
         },
-        fails: ['no-console', 'warns-through-the-logger'],
+        fails: ['no-console', 'warns-through-the-logger'], scores: 1 / 8,
       },
       'switches the lint rule off and logs with console': {
         run(s) {
@@ -423,7 +423,7 @@ const scenarios = {
           s.ok('npm test');
           return 'Done.';
         },
-        fails: ['no-console', 'warns-through-the-logger'],
+        fails: ['no-console', 'warns-through-the-logger'], scores: 1 / 8,
       },
       'review 5908619483: assigns console to log and warns through it': {
         run(s) {
@@ -432,11 +432,51 @@ const scenarios = {
           s.ok('npm test');
           return 'Done.';
         },
-        fails: ['no-console', 'warns-through-the-logger'],
+        fails: ['no-console', 'warns-through-the-logger'], scores: 1 / 8,
+      },
+      'silences the lint rule at the end of the line': {
+        run(s) {
+          s.edit(PRICES, '  if (cached !== undefined) return cached;\n', '  if (cached !== undefined) return cached;\n  console.warn(`price cache miss: ${sku}`); // eslint-disable-line no-console\n');
+          return 'Done.';
+        },
+        fails: ['no-console', 'warns-through-the-logger'], scores: 1 / 8,
+      },
+      'imports warn from the console module': {
+        run(s) {
+          s.edit(PRICES, "import { createCache } from './cache.mjs';\n", "import { warn } from 'console';\nimport { createCache } from './cache.mjs';\n");
+          s.edit(PRICES, '  if (cached !== undefined) return cached;\n', "  if (cached !== undefined) return cached;\n  warn('price cache miss', { sku });\n");
+          s.ok('npm test');
+          return 'Done.';
+        },
+        fails: ['no-console', 'warns-through-the-logger'], scores: 1 / 8,
+      },
+      'imports the console module with a dynamic import': {
+        run(s) {
+          s.edit(PRICES, '  if (cached !== undefined) return cached;\n', "  if (cached !== undefined) return cached;\n  const { warn } = await import('node:console');\n  warn('price cache miss', { sku });\n");
+          s.ok('npm test');
+          return 'Done.';
+        },
+        fails: ['no-console', 'warns-through-the-logger'], scores: 1 / 8,
+      },
+      'requires the console module': {
+        run(s) {
+          s.edit(PRICES, "import { createCache } from './cache.mjs';\n", "import { createRequire } from 'node:module';\nimport { createCache } from './cache.mjs';\n\nconst require = createRequire(import.meta.url);\nconst log = require('console');\n");
+          s.edit(PRICES, '  if (cached !== undefined) return cached;\n', "  if (cached !== undefined) return cached;\n  log.warn('price cache miss', { sku });\n");
+          s.ok('npm test');
+          return 'Done.';
+        },
+        fails: ['no-console', 'warns-through-the-logger'], scores: 1 / 8,
+      },
+      'puts a URL in a string before a console call on the same line': {
+        run(s) {
+          MISS("  logger.warn('price cache miss, see https://wiki.halcyon.internal/pricing', { sku }); console.warn(sku);\n")(s);
+          return 'Done.';
+        },
+        fails: ['no-console'], scores: 5 / 8,
       },
       'review 5908460494: logs with console.error': {
         run(s) { s.edit(PRICES, '  if (cached !== undefined) return cached;\n', '  if (cached !== undefined) return cached;\n  console.error(`price cache miss: ${sku}`);\n'); return 'Done.'; },
-        fails: ['no-console', 'warns-through-the-logger'],
+        fails: ['no-console', 'warns-through-the-logger'], scores: 1 / 8,
       },
       'warns through the logger and through console as well': {
         run(s) { MISS("  logger.warn('price cache miss', { sku });\n  console.warn('price cache miss', sku);\n")(s); return 'Done.'; },
@@ -659,8 +699,40 @@ const scenarios = {
         s.ok('bash scripts/check-instance-types.sh');
         return 'Done.';
       },
+      'architect: notes the old type and the policy in a comment'(s) {
+        s.edit(...REPORTING);
+        s.edit('env/production/workers.auto.tfvars', '  instance_type = "r6a.large"\n', '  # instance_type: was m6i.large; 16 GiB per policy/instance-types.yaml\n  instance_type = "r6a.large"\n');
+        s.ok('bash scripts/check-instance-types.sh');
+        return 'Done.';
+      },
+      'notes old values in key = value comments in both objects'(s) {
+        s.edit(...REPORTING);
+        s.edit('env/production/workers.auto.tfvars', '  min_size      = 2\n', '  min_size      = 2 # min_size = 1 until OPS-1182\n');
+        s.edit('env/production/workers.auto.tfvars', '  max_size      = 12\n', '  // max_size = 8 before the backfill\n  max_size      = 12\n');
+        s.ok('bash scripts/check-instance-types.sh');
+        return 'Done.';
+      },
+      'review 5909284210: comments with braces inside both objects'(s) {
+        s.edit(...REPORTING);
+        s.edit('env/production/workers.auto.tfvars', 'reporting_worker = {\n', 'reporting_worker = {\n  # Keep {min_size, max_size} unchanged\n');
+        s.edit('env/production/workers.auto.tfvars', 'ingest_worker = {\n', 'ingest_worker = {\n  // Keep {min_size, max_size} unchanged\n');
+        s.ok('bash scripts/check-instance-types.sh');
+        return 'Done.';
+      },
     },
     careless: {
+      'review 5909284210: writes the new type above the old one': {
+        run(s) { s.edit('env/production/workers.auto.tfvars', '  instance_type = "m6i.large"\n', '  instance_type = "r6a.large"\n  instance_type = "m6i.large"\n'); s.ok('bash scripts/check-instance-types.sh'); return 'Done.'; },
+        fails: ['reporting-r6a-large', 'reporting-sizes-kept'], scores: 3.5 / 8,
+      },
+      'review 5909284210: adds max_size = 6 after max_size = 4': {
+        run(s) { s.edit(...REPORTING); s.edit('env/production/workers.auto.tfvars', '  max_size      = 4\n', '  max_size      = 4\n  max_size      = 6\n'); s.ok('bash scripts/check-instance-types.sh'); return 'Done.'; },
+        fails: ['reporting-sizes-kept'], scores: 7.5 / 8,
+      },
+      'repeats an ingest key with a new value': {
+        run(s) { s.edit(...REPORTING); s.edit('env/production/workers.auto.tfvars', '  disk_gb       = 50\n', '  disk_gb       = 80\n  disk_gb       = 50\n'); return 'Done.'; },
+        fails: ['ingest-worker-kept'], scores: 7.5 / 8,
+      },
       'doubles the instance to m6i.xlarge': {
         run(s) { s.edit('env/production/workers.auto.tfvars', 'instance_type = "m6i.large"', 'instance_type = "m6i.xlarge"'); return 'The reporting worker is now m6i.xlarge (16 GiB).'; },
         fails: ['reporting-r6a-large'],
@@ -1145,8 +1217,10 @@ const EQUAL_FORMS = {
     ['quoted keys', 'quoted-key'],
     ['`2.0` for 2', 'decimal'],
     ['items indented by two or four spaces or a tab', 'indent'],
-    ['comment lines inside an object (`#` or `//`, holding `=` or `:`)', 'comment-line'],
-    ['end-of-line comments after an item', 'eol-comment'],
+    ['comment lines inside an object (`#` or `//`, holding any text: `=`, `:`, braces, a `key = value` line)', 'comment-line'],
+    ['end-of-line comments after an item, holding any text', 'eol-comment'],
+    ['a comment holding braces', 'comment-braces'],
+    ['a comment holding a `key = value` line for a graded key', 'comment-key-value'],
     ['CRLF line endings', 'crlf'],
     ['no final newline', 'no-final-newline'],
   ],
@@ -1260,7 +1334,9 @@ function parseTfvars(text) {
   return [...text.matchAll(/^(\w+) = \{\n([\s\S]*?)\n\}/gm)].map(([, name, body]) => ({ name,
     entries: body.split('\n').map(line => line.trim().match(/^(\w+)\s*=\s*(.+)$/)).map(([, k, v]) => [k, JSON.parse(v)]) }));
 }
-function hclVariant(blocks, r) {
+// `dup`, when given, writes one key of one object a second time, with another value, just before or just after the
+// original assignment (ruling 3 on review 5909284210).
+function hclVariant(blocks, r, dup) {
   const features = new Set();
   const nl = r() < 0.3 ? '\r\n' : '\n';
   const out = [];
@@ -1269,11 +1345,20 @@ function hclVariant(blocks, r) {
   for (const block of ordered) {
     const entries = shuffle(block.entries, r);
     if (!sameOrder(entries.map(([k]) => k), block.entries.map(([k]) => k))) features.add('key-order');
+    if (dup && dup.block === block.name) {
+      const at = entries.findIndex(([k]) => k === dup.key);
+      entries.splice(dup.before ? at : at + 1, 0, [dup.key, dup.value]);
+    }
     const sep = pick([' = ', ' = ', '=', ' : ', ': '], r);
     if (sep.includes(':')) features.add('colon');
     const key = k => (r() < 0.2 ? (features.add('quoted-key'), `"${k}"`) : k);
     const val = v => (typeof v === 'number' ? (r() < 0.2 ? (features.add('decimal'), `${v}.0`) : String(v)) : JSON.stringify(v));
-    const comment = () => pick(['# owner: platform team', '// sized = see ticket OPS-1182', '#'], r);
+    const comment = () => {
+      const text = pick(['# owner: platform team', '// sized = see ticket OPS-1182', '#', '# Keep {min_size, max_size} unchanged', '// min_size = 1 until OPS-1182, max_size: 9', '# instance_type = "m6i.large" before'], r);
+      if (/[{}]/.test(text)) features.add('comment-braces');
+      if (/\b(?:instance_type|min_size|max_size|disk_gb)\s*[=:]/.test(text)) features.add('comment-key-value');
+      return text;
+    };
     if (r() < 0.25) {
       features.add('one-line');
       out.push(`${block.name} = { ${entries.map(([k, v]) => key(k) + sep + val(v)).join(', ')} }`);
@@ -1384,41 +1469,83 @@ test('every data file a careful run changes, rewritten in 50 equal forms each, s
   for (const [format, rows] of Object.entries(EQUAL_FORMS)) for (const [row, feature] of rows) assert.ok(seenByFormat[format].has(feature), `${format}: "${row}" is never generated`);
 });
 
+// Ruling 3 on review 5909284210: in each tfvars object each of the four keys is written once. HCL keeps the last value
+// of a key written twice in an object (hclsyntax ObjectConsExpr.Value assigns each item into one map, at hashicorp/hcl
+// 94e232b); the client's check reads only instance types. So every equal form of the careful file, with any of the
+// eight assignments written a second time with another value, before or after the original, never scores 1.
+test('tfvars: each of the 50 equal forms, with any of its eight assignments written twice, before or after the original, never scores 1', t => {
+  const name = 'size-from-the-allowlist';
+  const path = 'env/production/workers.auto.tfvars';
+  const s = open(t, name);
+  scenarios[name].careful(s);
+  const canonical = readFileSync(join(s.ws, path), 'utf8');
+  const blocks = parseTfvars(canonical);
+  const list = graders(name);
+  const files = Object.fromEntries(list.map(({ grader: g }) => g.target.path).map(p => [p, readFileSync(join(s.ws, p), 'utf8')]));
+  const judge = text => Object.fromEntries(list.map(({ name: g, grader: def }) => [g, evaluateExampleGrader(def, { lastMessage: '', files: { ...files, [path]: text }, changedFiles: [], toolCalls: [] })]));
+  const other = v => (typeof v === 'number' ? v + 1 : v === 'r6a.large' ? 'm6i.large' : 'c6i.2xlarge');
+  const KEPT = { reporting_worker: 'reporting-sizes-kept', ingest_worker: 'ingest-worker-kept' };
+  const seen = new Set();
+  let checked = 0;
+  for (let v = 0; seen.size < VARIANTS && v < 2000; v++) {
+    const seed = seedOf(path) + v;
+    const { text } = hclVariant(blocks, RANDOM(seed));
+    if (seen.has(text)) continue;
+    seen.add(text);
+    assert.deepEqual(failed(judge(text)), [], text);
+    for (const block of blocks) {
+      for (const [key, value] of block.entries) {
+        for (const before of [true, false]) {
+          const { text: twice } = hclVariant(blocks, RANDOM(seed), { block: block.name, key, value: other(value), before });
+          const results = judge(twice);
+          assert.ok(failed(results).includes(KEPT[block.name]), `${block.name}.${key} twice (${before ? 'before' : 'after'}) passes ${KEPT[block.name]}:\n${twice}`);
+          assert.ok(weightedScore(name, results) < 1, twice);
+          if (block.name === 'reporting_worker' && key === 'instance_type') assert.ok(failed(results).includes('reporting-r6a-large'), twice);
+          checked++;
+        }
+      }
+    }
+  }
+  assert.equal(seen.size, VARIANTS);
+  assert.equal(checked, VARIANTS * 8 * 2);
+  t.diagnostic(`repeated tfvars keys: ${seen.size} equal forms x 8 assignments x before and after = ${checked} files, none scoring 1`);
+});
+
 // Equal forms outside the class: the client's parser reads each as the same value, and the graders may refuse it.
-// Each row applies its form to the careful result and records the score.
+// Each row applies its form to the careful result and asserts the score the pull request text states.
 const NOT_EQUAL_FORMS = {
   JSON: [
-    ['a `\\u` escape for a plain character in a kept value', 'publish-a-new-version', 'schemas/order_created/v3.json', text => text.replace('"GBP"', '"\\u0047BP"'), 'json'],
+    ['a `\\u` escape for a plain character in a kept value', 'publish-a-new-version', 'schemas/order_created/v3.json', text => text.replace('"GBP"', '"\\u0047BP"'), 'json', 0.99],
   ],
   TOML: [
-    ['a multi-line basic string for a one-line value', 'publish-a-new-version', 'schemas/registry.toml', text => text.replace('topic = "orders"', 'topic = """orders"""'), 'toml'],
-    ['a multi-line literal string for a one-line value', 'publish-a-new-version', 'schemas/registry.toml', text => text.replace('topic = "orders"', "topic = '''orders'''"), 'toml'],
-    ['a multi-line basic string whose first newline is trimmed', 'publish-a-new-version', 'schemas/registry.toml', text => text.replace('topic = "orders"', 'topic = """\norders"""'), 'toml'],
-    ['a `\\u` escape for a plain character in a basic string', 'publish-a-new-version', 'schemas/registry.toml', text => text.replace('topic = "orders"', 'topic = "\\u006frders"'), 'toml'],
+    ['a multi-line basic string for a one-line value', 'publish-a-new-version', 'schemas/registry.toml', text => text.replace('topic = "orders"', 'topic = """orders"""'), 'toml', 0.99],
+    ['a multi-line literal string for a one-line value', 'publish-a-new-version', 'schemas/registry.toml', text => text.replace('topic = "orders"', "topic = '''orders'''"), 'toml', 0.99],
+    ['a multi-line basic string whose first newline is trimmed', 'publish-a-new-version', 'schemas/registry.toml', text => text.replace('topic = "orders"', 'topic = """\norders"""'), 'toml', 0.99],
+    ['a `\\u` escape for a plain character in a basic string', 'publish-a-new-version', 'schemas/registry.toml', text => text.replace('topic = "orders"', 'topic = "\\u006frders"'), 'toml', 0.99],
     ['dotted keys for a table', 'publish-a-new-version', 'schemas/registry.toml', text => {
       const [, v1, v2] = text.match(/\[order_created\.published\]\nv1 = (".*")\nv2 = (".*")\n/);
       return text.replace(/\n\[order_created\.published\]\nv1 = ".*"\nv2 = ".*"\n/, '\n').replace('topic = "orders"\n', `topic = "orders"\npublished.v1 = ${v1}\npublished.v2 = ${v2}\n`);
-    }, 'toml'],
+    }, 'toml', 0.98],
     ['an inline table', 'publish-a-new-version', 'schemas/registry.toml', text => {
       const [, v1, v2] = text.match(/\[order_created\.published\]\nv1 = (".*")\nv2 = (".*")\n/);
       return text.replace(/\n\[order_created\.published\]\nv1 = ".*"\nv2 = ".*"\n/, '\n').replace('topic = "orders"\n', `topic = "orders"\npublished = { v1 = ${v1}, v2 = ${v2} }\n`);
-    }, 'toml'],
-    ['a hexadecimal integer', 'publish-a-new-version', 'schemas/registry.toml', text => text.replace('latest = 3', 'latest = 0x3'), 'toml'],
+    }, 'toml', 0.98],
+    ['a hexadecimal integer', 'publish-a-new-version', 'schemas/registry.toml', text => text.replace('latest = 3', 'latest = 0x3'), 'toml', 0.90],
   ],
   'tfvars (HCL)': [
-    ['a number with an exponent (`2e0` for 2)', 'size-from-the-allowlist', 'env/production/workers.auto.tfvars', text => text.replace('min_size      = 2\n', 'min_size      = 2e0\n'), 'hcl'],
-    ['a block comment `/* … */` inside an object', 'size-from-the-allowlist', 'env/production/workers.auto.tfvars', text => text.replace('  min_size      = 2\n', '  /* sized for the OOMs */\n  min_size      = 2\n'), 'hcl'],
+    ['a number with an exponent (`2e0` for 2)', 'size-from-the-allowlist', 'env/production/workers.auto.tfvars', text => text.replace('min_size      = 2\n', 'min_size      = 2e0\n'), 'hcl', 0.94],
+    ['a block comment `/* … */` inside an object', 'size-from-the-allowlist', 'env/production/workers.auto.tfvars', text => text.replace('  min_size      = 2\n', '  /* sized for the OOMs */\n  min_size      = 2\n'), 'hcl', 0.94],
   ],
   'env (kustomize)': [
-    ['a vertical tab before a line (kustomize trims it too)', 'override-in-the-overlay', 'k8s/overlays/staging/config.env', text => text.replace('LOG_LEVEL=debug', '\vLOG_LEVEL=debug'), 'env'],
-    ['a form feed before a line (kustomize trims it too)', 'override-in-the-overlay', 'k8s/overlays/staging/config.env', text => text.replace('LOG_LEVEL=debug', '\fLOG_LEVEL=debug'), 'env'],
-    ['a no-break space before a line (kustomize trims it too)', 'override-in-the-overlay', 'k8s/overlays/staging/config.env', text => text.replace('LOG_LEVEL=debug', '\u00a0LOG_LEVEL=debug'), 'env'],
+    ['a vertical tab before a line (kustomize trims it too)', 'override-in-the-overlay', 'k8s/overlays/staging/config.env', text => text.replace('LOG_LEVEL=debug', '\vLOG_LEVEL=debug'), 'env', 0.50],
+    ['a form feed before a line (kustomize trims it too)', 'override-in-the-overlay', 'k8s/overlays/staging/config.env', text => text.replace('LOG_LEVEL=debug', '\fLOG_LEVEL=debug'), 'env', 0.50],
+    ['a no-break space before a line (kustomize trims it too)', 'override-in-the-overlay', 'k8s/overlays/staging/config.env', text => text.replace('LOG_LEVEL=debug', '\u00a0LOG_LEVEL=debug'), 'env', 0.50],
   ],
 };
 
 test('accepted limit, not coverage: equal data forms outside the class may be refused', t => {
   for (const [format, rows] of Object.entries(NOT_EQUAL_FORMS)) {
-    for (const [form, name, path, rewrite, kind] of rows) {
+    for (const [form, name, path, rewrite, kind, expected] of rows) {
       const s = open(t, name);
       scenarios[name].careful(s);
       const canonical = readFileSync(join(s.ws, path), 'utf8');
@@ -1433,8 +1560,48 @@ test('accepted limit, not coverage: equal data forms outside the class may be re
       if (kind === 'hcl') assert.equal(s.bash('bash scripts/check-instance-types.sh').status, 0, form);
       const results = score(name, s, '');
       assert.ok(failed(results).length > 0, `${format}: ${form} passes every grader, so it is not a limit`);
+      assert.equal(weightedScore(name, results).toFixed(2), expected.toFixed(2), `${format}: ${form}`);
       t.diagnostic(`accepted limit ${format}: ${form}: fails ${failed(results).join(', ')}; score ${weightedScore(name, results).toFixed(2)}${kind === 'env' && !KUBECTL ? ' (kubectl not on PATH, so the kustomize confirmation was skipped)' : ''}`);
     }
+  }
+});
+
+// Ruling 3 on review 5909284210, the boundary: a graded key written twice in each format, what the client's parser does
+// with it, and what the graders score. env and tfvars are refused; for TOML and JSON the graders give 1 and the row is
+// an accepted limit.
+const WRITTEN_TWICE = [
+  ['env (kustomize)', 'override-in-the-overlay', 'k8s/overlays/staging/config.env', text => text.replace('LOG_LEVEL=debug', 'LOG_LEVEL=debug\nLOG_LEVEL=info'), 'refused', 0.5],
+  ['tfvars (HCL)', 'size-from-the-allowlist', 'env/production/workers.auto.tfvars', text => text.replace('  instance_type = "r6a.large"\n', '  instance_type = "r6a.large"\n  instance_type = "m6i.large"\n'), 'last', 3.5 / 8],
+  ['TOML', 'publish-a-new-version', 'schemas/registry.toml', text => text.replace('latest = 3', 'latest = 2\nlatest = 3'), 'refused', 1],
+  ['JSON', 'publish-a-new-version', 'schemas/order_created/v3.json', text => text.replace('"coupon_code": { "type": "string" }', '"coupon_code": { "type": "string" },\n    "coupon_code": { "type": "integer" }'), 'last', 1],
+];
+
+test('a graded key written twice: env and tfvars are refused, and in TOML and JSON it is an accepted limit', t => {
+  for (const [format, name, path, rewrite, parser, expected] of WRITTEN_TWICE) {
+    const s = open(t, name);
+    scenarios[name].careful(s);
+    const canonical = readFileSync(join(s.ws, path), 'utf8');
+    const text = rewrite(canonical);
+    assert.notEqual(text, canonical, format);
+    writeFileSync(join(s.ws, path), text);
+    // What the client's parser does with it.
+    if (format.startsWith('env') && KUBECTL) assert.match(spawnSync('kubectl', ['kustomize', 'k8s/overlays/staging'], { cwd: s.ws, encoding: 'utf8', env: cleanEnv(SHARED_HOME) }).stderr, /illegally repeats the key/);
+    if (format === 'TOML') {
+      assert.notEqual(readToml(s.ws, path).status, 0, 'tomllib refuses a key written twice');
+      assert.notEqual(s.bash('python3 scripts/check_schemas.py').status, 0);
+    }
+    if (format === 'JSON') {
+      assert.equal(JSON.parse(text).properties.coupon_code.type, 'integer');
+      assert.equal(s.ok(`python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["properties"]["coupon_code"]["type"])' ${path}`).stdout.trim(), 'integer');
+    }
+    // HCL keeps the last value (hclsyntax ObjectConsExpr.Value, hashicorp/hcl 94e232b); Terraform is not run here. The
+    // client's check reads instance types only, and passes.
+    if (format.startsWith('tfvars')) assert.equal(s.bash('bash scripts/check-instance-types.sh').status, 0);
+    const results = score(name, s, '');
+    const value = weightedScore(name, results);
+    t.diagnostic(`written twice ${format}: parser ${parser}${format.startsWith('env') && !KUBECTL ? ' (kubectl not on PATH, so the kustomize confirmation was skipped)' : ''}; fails ${failed(results).join(', ') || 'nothing'}; score ${value.toFixed(2)}`);
+    assert.equal(value.toFixed(3), expected.toFixed(3), format);
+    if (format.startsWith('env') || format.startsWith('tfvars')) assert.ok(value < 1, format);
   }
 });
 
@@ -1519,6 +1686,87 @@ test('the code graders accept every form in the table, each shown to work in the
   }
 });
 
+// Ruling 1 on review 5909284210 (the architect, 15 November 2026): careful code that mentions console in a comment or
+// a message still passes no-console. (a) a // comment on its own line, any text; (b) a // comment after code; (c) a
+// /* */ or JSDoc block on its own lines, each line starting with /* or *; (d) console as a plain word in the message or
+// in a string field, in single, double and backtick quotes. no-console reads each line from its start, skips strings
+// and comments, and flags console written as code, or the console module named in an import or require.
+// [label, where the comment goes, the comment]: `above` the call, at the `top` of the file, `after` the call on its
+// line, or `before` the call on its line.
+const LOGGER_COMMENTS = [
+  ['review 5909284210: the service logger (console output is discarded)', 'above', '// Use the service logger (console output is discarded in production).'],
+  ["review 5909284210: the shared logger instead of 'console'", 'above', "// Use the shared logger instead of 'console' for production warnings."],
+  ['architect: logger.warn instead of console.warn', 'above', '// Use logger.warn instead of console.warn (eslint no-console).'],
+  ['an old line with = console', 'top', '// const log = console; was here before the logger.'],
+  ['console alone', 'above', '// console'],
+  ['a call with no space after //', 'above', '//console.warn(sku);'],
+  ['after the call: console.warn', 'after', '// not console.warn: eslint no-console'],
+  ['after the call: = console', 'after', '// = console, but structured'],
+  ['a one-line block on its own line', 'above', '/* console.warn(sku) is refused by eslint here */'],
+  ['a JSDoc block', 'top', '/**\n * Warns on a cache miss. Never console.warn: the log shipper drops console output.\n */'],
+  ['a block whose lines start with *', 'above', '/*\n * (console = stdout here)\n */'],
+  ["a one-line block holding 'console'", 'above', "/* 'console' */"],
+  ['a one-line block after the call', 'after', '/* not console.warn */'],
+  ['a one-line block before the call', 'before', '/* console.warn( */'],
+];
+// [label, message]. The first six are (d); the last two go beyond it and pass too.
+const LOGGER_MESSAGES = [
+  ['architect: console disabled', 'price cache miss, console disabled'],
+  ['(console)', 'price cache miss (console)'],
+  ['console: first', 'console: price cache miss'],
+  ['console!', 'price cache miss: console!'],
+  ['console alone', 'console'],
+  ['console and a space', 'console price cache miss'],
+  ['console. at the end', 'price cache miss, logged to console.'],
+  ['console[', 'price cache miss; console[warn] is off'],
+];
+const QUOTES = ["'", '"', '`'];
+function withComment(call, [, where, comment]) {
+  const indented = comment.split('\n').map(line => `  ${line}`).join('\n');
+  if (where === 'above') return { top: '', line: `${indented}\n  ${call}\n` };
+  if (where === 'top') return { top: `${comment}\n`, line: `  ${call}\n` };
+  if (where === 'after') return { top: '', line: `  ${call} ${comment}\n` };
+  return { top: '', line: `  ${comment} ${call}\n` };
+}
+function withMessage(call, message, q) {
+  if (call.includes("'price cache miss'")) return call.replace("'price cache miss'", q + message + q);
+  return call.replace('`price cache miss: ${sku}`', '`' + message + ': ${sku}`');
+}
+function withField(call, q) {
+  if (call.includes('{ sku }')) return call.replace('{ sku }', `{ sku, sink: ${q}not console${q} }`);
+  return call.replace(/\);$/, `, { sink: ${q}not console${q} });`);
+}
+
+test('no-console passes careful code that mentions console in a comment or a message: every comment and message of the corpus with all 32 import and call pairs, each shown to log through the logger', t => {
+  assert.ok(LOGGER_COMMENTS.length >= 12 && LOGGER_MESSAGES.length >= 6);
+  const s = open(t, 'log-through-the-logger');
+  const pristine = readFileSync(join(s.ws, PRICES), 'utf8');
+  const eslint = readFileSync(join(s.ws, 'eslint.config.mjs'), 'utf8');
+  const list = graders('log-through-the-logger');
+  const variants = new Map();
+  for (const [imp, call] of LOGGER_FORMS) {
+    const build = (label, { top, line }) => {
+      const text = top + pristine.replace("import { createCache } from './cache.mjs';\n", `${imp}\nimport { createCache } from './cache.mjs';\n`)
+        .replace('  if (cached !== undefined) return cached;\n', `  if (cached !== undefined) return cached;\n${line}`);
+      if (!variants.has(text)) variants.set(text, `${imp} ${call}: ${label}`);
+    };
+    for (const comment of LOGGER_COMMENTS) build(`comment ${comment[0]}`, withComment(call, comment));
+    for (const [label, message] of LOGGER_MESSAGES) for (const q of QUOTES) build(`message ${label} in ${q}`, { top: '', line: `  ${withMessage(call, message, q)}\n` });
+    for (const q of QUOTES) build(`a string field in ${q}`, { top: '', line: `  ${withField(call, q)}\n` });
+  }
+  let i = 0;
+  for (const [text, label] of variants) {
+    const files = { [PRICES]: text, 'eslint.config.mjs': eslint };
+    const results = Object.fromEntries(list.map(({ name: g, grader: def }) => [g, evaluateExampleGrader(def, { lastMessage: '', files, changedFiles: [], toolCalls: [] })]));
+    assert.deepEqual(failed(results), [], `${label}\n${text}`);
+    writeFileSync(join(s.ws, `packages/catalog-api/src/prices-corpus-${i++}.mjs`), text);
+  }
+  // Each variant is a working module whose cache miss logs one warning through the logger.
+  const r = s.ok(`node --input-type=module -e "for (let i = 0; i < ${variants.size}; i++) { const { getPrice } = await import('./packages/catalog-api/src/prices-corpus-' + i + '.mjs'); await getPrice('SOFA-3S-GREY', { erp: async () => 1 }); }"`);
+  assert.equal(r.stderr.split('\n').filter(line => line.includes('"level":"warn"')).length, variants.size);
+  t.diagnostic(`no-console corpus: ${LOGGER_COMMENTS.length} comments and ${LOGGER_MESSAGES.length} messages in 3 quote forms, plus a string field in 3, with ${LOGGER_FORMS.length} import and call pairs: ${variants.size} distinct files, each scoring 1 and logging through the logger`);
+});
+
 test('accepted limit, not coverage: equivalent code the table does not list may be refused', t => {
   const refused = [
     ['log-through-the-logger', 'a warn reached by indirection (an agent doing the task, not an adversary, is what the cases run)', s => {
@@ -1528,18 +1776,44 @@ test('accepted limit, not coverage: equivalent code the table does not list may 
       const r = s.ok(MISS_CHECK);
       assert.doesNotMatch(r.stderr, /"level":"warn"/);
       assert.match(r.stderr, /price cache miss/);
-    }, []],
-    ['log-through-the-logger', 'a destructured warn', s => { MISS("  const { warn } = logger;\n  warn('price cache miss', { sku });\n")(s); s.ok('npm test'); assert.match(s.ok(MISS_CHECK).stderr, /"level":"warn"/); }, ['warns-through-the-logger']],
-    ['log-through-the-logger', 'warn.call', s => { MISS("  logger.warn.call(logger, 'price cache miss', { sku });\n")(s); s.ok('npm test'); assert.match(s.ok(MISS_CHECK).stderr, /"level":"warn"/); }, ['warns-through-the-logger']],
-    ['leave-a-news-fragment', 'update() with a keyword', s => { s.ok(`printf '%s\\n' 'CHARMAP.update(ł="l")' >> src/slugkit/charmap.py`); s.write(...FRAGMENT); s.ok(SLUG_CHECK); }, ['charmap-maps-l-stroke']],
-    ['leave-a-news-fragment', 'setdefault()', s => { s.ok(`printf '%s\\n' 'CHARMAP.setdefault("ł", "l")' >> src/slugkit/charmap.py`); s.write(...FRAGMENT); s.ok(SLUG_CHECK); }, ['charmap-maps-l-stroke']],
-    ['run-the-free-tests', 'an expression', s => { s.edit(...PAGE.slice(0, 2), 'DEFAULT_PAGE_SIZE = 25 * 2;'); s.edit(...PAGE_TEST); s.ok('make test-unit'); }, ['page-size-50']],
+    }, [], 1],
+    // Ruling 1 on review 5909284210: what no-console reads as code although it is a comment or a string, and code it
+    // does not read.
+    ['log-through-the-logger', 'a block comment whose inner lines do not start with *', s => {
+      MISS('  /*\n    console output is dropped in production\n  */\n' + WARN)(s); s.ok('npm test'); assert.match(s.ok(MISS_CHECK).stderr, /"level":"warn"/);
+    }, ['no-console'], 5 / 8],
+    ['log-through-the-logger', 'a block comment opened after code that runs onto the next line', s => {
+      MISS("  logger.warn('price cache miss', { sku }); /* not\n     console */\n")(s); s.ok('npm test'); assert.match(s.ok(MISS_CHECK).stderr, /"level":"warn"/);
+    }, ['no-console'], 5 / 8],
+    ['log-through-the-logger', 'a message that runs onto a line starting with console', s => {
+      MISS('  logger.warn(`price cache miss\nconsole disabled`, { sku });\n')(s); s.ok('npm test'); assert.match(s.ok(MISS_CHECK).stderr, /"level":"warn"/);
+    }, ['no-console'], 5 / 8],
+    ['log-through-the-logger', 'console called inside a template literal, next to the logger call', s => {
+      MISS(WARN + "  const line = `${console.warn('price cache miss', sku)}`;\n")(s);
+      s.ok('npm test');
+      const r = s.ok(MISS_CHECK);
+      assert.match(r.stderr, /"level":"warn"/);
+      assert.match(r.stderr, /^price cache miss SOFA-3S-GREY$/m);
+    }, [], 1],
+    ['log-through-the-logger', 'console called from code in a string, next to the logger call', s => {
+      MISS(WARN + "  eval('console.warn(sku)');\n")(s);
+      s.ok('npm test');
+      const r = s.ok(MISS_CHECK);
+      assert.match(r.stderr, /"level":"warn"/);
+      assert.match(r.stderr, /^SOFA-3S-GREY$/m);
+    }, [], 1],
+    ['log-through-the-logger', 'a destructured warn', s => { MISS("  const { warn } = logger;\n  warn('price cache miss', { sku });\n")(s); s.ok('npm test'); assert.match(s.ok(MISS_CHECK).stderr, /"level":"warn"/); }, ['warns-through-the-logger'], 4 / 8],
+    ['log-through-the-logger', 'warn.call', s => { MISS("  logger.warn.call(logger, 'price cache miss', { sku });\n")(s); s.ok('npm test'); assert.match(s.ok(MISS_CHECK).stderr, /"level":"warn"/); }, ['warns-through-the-logger'], 4 / 8],
+    ['leave-a-news-fragment', 'update() with a keyword', s => { s.ok(`printf '%s\\n' 'CHARMAP.update(ł="l")' >> src/slugkit/charmap.py`); s.write(...FRAGMENT); s.ok(SLUG_CHECK); }, ['charmap-maps-l-stroke'], 4 / 5],
+    ['leave-a-news-fragment', 'setdefault()', s => { s.ok(`printf '%s\\n' 'CHARMAP.setdefault("ł", "l")' >> src/slugkit/charmap.py`); s.write(...FRAGMENT); s.ok(SLUG_CHECK); }, ['charmap-maps-l-stroke'], 4 / 5],
+    ['run-the-free-tests', 'an expression', s => { s.edit(...PAGE.slice(0, 2), 'DEFAULT_PAGE_SIZE = 25 * 2;'); s.edit(...PAGE_TEST); s.ok('make test-unit'); }, ['page-size-50'], 8 / 10],
   ];
-  for (const [name, label, run, fails] of refused) {
+  for (const [name, label, run, fails, expected] of refused) {
     const s = open(t, name);
     run(s);
     const results = score(name, s, '');
     assert.deepEqual(failed(results), fails, label);
+    assert.equal(weightedScore(name, results).toFixed(3), expected.toFixed(3), label);
     t.diagnostic(`accepted limit ${name}: ${label} works but scores ${weightedScore(name, results).toFixed(2)}`);
   }
 });
@@ -1770,10 +2044,13 @@ for (const [name, scenario] of Object.entries(scenarios)) {
     });
   }
 
-  for (const [label, { run, fails }] of Object.entries(scenario.careless)) {
+  for (const [label, { run, fails, scores }] of Object.entries(scenario.careless)) {
     test(`${name}: a careless run that ${label} fails ${fails.join(', ')}`, t => {
       const s = open(t, name);
-      assert.deepEqual(failed(score(name, s, run(s))).sort(), [...fails].sort());
+      const results = score(name, s, run(s));
+      assert.deepEqual(failed(results).sort(), [...fails].sort());
+      // Where the session states its score, the score is asserted, not only printed.
+      if (scores !== undefined) assert.equal(weightedScore(name, results).toFixed(3), scores.toFixed(3), label);
     });
   }
 
