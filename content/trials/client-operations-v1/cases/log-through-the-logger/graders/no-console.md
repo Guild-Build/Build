@@ -1,6 +1,6 @@
 ---
 type: regex
-pattern: '\bconsole\s*(?:\?\.|\.|\[)'
+pattern: '\bconsole\s*(?:\?\.|\.|\[)|["\x27](?:node:)?console["\x27]|[=(,:]\s*console\b'
 match: not_contains
 target:
   source: file

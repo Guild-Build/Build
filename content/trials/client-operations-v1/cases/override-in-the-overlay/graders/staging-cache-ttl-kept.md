@@ -1,6 +1,6 @@
 ---
 type: regex
-pattern: '^TRACKING_CACHE_TTL_S=5\r?$'
+pattern: '^[ \t]*TRACKING_CACHE_TTL_S=5\r?$'
 flags: m
 target:
   source: file

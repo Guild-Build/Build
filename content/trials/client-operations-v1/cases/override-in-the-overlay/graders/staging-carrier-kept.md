@@ -1,6 +1,6 @@
 ---
 type: regex
-pattern: '^CARRIER_API_BASE=carrier-sandbox\.osprey\.internal\r?$'
+pattern: '^[ \t]*CARRIER_API_BASE=carrier-sandbox\.osprey\.internal\r?$'
 flags: m
 target:
   source: file

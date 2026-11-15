@@ -37,8 +37,8 @@ allowed:
   - t3.medium    # 2 vCPU, 4 GiB
   - m6i.large    # 2 vCPU, 8 GiB, general purpose
   - c6i.xlarge   # 4 vCPU, 8 GiB, compute-heavy workers
-  - r6i.large    # 2 vCPU, 16 GiB, memory-heavy workers
-  - r6i.xlarge   # 4 vCPU, 32 GiB, memory-heavy workers
+  - r6a.large    # 2 vCPU, 16 GiB, memory-heavy workers (AMD; Basalt has no Intel r-family reservations)
+  - r6a.xlarge   # 4 vCPU, 32 GiB, memory-heavy workers (AMD)
 YAML
 cat > scripts/check-instance-types.sh <<'SH'
 #!/usr/bin/env bash
