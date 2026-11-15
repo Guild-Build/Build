@@ -4,5 +4,5 @@ pattern: '\S'
 target:
   source: file
   path: newsfragments/318.bugfix.md
-weight: 3
+weight: 2.5
 ---

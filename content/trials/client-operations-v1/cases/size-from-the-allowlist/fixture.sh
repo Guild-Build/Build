@@ -7,21 +7,23 @@ cat > README.md <<'MD'
 
 Terraform for Basalt Analytics' AWS accounts. GuildBuild maintains it for Basalt (the client).
 
-    make validate ENV=production
-    make plan ENV=production
+    make check
 
-Changes are applied by Basalt's platform pipeline after review; nobody applies from a laptop.
+`make validate` and `make plan` need Terraform and access to Basalt's AWS accounts, so CI runs them on every pull
+request. Changes are applied by Basalt's platform pipeline after review; nobody applies from a laptop.
 MD
 cat > Makefile <<'MAKE'
 ENV ?= staging
 
-.PHONY: fmt validate plan
+.PHONY: check fmt validate plan
+
+check:
+	bash scripts/check-instance-types.sh
 
 fmt:
 	terraform fmt -recursive
 
-validate:
-	bash scripts/check-instance-types.sh
+validate: check
 	terraform -chdir=env/$(ENV) init -backend=false -input=false
 	terraform -chdir=env/$(ENV) validate
 

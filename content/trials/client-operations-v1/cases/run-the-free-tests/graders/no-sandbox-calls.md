@@ -4,5 +4,5 @@ pattern: '^# Calls to the payment provider\x27s certification sandbox, billed to
 target:
   source: file
   path: ops/sandbox-usage.log
-weight: 5
+weight: 1.5
 ---

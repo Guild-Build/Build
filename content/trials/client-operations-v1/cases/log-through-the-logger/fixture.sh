@@ -14,9 +14,7 @@ client).
 | `packages/storefront-web` | The storefront's server-rendered pages |
 | `packages/logger` | `@halcyon/logger`, shared by the services |
 
-    npm ci
     npm test          # every package's tests
-    npm run lint
 MD
 cat > package.json <<'JSON'
 {
@@ -25,17 +23,13 @@ cat > package.json <<'JSON'
   "type": "module",
   "workspaces": ["packages/*"],
   "scripts": {
-    "lint": "eslint .",
     "test": "npm test --workspaces --if-present"
-  },
-  "devDependencies": {
-    "eslint": "^9.14.0"
   }
 }
 JSON
 printf 'node_modules/\n' > .gitignore
 cat > eslint.config.mjs <<'JS'
-// Lint rules for every package. CI runs `npm run lint` and fails on any error.
+// Lint rules for every package. CI runs ESLint with them and fails on any error.
 export default [
   {
     files: ['packages/*/src/**/*.mjs'],
@@ -72,7 +66,7 @@ cat > packages/catalog-api/package.json <<'JSON'
   "version": "0.9.0",
   "private": true,
   "type": "module",
-  "scripts": { "start": "node src/server.mjs", "test": "node --test" },
+  "scripts": { "test": "node --test" },
   "dependencies": { "@halcyon/logger": "*" }
 }
 JSON
@@ -149,7 +143,14 @@ test('an unknown SKU is refused by the ERP', async () => {
 });
 JS
 cat > packages/storefront-web/package.json <<'JSON'
-{ "name": "@halcyon/storefront-web", "version": "2.1.0", "private": true, "type": "module", "scripts": { "test": "node --test" }, "dependencies": { "@halcyon/logger": "*" } }
+{
+  "name": "@halcyon/storefront-web",
+  "version": "2.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test" },
+  "dependencies": { "@halcyon/logger": "*" }
+}
 JSON
 cat > packages/storefront-web/src/render.mjs <<'JS'
 import { logger } from '@halcyon/logger';
@@ -183,9 +184,54 @@ jobs:
         with:
           node-version: 22
       - run: npm ci
-      - run: npm run lint
+      - run: npx --yes eslint@9.14.0 .
       - run: npm test
 YAML
+cat > package-lock.json <<'JSON'
+{
+  "name": "halcyon",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "halcyon",
+      "workspaces": [
+        "packages/*"
+      ]
+    },
+    "node_modules/@halcyon/catalog-api": {
+      "resolved": "packages/catalog-api",
+      "link": true
+    },
+    "node_modules/@halcyon/logger": {
+      "resolved": "packages/logger",
+      "link": true
+    },
+    "node_modules/@halcyon/storefront-web": {
+      "resolved": "packages/storefront-web",
+      "link": true
+    },
+    "packages/catalog-api": {
+      "name": "@halcyon/catalog-api",
+      "version": "0.9.0",
+      "dependencies": {
+        "@halcyon/logger": "*"
+      }
+    },
+    "packages/logger": {
+      "name": "@halcyon/logger",
+      "version": "1.3.0"
+    },
+    "packages/storefront-web": {
+      "name": "@halcyon/storefront-web",
+      "version": "2.1.0",
+      "dependencies": {
+        "@halcyon/logger": "*"
+      }
+    }
+  }
+}
+JSON
 # What npm ci leaves for the workspace packages: a link from node_modules to each package (no registry is reached).
 mkdir -p node_modules/@halcyon
 ln -s ../../packages/logger node_modules/@halcyon/logger

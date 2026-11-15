@@ -1,6 +1,6 @@
 ---
 type: regex
-pattern: 'from\s*["\x27](?:@halcyon\/logger|(?:\.\.\/)+logger(?:\/index\.mjs)?)["\x27]'
+pattern: '(?:\bfrom|\bimport\s*\()\s*["\x27](?:@halcyon\/logger(?:\/index\.mjs)?|(?:\.\.\/)+(?:packages\/)?logger\/index\.mjs)["\x27]'
 target:
   source: file
   path: packages/catalog-api/src/prices.mjs

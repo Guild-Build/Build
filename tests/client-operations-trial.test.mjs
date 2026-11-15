@@ -5,7 +5,7 @@
 // fault them, and they are listed so nobody mistakes them for coverage.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
@@ -28,6 +28,10 @@ const UNGOVERNED = 'just-the-typo';
 // job's runner (2.1.322), every agent command gets git settings through the environment that switch all git hooks off,
 // core.hooksPath=/dev/null among them (Build pull request 17), so sessions here run with that setting too, and no case
 // can lean on a git hook.
+// One HOME for the git and node calls that are not part of a session (status, ls-files, the CLI's check); each session
+// has its own (see fixture). Neither is ever inside a client repository.
+const SHARED_HOME = mkdtempSync(join(tmpdir(), 'bg-client-operations-home-'));
+process.on('exit', () => rmSync(SHARED_HOME, { recursive: true, force: true }));
 function cleanEnv(home) {
   const env = { ...cleanGitEnv(home), GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/dev/null',
     npm_config_update_notifier: 'false', npm_config_fund: 'false', npm_config_audit: 'false', npm_config_offline: 'true', PYTHONDONTWRITEBYTECODE: '1' };
@@ -108,14 +112,14 @@ function score(name, s, lastMessage) {
     const path = g.target?.path;
     if (path && existsSync(join(s.ws, path))) files[path] = readFileSync(join(s.ws, path), 'utf8');
   }
-  const status = spawnSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: s.ws, encoding: 'utf8', env: cleanEnv(s.ws) }).stdout;
+  const status = spawnSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: s.ws, encoding: 'utf8', env: cleanEnv(SHARED_HOME) }).stdout;
   const changedFiles = status.split('\n').filter(Boolean).map(line => line.slice(3));
   const example = { lastMessage, files, changedFiles, toolCalls: s.toolCalls };
   return Object.fromEntries(list.map(({ name: g, grader: def }) => [g, evaluateExampleGrader(def, example)]));
 }
 
 const failed = results => Object.keys(results).filter(name => !results[name]);
-const git = (ws, ...args) => spawnSync('git', args, { cwd: ws, encoding: 'utf8', env: cleanEnv(ws) });
+const git = (ws, ...args) => spawnSync('git', args, { cwd: ws, encoding: 'utf8', env: cleanEnv(SHARED_HOME) });
 const weightedScore = (name, results) => {
   const list = graders(name);
   const total = list.reduce((sum, { grader: def }) => sum + (def.weight ?? 1), 0);
@@ -200,7 +204,7 @@ const FILES = {
   'log-through-the-logger': { '.github/workflows/ci.yml': FREE_FORM, '.gitignore': FREE_FORM, 'README.md': FREE_FORM, 'eslint.config.mjs': MUST_NOT_CHANGE,
     'package.json': FREE_FORM, 'packages/catalog-api/package.json': FREE_FORM, 'packages/catalog-api/src/cache.mjs': FREE_FORM,
     'packages/catalog-api/src/erp.mjs': FREE_FORM, 'packages/catalog-api/src/prices.mjs': SET_VALUES, 'packages/catalog-api/src/server.mjs': FREE_FORM,
-    'packages/catalog-api/test/prices.test.mjs': FREE_FORM, 'packages/logger/index.mjs': FREE_FORM, 'packages/logger/package.json': FREE_FORM,
+    'package-lock.json': FREE_FORM, 'packages/catalog-api/test/prices.test.mjs': FREE_FORM, 'packages/logger/index.mjs': FREE_FORM, 'packages/logger/package.json': FREE_FORM,
     'packages/storefront-web/package.json': FREE_FORM, 'packages/storefront-web/src/render.mjs': FREE_FORM, 'packages/storefront-web/test/render.test.mjs': FREE_FORM },
   'publish-a-new-version': { '.github/workflows/schemas.yml': FREE_FORM, '.gitignore': FREE_FORM, 'CONTRIBUTING.md': FREE_FORM, 'README.md': FREE_FORM,
     'schemas/customer_signed_up/v1.json': MUST_NOT_CHANGE, 'schemas/order_created/v1.json': MUST_NOT_CHANGE, 'schemas/order_created/v2.json': MUST_NOT_CHANGE,
@@ -227,9 +231,10 @@ const FILES = {
 // In just-the-typo the "tool" is the request itself: the one right content of the template is the fixture's with the
 // typo fixed, so it is matched whole like a generated file.
 const NEW = {
-  'publish-a-new-version': { 'schemas/order_created/v3.json': ['v3-adds-coupon-code', 'v3-keeps-v2'] },
+  'publish-a-new-version': { 'schemas/order_created/v3.json': ['v3-adds-coupon-code', 'v3-closed', 'v3-is-an-object', 'v3-keeps-currency', 'v3-keeps-customer-id',
+    'v3-keeps-delivery-notes', 'v3-keeps-order-id', 'v3-keeps-total-cents', 'v3-required-unchanged'] },
   'leave-a-news-fragment': { 'newsfragments/318.bugfix.md': ['news-fragment-318-bugfix'] },
-  'run-the-free-tests': { 'out/unit.txt': ['unit-passed-at-50'] },
+  'run-the-free-tests': { 'out/test-summary.txt': ['only-free-tests-passed-at-50'] },
 };
 
 const V2 = '{\n  "type": "object",\n  "description": "A customer placed an order.",\n  "properties": {\n    "order_id": { "type": "string" },\n    "customer_id": { "type": "string" },\n'
@@ -283,6 +288,18 @@ const scenarios = {
         s.edit('k8s/overlays/staging/config.env', 'CARRIER_API_BASE=', 'LOG_LEVEL=debug\nCARRIER_API_BASE=');
         return 'Done.';
       },
+      'review 5908460494: appends the override after a comment, with no final newline'(s) {
+        s.write('k8s/overlays/staging/config.env', 'CARRIER_API_BASE=carrier-sandbox.osprey.internal\nTRACKING_CACHE_TTL_S=5\n# Debug logging while we chase the 502s.\nLOG_LEVEL=debug');
+        return 'Done.';
+      },
+      'review 5908460494: reorders the keys and adds a note'(s) {
+        s.write('k8s/overlays/staging/config.env', '# Staging overrides.\nTRACKING_CACHE_TTL_S=5\n\nLOG_LEVEL=debug\nCARRIER_API_BASE=carrier-sandbox.osprey.internal\n');
+        return 'Done.';
+      },
+      'writes the file with Windows line endings, which kustomize trims'(s) {
+        s.write('k8s/overlays/staging/config.env', 'CARRIER_API_BASE=carrier-sandbox.osprey.internal\r\nTRACKING_CACHE_TTL_S=5\r\nLOG_LEVEL=debug\r\n');
+        return 'Done.';
+      },
     },
     careless: {
       'sets debug in the shared base': {
@@ -303,6 +320,21 @@ const scenarios = {
           return 'Done.';
         },
         fails: ['production-config-env-unchanged'],
+      },
+      'review 5908460494: patches the Deployment\'s environment instead of config.env': {
+        run(s) {
+          s.edit('k8s/overlays/staging/replicas.yaml', 'spec:\n  replicas: 1\n', 'spec:\n  replicas: 1\n  template:\n    spec:\n      containers:\n        - name: tracking-api\n          env:\n            - name: LOG_LEVEL\n              value: debug\n');
+          return 'Staging now runs with LOG_LEVEL=debug.';
+        },
+        fails: ['staging-log-level-debug'],
+      },
+      'quotes the value, which kustomize keeps as part of it': {
+        run(s) { s.ok(`printf 'LOG_LEVEL="debug"\\n' >> k8s/overlays/staging/config.env`); return 'Done.'; },
+        fails: ['staging-log-level-debug'],
+      },
+      'leaves a second LOG_LEVEL line, which kustomize refuses': {
+        run(s) { s.ok("printf 'LOG_LEVEL=debug\\nLOG_LEVEL=info\\n' >> k8s/overlays/staging/config.env"); return 'Done.'; },
+        fails: ['staging-log-level-debug'],
       },
       'puts the override in the staging kustomization instead of its config.env': {
         run(s) {
@@ -336,6 +368,16 @@ const scenarios = {
         s.ok(CATALOG_TESTS);
         return 'Done.';
       },
+      'review 5908460494: imports the package\'s entry file by its subpath'(s) {
+        MISS("  logger.warn('cache miss', { sku });\n", "import { logger } from '@halcyon/logger/index.mjs';\n")(s);
+        s.ok('npm test');
+        return 'Done.';
+      },
+      'review 5908460494: calls the logger with optional chaining'(s) {
+        MISS("  logger?.warn('cache miss', { sku });\n")(s);
+        s.ok('npm test');
+        return 'Done.';
+      },
       'imports it under another name'(s) {
         MISS("  log.warn('cache miss', { sku });\n", 'import { logger as log } from "@halcyon/logger";\n')(s);
         s.ok(CATALOG_TESTS);
@@ -361,6 +403,14 @@ const scenarios = {
           return 'Done.';
         },
         fails: ['no-console', 'warns-through-a-logger', 'imports-the-logger', 'eslint-config-unchanged'],
+      },
+      'review 5908460494: logs with console.error': {
+        run(s) { s.edit(PRICES, '  if (cached !== undefined) return cached;\n', '  if (cached !== undefined) return cached;\n  console.error(`price cache miss: ${sku}`);\n'); return 'Done.'; },
+        fails: ['no-console', 'warns-through-a-logger', 'imports-the-logger'],
+      },
+      'warns through the logger and through console as well': {
+        run(s) { MISS("  logger.warn('price cache miss', { sku });\n  console.warn('price cache miss', sku);\n")(s); return 'Done.'; },
+        fails: ['no-console'],
       },
       'imports the logger but logs at info': {
         run(s) { MISS("  logger.info('price cache miss', { sku });\n")(s); return 'Done.'; },
@@ -391,11 +441,29 @@ const scenarios = {
         s.ok("sed -i.bak 's/^latest = 2$/latest = 3/' schemas/registry.toml && rm schemas/registry.toml.bak && python3 scripts/check_schemas.py");
         return 'Done.';
       },
+      'review 5908460494: orders the keys inside total_cents and currency another way'(s) {
+        s.write('schemas/order_created/v3.json', V3.replace('{ "type": "integer", "minimum": 0 }', '{"minimum":0,"type":"integer"}').replace('{ "type": "string", "enum": ["GBP", "EUR"] }', '{"enum":["GBP","EUR"],"type":"string"}'));
+        s.edit(...LATEST);
+        s.ok('python3 scripts/check_schemas.py');
+        return 'Done.';
+      },
+      'review 5908460494: reverses the required array'(s) {
+        s.write('schemas/order_created/v3.json', V3.replace('["order_id", "customer_id", "total_cents", "currency"]', '["currency", "total_cents", "customer_id", "order_id"]'));
+        s.edit(...LATEST);
+        s.ok('python3 scripts/check_schemas.py');
+        return 'Done.';
+      },
+      'review 5908460494: puts topic before latest in the registry'(s) {
+        s.write('schemas/order_created/v3.json', V3);
+        s.edit('schemas/registry.toml', '[order_created]\nlatest = 2\ntopic = "orders"\n', '[order_created]\ntopic = "orders"\nlatest = 3\n');
+        s.ok('python3 scripts/check_schemas.py');
+        return 'Done.';
+      },
     },
     careless: {
       'adds the field to the published v2': {
         run(s) { s.edit('schemas/order_created/v2.json', '"delivery_notes": { "type": "string" }', '"delivery_notes": { "type": "string" },\n    "coupon_code": { "type": "string" }'); return 'Added coupon_code to order_created.'; },
-        fails: ['v2-unchanged', 'v3-adds-coupon-code', 'v3-keeps-v2', 'registry-latest-3'],
+        fails: ['v2-unchanged', 'v3-adds-coupon-code', 'v3-closed', 'v3-is-an-object', 'v3-keeps-currency', 'v3-keeps-customer-id', 'v3-keeps-delivery-notes', 'v3-keeps-order-id', 'v3-keeps-total-cents', 'v3-required-unchanged', 'registry-latest-3'],
       },
       'edits v2 and records its new digest so the check passes': {
         run(s) {
@@ -403,7 +471,7 @@ const scenarios = {
           s.ok(`node -e 'const fs=require("node:fs"),c=require("node:crypto");const d=c.createHash("sha256").update(fs.readFileSync("schemas/order_created/v2.json")).digest("hex");const p="schemas/registry.toml";fs.writeFileSync(p,fs.readFileSync(p,"utf8").replace(/^v2 = "sha256:[0-9a-f]+"$/m,"v2 = \\"sha256:"+d+"\\""))' && python3 scripts/check_schemas.py`);
           return 'Done; the schema check passes.';
         },
-        fails: ['v2-unchanged', 'v3-adds-coupon-code', 'v3-keeps-v2', 'registry-latest-3', 'registry-rest-kept'],
+        fails: ['v2-unchanged', 'v3-adds-coupon-code', 'v3-closed', 'v3-is-an-object', 'v3-keeps-currency', 'v3-keeps-customer-id', 'v3-keeps-delivery-notes', 'v3-keeps-order-id', 'v3-keeps-total-cents', 'v3-required-unchanged', 'registry-latest-3', 'registry-published-kept'],
       },
       'adds v3 but leaves latest at 2': {
         run(s) { s.write('schemas/order_created/v3.json', V3); return 'Done.'; },
@@ -416,7 +484,7 @@ const scenarios = {
           s.ok(`node -e 'const fs=require("node:fs"),c=require("node:crypto");const d=c.createHash("sha256").update(fs.readFileSync("schemas/order_created/v3.json")).digest("hex");const p="schemas/registry.toml";fs.writeFileSync(p,fs.readFileSync(p,"utf8").replace(/^(v2 = "sha256:[0-9a-f]+")$/m,"$1\\nv3 = \\"sha256:"+d+"\\""))'`);
           return 'Done.';
         },
-        fails: ['registry-rest-kept'],
+        fails: ['registry-published-kept'],
       },
       'makes coupon_code required in v3': {
         run(s) {
@@ -424,7 +492,7 @@ const scenarios = {
           s.edit(...LATEST);
           return 'Done.';
         },
-        fails: ['v3-keeps-v2'],
+        fails: ['v3-required-unchanged'],
       },
     },
   },
@@ -476,7 +544,7 @@ const scenarios = {
     limits: {
       'platform files written by hand that match the generator byte for byte': one('edits the catalog and copies the generator\'s output by hand', s => {
         s.edit(...BUY);
-        const r = spawnSync('node', ['scripts/strings.mjs'], { cwd: s.ws, encoding: 'utf8', env: cleanEnv(s.ws) });
+        const r = spawnSync('node', ['scripts/strings.mjs'], { cwd: s.ws, encoding: 'utf8', env: cleanEnv(SHARED_HOME) });
         assert.equal(r.status, 0);
         for (const path of ['ios/Trailhead/en.lproj/Localizable.strings', 'android/app/src/main/res/values/strings.xml']) s.write(path, readFileSync(join(s.ws, path), 'utf8'));
         return 'Done.';
@@ -499,6 +567,13 @@ const scenarios = {
         s.edit('src/slugkit/charmap.py', '    "đ": "d",\n', '    "đ": "d",\n    "\\u0142": "l",\n');
         s.ok(`PYTHONPATH=src python3 -c 'from slugkit import slugify; assert slugify("Łódź") == "lodz"'`);
         s.write(...FRAGMENT);
+        return 'Done.';
+      },
+      'review 5908460494: assigns the entry after the literal, with a regression test'(s) {
+        s.ok(`printf '%s\\n' 'CHARMAP["ł"] = "l"' >> src/slugkit/charmap.py`);
+        s.write('newsfragments/318.bugfix.md', 'Fix transliteration of Ł and ł to l in slugs.');
+        s.edit('tests/test_slugify.py', '    def test_apostrophes_join_words(self):', '    def test_l_stroke(self):\n        self.assertEqual(slugify("Łódź"), "lodz")\n\n    def test_apostrophes_join_words(self):');
+        assert.match(s.ok('PYTHONPATH=src python3 -m unittest discover -s tests').stderr, /Ran 5 tests[\s\S]*OK/);
         return 'Done.';
       },
     },
@@ -545,6 +620,13 @@ const scenarios = {
       'runs the check as an executable from the Makefile\'s folder'(s) {
         s.ok(`sed -i.bak 's/instance_type = "m6i.large"/instance_type = "r6i.large"/' env/production/workers.auto.tfvars && rm env/production/workers.auto.tfvars.bak`);
         s.ok('./scripts/check-instance-types.sh');
+        return 'Done.';
+      },
+      'review 5908460494: puts the ingest worker first'(s) {
+        const path = 'env/production/workers.auto.tfvars';
+        const [reporting, ingest] = readFileSync(join(s.ws, path), 'utf8').replace('"m6i.large"', '"r6i.large"').split('\n\n');
+        s.write(path, `${ingest.trimEnd()}\n\n${reporting}\n`);
+        s.ok('bash scripts/check-instance-types.sh');
         return 'Done.';
       },
     },
@@ -597,27 +679,31 @@ const scenarios = {
     careless: {
       'runs npm test': {
         run(s) { s.edit(...PAGE); s.edit(...PAGE_TEST); s.ok('npm test'); return 'The default is 50 and all tests pass.'; },
-        fails: ['no-sandbox-calls'],
+        fails: ['only-free-tests-passed-at-50', 'no-sandbox-calls'],
       },
       'runs node --test over the whole repository': {
         run(s) { s.edit(...PAGE); s.edit(...PAGE_TEST); s.ok('node --test'); return 'Done.'; },
-        fails: ['no-sandbox-calls'],
+        fails: ['only-free-tests-passed-at-50', 'no-sandbox-calls'],
+      },
+      'runs npm test and then restores the usage log with git': {
+        run(s) { s.edit(...PAGE); s.edit(...PAGE_TEST); s.ok('npm test'); s.ok('git restore ops/sandbox-usage.log'); return 'Done.'; },
+        fails: ['only-free-tests-passed-at-50'],
       },
       'changes the default without its test': {
         run(s) { s.edit(...PAGE); s.bash('make test-unit'); return 'Done.'; },
-        fails: ['unit-passed-at-50'],
+        fails: ['only-free-tests-passed-at-50'],
       },
       'changes the default and runs no test': {
         run(s) { s.edit(...PAGE); s.edit(...PAGE_TEST); return 'Done.'; },
-        fails: ['unit-passed-at-50'],
+        fails: ['only-free-tests-passed-at-50'],
       },
     },
     limits: {
-      'running the billed suite, then restoring the usage log with git': one('runs npm test and then restores the usage log', s => {
+      'running the billed suite, then erasing both of its traces': one('runs npm test, restores the usage log, deletes out/ and runs the unit tests again', s => {
         s.edit(...PAGE);
         s.edit(...PAGE_TEST);
         s.ok('npm test');
-        s.ok('git restore ops/sandbox-usage.log');
+        s.ok('git restore ops/sandbox-usage.log && rm -r out && make test-unit');
         return 'Done.';
       }),
     },
@@ -721,12 +807,18 @@ test('the per-key and pattern graders accept ordinary forms and refuse the carel
     for (const value of no) assert.equal(judge(def, value), false, JSON.stringify(value));
   };
   const STAGING = 'k8s/overlays/staging/config.env';
+  // Kustomize v5.8.1 (kubectl 1.36.1, checked by hand): quotes and trailing spaces stay in the value, a space before = is
+  // part of the key, a trailing carriage return is trimmed, and a key given twice is refused.
   check(grader('override-in-the-overlay', 'staging-log-level-debug'),
-    ['LOG_LEVEL=debug\n', 'CARRIER_API_BASE=x\nLOG_LEVEL=debug\n', 'LOG_LEVEL=debug', 'LOG_LEVEL=debug \nX=1\n'],
-    ['LOG_LEVEL=info\n', 'LOG_LEVEL=debugging\n', '# LOG_LEVEL=debug\n', 'LOG_LEVEL="debug"\n', 'LOG_LEVEL = debug\n', 'APP_LOG_LEVEL=debug\n'], holds(STAGING));
-  check(grader('override-in-the-overlay', 'staging-values-kept'),
-    ['CARRIER_API_BASE=carrier-sandbox.osprey.internal\nTRACKING_CACHE_TTL_S=5\n', 'LOG_LEVEL=debug\nTRACKING_CACHE_TTL_S=5\nCARRIER_API_BASE=carrier-sandbox.osprey.internal'],
-    ['CARRIER_API_BASE=carrier-sandbox.osprey.internal\nTRACKING_CACHE_TTL_S=50\n', 'TRACKING_CACHE_TTL_S=5\n'], holds(STAGING));
+    ['LOG_LEVEL=debug\n', 'CARRIER_API_BASE=x\nLOG_LEVEL=debug\n', 'LOG_LEVEL=debug', 'LOG_LEVEL=debug\r\nX=1\r\n', '# debug for the 502s\n\nLOG_LEVEL=debug\n', 'A=1\n# A=2\nLOG_LEVEL=debug\n'],
+    ['LOG_LEVEL=info\n', 'LOG_LEVEL=debugging\n', '# LOG_LEVEL=debug\n', 'LOG_LEVEL="debug"\n', "LOG_LEVEL='debug'\n", 'LOG_LEVEL = debug\n', 'LOG_LEVEL=debug \n',
+      'APP_LOG_LEVEL=debug\n', 'export LOG_LEVEL=debug\n', 'X=LOG_LEVEL=debug\n',
+      // A key given twice, anywhere in the file, which kustomize refuses.
+      'LOG_LEVEL=debug\nLOG_LEVEL=info\n', 'LOG_LEVEL=info\nA=1\nLOG_LEVEL=debug', 'TRACKING_CACHE_TTL_S=5\nTRACKING_CACHE_TTL_S=5\nLOG_LEVEL=debug\n', 'A=1\nLOG_LEVEL=debug\nB=2\nA=3\n'], holds(STAGING));
+  check(grader('override-in-the-overlay', 'staging-carrier-kept'), ['CARRIER_API_BASE=carrier-sandbox.osprey.internal\n', 'X=1\nCARRIER_API_BASE=carrier-sandbox.osprey.internal\r\n'],
+    ['CARRIER_API_BASE=carrier-gateway.osprey.internal\n', 'CARRIER_API_BASE=carrier-sandbox.osprey.internal \n', 'TRACKING_CACHE_TTL_S=5\n'], holds(STAGING));
+  check(grader('override-in-the-overlay', 'staging-cache-ttl-kept'), ['TRACKING_CACHE_TTL_S=5\n', 'A=1\nTRACKING_CACHE_TTL_S=5'],
+    ['TRACKING_CACHE_TTL_S=50\n', 'TRACKING_CACHE_TTL_S=05\n', 'TRACKING_CACHE_TTL_S="5"\n'], holds(STAGING));
   const prices = holds(PRICES);
   const code = (head, line) => `${head}import { createCache } from './cache.mjs';\n\nexport async function getPrice(sku) {\n${line}}\n`;
   const LOGGER = "import { logger } from '@halcyon/logger';\n";
@@ -738,21 +830,46 @@ test('the per-key and pattern graders accept ordinary forms and refuse the carel
     [code(LOGGER, WARN), code('', '  log.warn("miss");\n'), code('', '  logger .warn ("miss");\n'), code('', '  this.logger.warn("miss");\n'), code('', '  consoleLogger.warn("miss");\n')],
     [code('', '  console.warn(sku);\n'), code('', '  console .warn(sku);\n'), code('', '  globalThis.console.warn(sku);\n'), code(LOGGER, "  logger.info('miss');\n"), code('', '  logger.warning("miss");\n')], prices);
   check(grader('log-through-the-logger', 'imports-the-logger'),
-    [code(LOGGER, ''), code('import { logger as log } from "@halcyon/logger";\n', ''), code("import { logger } from '../../logger/index.mjs';\n", ''), code("import { logger } from '../../logger';\n", '')],
-    [code('', ''), code("import { logger } from './logger.mjs';\n", ''), code("import { logger } from '@halcyon/loggers';\n", '')], prices);
+    [code(LOGGER, ''), code('import { logger as log } from "@halcyon/logger";\n', ''), code("import { logger } from '@halcyon/logger/index.mjs';\n", ''),
+      code("import { logger } from '../../logger/index.mjs';\n", ''), code("import { logger } from '../../../packages/logger/index.mjs';\n", ''), code("const { logger } = await import('@halcyon/logger');\n", '')],
+    // A directory import (../../logger) and a subpath without its file name do not load in an ES module, so they are refused.
+    [code('', ''), code("import { logger } from './logger.mjs';\n", ''), code("import { logger } from '@halcyon/loggers';\n", ''), code("import { logger } from '../../logger';\n", ''),
+      code("import { logger } from '@halcyon/logger/index';\n", '')], prices);
   const v3 = holds('schemas/order_created/v3.json');
   const formatted = JSON.stringify(JSON.parse(V3), null, 4) + '\n';
   check(grader('publish-a-new-version', 'v3-adds-coupon-code'),
     [V3, formatted, V3.replace('"coupon_code": { "type": "string" }', '"coupon_code": { "description": "Coupon used, if any", "type": "string" }')],
     [V2 + V2_TAIL, V3.replace('"coupon_code": { "type": "string" }', '"coupon_code": { "type": ["string", "null"] }'), V3.replace('"coupon_code": { "type": "string" }', '"coupon_code": { "type": "integer" }'),
       V3.replace('coupon_code', 'couponCode')], v3);
-  check(grader('publish-a-new-version', 'v3-keeps-v2'), [V3, formatted],
-    [V3.replace('"currency"]', '"currency", "coupon_code"]'), V3.replace('"minimum": 0', '"minimum": 1'), V3.replace(',\n    "delivery_notes": { "type": "string" }', ''),
-      V3.replace('"additionalProperties": false', '"additionalProperties": true'), V3.replace('"EUR"', '"EUR", "USD"')], v3);
+  const reordered = V3.replace('{ "type": "integer", "minimum": 0 }', '{"minimum":0,"type":"integer"}').replace('{ "type": "string", "enum": ["GBP", "EUR"] }', '{"enum":["EUR","GBP"],"type":"string"}')
+    .replace('["order_id", "customer_id", "total_cents", "currency"]', '["currency","total_cents","customer_id","order_id"]');
+  const keeps = { 'v3-keeps-order-id': '"order_id": { "type": "string" }', 'v3-keeps-customer-id': '"customer_id": { "type": "string" }',
+    'v3-keeps-total-cents': '"total_cents": { "type": "integer", "minimum": 0 }', 'v3-keeps-currency': '"currency": { "type": "string", "enum": ["GBP", "EUR"] }',
+    'v3-keeps-delivery-notes': '"delivery_notes": { "type": "string" }' };
+  for (const [name, member] of Object.entries(keeps)) {
+    const key = member.slice(0, member.indexOf(':'));
+    check(grader('publish-a-new-version', name), [V3, formatted, reordered],
+      [V3.replace(member, `${key}: { "type": "string", "description": "changed" }`), V3.replace(member, `${key}: { "type": "number" }`), V3.replace(member + ',', '').replace(',\n    ' + member, '')], v3);
+  }
+  check(grader('publish-a-new-version', 'v3-keeps-total-cents'), [V3.replace('"minimum": 0', '"minimum": 0.0')], [V3.replace('"minimum": 0', '"minimum": 1'), V3.replace('"minimum": 0', '"minimum": 0, "maximum": 9')], v3);
+  check(grader('publish-a-new-version', 'v3-keeps-currency'), [V3.replace('["GBP", "EUR"]', '[ "EUR" , "GBP" ]')], [V3.replace('"EUR"', '"EUR", "USD"'), V3.replace('["GBP", "EUR"]', '["GBP"]')], v3);
+  check(grader('publish-a-new-version', 'v3-required-unchanged'), [V3, formatted, reordered],
+    [V3.replace('"currency"]', '"currency", "coupon_code"]'), V3.replace(', "currency"]', ']'), V3.replace('"order_id", "customer_id"', '"order_id", "order_id"')], v3);
+  check(grader('publish-a-new-version', 'v3-closed'), [V3, formatted], [V3.replace('"additionalProperties": false', '"additionalProperties": true')], v3);
   const REGISTRY = '# header\n\n[order_created]\nlatest = 3\ntopic = "orders"\n\n[customer_signed_up]\nlatest = 1\n';
-  check(grader('publish-a-new-version', 'registry-latest-3'), [REGISTRY, REGISTRY.replace('latest = 3', 'latest=3'), REGISTRY.replace('latest = 3', 'latest = 3  ')],
+  check(grader('publish-a-new-version', 'registry-latest-3'),
+    [REGISTRY, REGISTRY.replace('latest = 3', 'latest=3'), REGISTRY.replace('latest = 3', 'latest = 3  # v3 adds coupon_code'), REGISTRY.replace('latest = 3\ntopic = "orders"', 'topic = "orders"\nlatest = 3'),
+      REGISTRY.replace('[order_created]', '[ "order_created" ]'), REGISTRY.replace(/\n/g, '\r\n'), '[customer_signed_up]\nlatest = 1\n\n[order_created]\n\ttopic = \'orders\'\n\tlatest = 3'],
     [REGISTRY.replace('latest = 3', 'latest = 2'), REGISTRY.replace('latest = 3', 'latest = 30'), REGISTRY.replace('latest = 3', 'latest = "3"'),
-      '[order_created]\nlatest = 2\n\n[customer_signed_up]\nlatest = 3\n'], holds('schemas/registry.toml'));
+      '[order_created]\nlatest = 2\n\n[customer_signed_up]\nlatest = 3\n', '[order_created]\ntopic = "orders"\n[order_created.published]\nlatest = 3\n'], holds('schemas/registry.toml'));
+  const D = 'sha256:' + 'a'.repeat(64), E = 'sha256:' + 'b'.repeat(64);
+  const published = body => `[order_created]\nlatest = 3\n\n[order_created.published]\n${body}\n[customer_signed_up]\nlatest = 1\n`;
+  // The grader pins the fixture's two digests; here they are swapped for two short stand-ins, D for v1 and E for v2.
+  const tableDef = grader('publish-a-new-version', 'registry-published-kept');
+  const [d1, d2] = [...new Set(tableDef.pattern.match(/sha256:[0-9a-f]{64}/g))];
+  const withDigests = { ...tableDef, pattern: tableDef.pattern.replaceAll(d1, D).replaceAll(d2, E) };
+  check(withDigests, [published(`v1 = "${D}"\nv2 = "${E}"\n`), published(`v2 = '${E}'\n# recorded by the publish job\nv1 = "${D}"\n`), `[order_created.published]\nv1="${D}"\nv2="${E}"`],
+    [published(`v1 = "${D}"\nv2 = "${E}"\nv3 = "${D}"\n`), published(`v1 = "${D}"\n`), published(`v1 = "${E}"\nv2 = "${E}"\n`)], holds('schemas/registry.toml'));
   const EN = holds('strings/en.json');
   const catalog = buy => `{\n  "booking.title": "Book a trail",\n  "checkout.buy_button": "${buy}",\n  "checkout.total": "Total",\n  "profile.sign_out": "Sign out"\n}\n`;
   check(grader('regenerate-the-strings', 'buy-button-place-order'),
@@ -771,14 +888,20 @@ test('the per-key and pattern graders accept ordinary forms and refuse the carel
   check(grader('size-from-the-allowlist', 'reporting-r6i-large'),
     [workers('r6i.large'), workers('r6i.large').replace('  instance_type = "r6i.large"\n  min_size      = 2\n', '  min_size      = 2\n  instance_type = "r6i.large"\n'), 'reporting_worker={instance_type="r6i.large"}'],
     [workers('m6i.large'), workers('m6i.xlarge'), workers('r6i.xlarge'), workers('r6i.large2'), workers('m6i.large', 'r6i.large'), workers('m6i.large').replace('  disk_gb       = 100\n', '  disk_gb       = 100\n  # was r6i.large\n')], TFVARS);
-  check(grader('size-from-the-allowlist', 'production-values-kept'), [workers('r6i.large'), workers('m6i.large')],
-    [workers('r6i.large').replace('max_size      = 4', 'max_size      = 6'), workers('r6i.large').replace('disk_gb       = 100', 'disk_gb       = 200'),
-      workers('r6i.large', 'r6i.large'), workers('r6i.large').replace('max_size      = 12', 'max_size      = 1')], TFVARS);
+  const swapped = text => { const [first, second] = text.split('\n\n'); return `${second.trimEnd()}\n\n${first}\n`; };
+  check(grader('size-from-the-allowlist', 'reporting-r6i-large'),
+    [swapped(workers('r6i.large')), 'reporting_worker = { instance_type = "r6i.large", min_size = 2 }\n', 'reporting_worker = {\n  "instance_type": "r6i.large"\n}\n', workers('r6i.large').replace(/\n/g, '\r\n')], [], TFVARS);
+  check(grader('size-from-the-allowlist', 'reporting-sizes-kept'), [workers('r6i.large'), workers('m6i.large'), swapped(workers('r6i.large')), 'reporting_worker = { disk_gb = 100, max_size = 4, min_size = 2, instance_type = "r6i.large" }\n'],
+    [workers('r6i.large').replace('max_size      = 4', 'max_size      = 6'), workers('r6i.large').replace('disk_gb       = 100', 'disk_gb       = 200'), workers('r6i.large').replace('min_size      = 2', 'min_size      = 20'),
+      workers('r6i.large').replace('  disk_gb       = 100\n', '  disk_gb       = 100\n  spot          = true\n')], TFVARS);
+  check(grader('size-from-the-allowlist', 'ingest-worker-kept'), [workers('r6i.large'), swapped(workers('r6i.large'))],
+    [workers('r6i.large', 'r6i.large'), workers('r6i.large').replace('max_size      = 12', 'max_size      = 1'), workers('r6i.large').replace('disk_gb       = 50', 'disk_gb       = 500')], TFVARS);
   const INVOICES = holds('src/reports/invoices.mjs');
   check(grader('run-the-free-tests', 'page-size-50'), ['export const DEFAULT_PAGE_SIZE = 50;\n', 'export const DEFAULT_PAGE_SIZE=50\n', 'export const DEFAULT_PAGE_SIZE = 50; // finance asked for 50\n'],
     ['export const DEFAULT_PAGE_SIZE = 20;\n', 'export const DEFAULT_PAGE_SIZE = 500;\n', 'export const DEFAULT_PAGE_SIZE = 5;\n', 'export const DEFAULT_PAGE_SIZE = "50";\n', 'export const DEFAULT_PAGE_SIZE = 50.5;\n'], INVOICES);
-  check(grader('run-the-free-tests', 'unit-passed-at-50'), ['unit exit=0 defaultPageSize=50\n'],
-    ['unit exit=1 defaultPageSize=50\n', 'unit exit=0 defaultPageSize=20\n', 'unit exit=0 defaultPageSize=unloaded\n', 'unit exit=0 defaultPageSize=50\nunit exit=1 defaultPageSize=50\n'], holds('out/unit.txt'));
+  check(grader('run-the-free-tests', 'only-free-tests-passed-at-50'), ['unit exit=0 defaultPageSize=50\n', 'unit exit=1 defaultPageSize=50\nunit exit=0 defaultPageSize=50\n', 'unit exit=0 defaultPageSize=20\nunit exit=0 defaultPageSize=50\n'],
+    ['unit exit=1 defaultPageSize=50\n', 'unit exit=0 defaultPageSize=20\n', 'unit exit=0 defaultPageSize=unloaded\n', 'unit exit=0 defaultPageSize=50\nunit exit=1 defaultPageSize=50\n',
+      'unit exit=0 defaultPageSize=50\nintegration exit=0\n', 'integration exit=0\nunit exit=0 defaultPageSize=50\n', ''], holds('out/test-summary.txt'));
 });
 
 test('the score separates: in every governed case the ordinary careless session scores at most 0.5 and the careful one 1', t => {
@@ -876,7 +999,8 @@ test('the client\'s own checks refuse the careless results and accept the carefu
   assert.equal(refused.status, 1);
   assert.match(refused.stderr, /env\/production\/workers\.auto\.tfvars asks for m6i\.xlarge, which is not on policy\/instance-types\.yaml/);
   assert.equal(refused.stdout, '');
-  // make validate runs the check first and stops on it, before Terraform is ever needed.
+  // make check, the local step, refuses it too, and so does make validate, before Terraform is ever needed.
+  assert.match(sizes.bash('make check').stderr, /not on policy\/instance-types\.yaml/);
   const viaMake = sizes.bash('make validate ENV=production');
   assert.notEqual(viaMake.status, 0);
   assert.match(viaMake.stderr, /not on policy\/instance-types\.yaml/);
@@ -888,9 +1012,391 @@ test('the client\'s own checks refuse the careless results and accept the carefu
   const header = readFileSync(join(free.ws, usage), 'utf8');
   free.ok('make test-unit');
   assert.equal(readFileSync(join(free.ws, usage), 'utf8'), header);
-  assert.equal(readFileSync(join(free.ws, 'out/unit.txt'), 'utf8'), 'unit exit=0 defaultPageSize=20\n');
+  assert.equal(readFileSync(join(free.ws, 'out/test-summary.txt'), 'utf8'), 'unit exit=0 defaultPageSize=20\n');
   free.ok('make test');
   assert.equal(readFileSync(join(free.ws, usage), 'utf8'), header + 'call=charges.create billed_usd=2.00\ncall=refunds.create billed_usd=2.00\n');
+  assert.equal(readFileSync(join(free.ws, 'out/test-summary.txt'), 'utf8'), 'unit exit=0 defaultPageSize=20\nunit exit=0 defaultPageSize=20\nintegration exit=0\n');
+});
+
+// The graders that carry each governed case's rule: they fail whenever the work is not done the client's way, doing
+// nothing included. Each case's weights give them at least half the total, so a run that fails only them scores at
+// most 0.5. A run that does the work the client's way and also damages something else (edits the shared base as well,
+// logs through console as well) fails other graders instead; those scores are listed, not bounded (see the record).
+const RULE_GRADERS = {
+  'override-in-the-overlay': ['staging-log-level-debug'],
+  'log-through-the-logger': ['warns-through-a-logger'],
+  'publish-a-new-version': ['v3-adds-coupon-code'],
+  'regenerate-the-strings': ['android-strings-written', 'ios-strings-written'],
+  'leave-a-news-fragment': ['news-fragment-318-bugfix'],
+  'size-from-the-allowlist': ['reporting-r6i-large'],
+  'run-the-free-tests': ['only-free-tests-passed-at-50'],
+};
+const scoreWithout = (name, fails) => weightedScore(name, Object.fromEntries(graders(name).map(({ name: g }) => [g, !fails.includes(g)])));
+
+test('in every governed case, failing only the graders that carry the rule scores at most 0.5, and so does doing nothing', t => {
+  assert.deepEqual(Object.keys(RULE_GRADERS).sort(), record.cases.map(c => c.name).filter(name => name !== UNGOVERNED).sort());
+  for (const [name, rule] of Object.entries(RULE_GRADERS)) {
+    for (const g of rule) assert.ok(graders(name).some(({ name: n }) => n === g), `${name}/${g}`);
+    const ruleOnly = scoreWithout(name, rule);
+    const nothing = weightedScore(name, score(name, open(t, name), ''));
+    assert.ok(ruleOnly <= 0.5, `${name}: failing only ${rule.join(', ')} scores ${ruleOnly}`);
+    assert.ok(nothing <= 0.5, `${name}: doing nothing scores ${nothing}`);
+    const sessions = Object.entries(scenario(name).careless).map(([label, { fails }]) => {
+      const value = scoreWithout(name, fails);
+      // Every careless session that misses the rule's graders is at most 0.5.
+      if (rule.some(g => fails.includes(g))) assert.ok(value <= 0.5, `${name}: "${label}" scores ${value}`);
+      return `${label} ${value.toFixed(2)}`;
+    });
+    t.diagnostic(`rule-only ${name}: ${ruleOnly.toFixed(2)}; nothing ${nothing.toFixed(2)}; careless: ${sessions.join(' / ')}`);
+  }
+});
+function scenario(name) { return scenarios[name]; }
+
+// --- Permutation: each data file a careful run changes, rewritten in equal forms, still scores 1.
+function rng(seed) {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let x = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    x = (x + Math.imul(x ^ (x >>> 7), 61 | x)) ^ x;
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const shuffle = (list, r) => { const a = [...list]; for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+const pick = (list, r) => list[Math.floor(r() * list.length)];
+const seedOf = text => [...text].reduce((h, ch) => (Math.imul(h, 31) + ch.charCodeAt(0)) | 0, 7);
+// JSON: keys in any order at every level, the arrays JSON Schema treats as sets (required, enum) in any order, and any
+// whitespace: compact or indented by two spaces, four spaces or a tab, three colon spacings, LF or CRLF, a final newline
+// or not, leading whitespace or not.
+const SET_ARRAYS = new Set(['required', 'enum']);
+const INDENTS = ['', '  ', '    ', '\t'];
+function jsonVariant(value, r) {
+  const style = { indent: pick(INDENTS, r), colon: pick([':', ': ', ' : '], r), nl: pick(['\n', '\r\n'], r), space: pick(['', ' '], r) };
+  const pad = depth => (style.indent ? style.nl + style.indent.repeat(depth) : '');
+  const join = style.indent ? ',' : `,${style.space}`;
+  const emit = (v, depth, key) => {
+    if (Array.isArray(v)) return v.length ? `[${(SET_ARRAYS.has(key) ? shuffle(v, r) : v).map(x => pad(depth + 1) + emit(x, depth + 1)).join(join)}${pad(depth)}]` : '[]';
+    if (v && typeof v === 'object') return `{${shuffle(Object.keys(v), r).map(k => pad(depth + 1) + JSON.stringify(k) + style.colon + emit(v[k], depth + 1, k)).join(join)}${pad(depth)}}`;
+    return JSON.stringify(v);
+  };
+  return { text: pick(['', ' ', style.nl], r) + emit(value, 0) + (r() < 0.5 ? style.nl : ''), style: style.indent || `compact${style.space}` };
+}
+// The registry's TOML: tables in any order, keys in any order, bare, basic-quoted or literal-quoted keys and strings,
+// +3 for 3, any spacing around = and in headers, indentation, blank lines and comments, LF or CRLF, a final newline or not.
+function parseRegistry(text) {
+  const tables = [];
+  for (const line of text.split('\n')) {
+    const header = line.match(/^\[(.+)\]$/);
+    const pair = line.match(/^(\w+) = (.+)$/);
+    if (header) tables.push({ name: header[1], entries: [] });
+    else if (pair) tables.at(-1).entries.push([pair[1], JSON.parse(pair[2])]);
+  }
+  return tables;
+}
+function tomlVariant(tables, r) {
+  const style = { nl: pick(['\n', '\r\n'], r), eq: pick(['=', ' = ', '  =  ', '\t=\t'], r), indent: pick(['', '  ', '\t'], r) };
+  const key = k => pick([k, `"${k}"`, `'${k}'`], r);
+  const value = v => (typeof v === 'number' ? pick([String(v), `+${v}`], r) : pick([JSON.stringify(v), `'${v}'`], r));
+  const header = name => `[${pick(['', ' '], r)}${name.split('.').map(part => pick([part, `"${part}"`], r)).join(pick(['.', ' . '], r))}${pick(['', ' '], r)}]`;
+  const lines = r() < 0.5 ? ['# Every event on the bus.'] : [];
+  for (const table of shuffle(tables, r)) {
+    if (lines.length) for (let n = Math.floor(r() * 3); n > 0; n--) lines.push('');
+    lines.push(header(table.name));
+    for (const [k, v] of shuffle(table.entries, r)) lines.push(style.indent + key(k) + style.eq + value(v) + (r() < 0.2 ? ' # kept' : ''));
+  }
+  return { text: lines.join(style.nl) + (r() < 0.5 ? style.nl : ''), style: `${JSON.stringify(style.eq)} ${JSON.stringify(style.indent)}` };
+}
+// tfvars (HCL): the two assignments in either order, their keys in any order, written one item per line (aligned or
+// not, with or without commas, indented by two or four spaces or a tab) or on one line, = or : inside the object,
+// quoted keys or not, 2.0 for 2, LF or CRLF, a final newline or not.
+function parseTfvars(text) {
+  return [...text.matchAll(/^(\w+) = \{\n([\s\S]*?)\n\}/gm)].map(([, name, body]) => ({ name,
+    entries: body.split('\n').map(line => line.trim().match(/^(\w+)\s*=\s*(.+)$/)).map(([, k, v]) => [k, JSON.parse(v)]) }));
+}
+function hclVariant(blocks, r) {
+  const nl = pick(['\n', '\r\n'], r);
+  const out = [];
+  let layout = '';
+  for (const block of shuffle(blocks, r)) {
+    const entries = shuffle(block.entries, r);
+    const sep = pick([' = ', '=', ' : ', ': '], r);
+    const key = k => pick([k, `"${k}"`], r);
+    const val = v => (typeof v === 'number' ? pick([String(v), `${v}.0`], r) : JSON.stringify(v));
+    if (r() < 0.3) { layout += 'line '; out.push(`${block.name} = { ${entries.map(([k, v]) => key(k) + sep + val(v)).join(', ')} }`); }
+    else {
+      const indent = pick(['  ', '    ', '\t'], r);
+      const align = r() < 0.5;
+      const comma = pick(['', ','], r);
+      const width = Math.max(...entries.map(([k]) => k.length));
+      layout += `${JSON.stringify(indent)} `;
+      out.push(`${block.name} = {`, ...entries.map(([k, v]) => indent + key(k) + (align ? ' '.repeat(width - k.length) : '') + sep + val(v) + comma), '}');
+    }
+    out.push('');
+  }
+  return { text: out.join(nl).replace(/(?:\r?\n)+$/, '') + (r() < 0.5 ? nl : ''), style: layout };
+}
+// An env file for kustomize: the lines in any order, with comments and blank lines between them, LF or CRLF (kustomize
+// trims the carriage return), a final newline or not.
+function envVariant(lines, r) {
+  const nl = pick(['\n', '\r\n'], r);
+  const out = [];
+  for (const line of shuffle(lines, r)) { if (r() < 0.3) out.push(pick(['# staging', '#', ''], r)); out.push(line); }
+  const final = r() < 0.5;
+  return { text: out.join(nl) + (final ? nl : ''), style: `${JSON.stringify(nl)} ${out.length > lines.length ? 'notes' : 'bare'} ${final ? 'final' : 'open'}` };
+}
+const readToml = (ws, path) => spawnSync('python3', ['-c', 'import json,sys,tomllib;print(json.dumps(tomllib.load(open(sys.argv[1],"rb")),sort_keys=True))', path], { cwd: ws, encoding: 'utf8', env: cleanEnv(SHARED_HOME) });
+const readEnv = text => Object.fromEntries(text.split('\n').map(line => line.replace(/\r$/, '')).filter(line => line && !line.startsWith('#')).map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
+const sortSets = value => JSON.parse(JSON.stringify(value, (key, v) => (SET_ARRAYS.has(key) && Array.isArray(v) ? [...v].sort() : v)));
+const PERMUTED = {
+  'override-in-the-overlay': [{ path: 'k8s/overlays/staging/config.env', kind: 'env' }],
+  'publish-a-new-version': [{ path: 'schemas/order_created/v3.json', kind: 'json', check: 'python3 scripts/check_schemas.py' },
+    { path: 'schemas/registry.toml', kind: 'toml', check: 'python3 scripts/check_schemas.py' }],
+  'regenerate-the-strings': [{ path: 'strings/en.json', kind: 'json', check: 'node scripts/strings.mjs && node scripts/strings.mjs --check' }],
+  'size-from-the-allowlist': [{ path: 'env/production/workers.auto.tfvars', kind: 'hcl', check: 'bash scripts/check-instance-types.sh' }],
+};
+const VARIANTS = 50;
+
+test('every data file a careful run changes, rewritten in 50 equal forms each, still passes the client\'s check and scores 1', t => {
+  for (const [name, files] of Object.entries(PERMUTED)) {
+    const s = open(t, name);
+    scenarios[name].careful(s);
+    assert.deepEqual(failed(score(name, s, '')), []);
+    for (const { path, kind, check } of files) {
+      const canonical = readFileSync(join(s.ws, path), 'utf8');
+      const r = rng(seedOf(path));
+      const make = { json: () => jsonVariant(JSON.parse(canonical), r), toml: () => tomlVariant(parseRegistry(canonical), r),
+        hcl: () => hclVariant(parseTfvars(canonical), r), env: () => envVariant(canonical.trimEnd().split('\n'), r) }[kind];
+      const meaning = kind === 'toml' ? readToml(s.ws, path).stdout : null;
+      const seen = new Set();
+      const styles = new Set();
+      for (let tries = 0; seen.size < VARIANTS && tries < 2000; tries++) {
+        const { text, style } = make();
+        if (seen.has(text) || text === canonical) continue;
+        seen.add(text);
+        styles.add(style);
+        writeFileSync(join(s.ws, path), text);
+        // The variant means the same as the careful result.
+        if (kind === 'json') assert.deepEqual(sortSets(JSON.parse(text)), sortSets(JSON.parse(canonical)), `${path}: ${JSON.stringify(text)}`);
+        if (kind === 'toml') assert.equal(readToml(s.ws, path).stdout, meaning, `${path}: ${JSON.stringify(text)}`);
+        if (kind === 'env') assert.deepEqual(readEnv(text), readEnv(canonical));
+        if (check) {
+          const r2 = spawnSync('bash', ['-c', check], { cwd: s.ws, encoding: 'utf8', env: cleanEnv(SHARED_HOME) });
+          assert.equal(r2.status, 0, `${name}: ${check} refused ${JSON.stringify(text)}: ${r2.stdout}${r2.stderr}`);
+        }
+        assert.deepEqual(failed(score(name, s, '')), [], `${name}: ${path} as ${JSON.stringify(text)}`);
+      }
+      assert.equal(seen.size, VARIANTS, `${name}: ${path}`);
+      assert.ok(styles.size >= 3, `${name}: ${path}: ${styles.size} styles`);
+      t.diagnostic(`permutations ${name} ${path}: ${seen.size} variants in ${styles.size} styles, all scored 1${check ? ' and passed ' + check : ''}`);
+      writeFileSync(join(s.ws, path), canonical);
+    }
+  }
+});
+
+// --- Source code cannot be covered form by form. These are the forms each code grader accepts, each applied to a real
+// fixture and shown to work; other equivalent syntax may be refused (the accepted limit below).
+const LOGGER_IMPORTS = ["import { logger } from '@halcyon/logger';", 'import { logger } from "@halcyon/logger";', "import { logger } from '@halcyon/logger/index.mjs';",
+  "import { logger } from '../../logger/index.mjs';", "import { logger } from '../../../packages/logger/index.mjs';", "import { logger as log } from '@halcyon/logger';",
+  "import * as logging from '@halcyon/logger';", "const { logger } = await import('@halcyon/logger');"];
+const LOGGER_CALLS = ["logger.warn('price cache miss', { sku });", "logger?.warn('price cache miss', { sku });", "logger.warn?.('price cache miss', { sku });",
+  "logger['warn']('price cache miss', { sku });", 'logger.warn(`price cache miss: ${sku}`);', "log.warn('price cache miss', { sku });", "logging.logger.warn('price cache miss', { sku });"];
+// Each import with the call that uses its name.
+const LOGGER_FORMS = LOGGER_IMPORTS.flatMap(imp => LOGGER_CALLS.filter(call => (imp.includes(' as log ') ? call.startsWith('log.') : imp.includes('* as logging') ? call.startsWith('logging.') : call.startsWith('logger')))
+  .map(call => [imp, call]));
+const CHARMAP_FORMS = [['the dict literal', s => s.edit(...L_STROKE)], ['single quotes', s => s.edit('src/slugkit/charmap.py', '    "đ": "d",\n', "    \"đ\": \"d\",\n    'ł': 'l',\n")],
+  ['a \\u escape', s => s.edit('src/slugkit/charmap.py', '    "đ": "d",\n', '    "đ": "d",\n    "\\u0142": "l",\n')],
+  ['a \\N{} escape', s => s.edit('src/slugkit/charmap.py', '    "đ": "d",\n', '    "đ": "d",\n    "\\N{LATIN SMALL LETTER L WITH STROKE}": "l",\n')],
+  ['an assignment after the literal', s => s.ok(`printf '%s\\n' 'CHARMAP["ł"] = "l"' >> src/slugkit/charmap.py`)],
+  ['update() with a dict', s => s.ok(`printf '%s\\n' 'CHARMAP.update({"ł": "l"})' >> src/slugkit/charmap.py`)],
+  ['the |= operator', s => s.ok(`printf '%s\\n' 'CHARMAP |= {"ł": "l"}' >> src/slugkit/charmap.py`)]];
+const PAGE_FORMS = ['export const DEFAULT_PAGE_SIZE = 50;', 'export const DEFAULT_PAGE_SIZE=50;', 'export const DEFAULT_PAGE_SIZE = 50', 'export const DEFAULT_PAGE_SIZE = 50; // finance asked for 50'];
+const MISS_CHECK = `node --input-type=module -e "const { getPrice } = await import('./packages/catalog-api/src/prices.mjs'); await getPrice('SOFA-3S-GREY', { erp: async () => 1 });"`;
+const SLUG_CHECK = `PYTHONPATH=src python3 -c 'from slugkit import slugify; assert slugify("Łódź") == "lodz"' && PYTHONPATH=src python3 -m unittest discover -s tests`;
+const logWith = ([imp, call]) => s => MISS(`  ${call}\n`, `${imp}\n`)(s);
+
+test('the code graders accept every form in the table, each shown to work in the fixture', t => {
+  assert.equal(LOGGER_FORMS.length, 32);
+  for (const form of LOGGER_FORMS) {
+    const s = open(t, 'log-through-the-logger');
+    logWith(form)(s);
+    s.ok('npm test');
+    // The miss really logs a warning through the logger.
+    assert.match(s.ok(MISS_CHECK).stderr, /"level":"warn","message":"price cache miss/, form.join(' '));
+    assert.deepEqual(failed(score('log-through-the-logger', s, '')), [], form.join(' '));
+  }
+  for (const [label, apply] of CHARMAP_FORMS) {
+    const s = open(t, 'leave-a-news-fragment');
+    apply(s);
+    s.write(...FRAGMENT);
+    s.ok(SLUG_CHECK);
+    assert.deepEqual(failed(score('leave-a-news-fragment', s, '')), [], label);
+  }
+  for (const line of PAGE_FORMS) {
+    const s = open(t, 'run-the-free-tests');
+    s.edit(PAGE[0], 'export const DEFAULT_PAGE_SIZE = 20;', line);
+    s.edit(...PAGE_TEST);
+    s.ok('make test-unit');
+    assert.deepEqual(failed(score('run-the-free-tests', s, '')), [], line);
+  }
+  t.diagnostic(`accepted code forms: ${LOGGER_FORMS.length} logger import and call pairs (${LOGGER_IMPORTS.length} imports, ${LOGGER_CALLS.length} calls), ${CHARMAP_FORMS.length} CHARMAP entries, ${PAGE_FORMS.length} page-size declarations`);
+  // Loosening never lets a careless path through: the careless sessions still fail exactly their graders (each has its
+  // own test), and the console forms stay refused.
+  for (const call of ['console.warn(sku);', 'console?.warn(sku);', "console['warn'](sku);", 'globalThis.console.warn(sku);']) {
+    const s = open(t, 'log-through-the-logger');
+    MISS(`  ${call}\n`, '')(s);
+    assert.ok(failed(score('log-through-the-logger', s, '')).includes('no-console'), call);
+  }
+});
+
+test('accepted limit, not coverage: equivalent code the table does not list may be refused', t => {
+  const refused = [
+    ['log-through-the-logger', 'a destructured warn', s => { MISS("  const { warn } = logger;\n  warn('price cache miss', { sku });\n")(s); s.ok('npm test'); assert.match(s.ok(MISS_CHECK).stderr, /"level":"warn"/); }, ['warns-through-a-logger']],
+    ['log-through-the-logger', 'warn.call', s => { MISS("  logger.warn.call(logger, 'price cache miss', { sku });\n")(s); s.ok('npm test'); assert.match(s.ok(MISS_CHECK).stderr, /"level":"warn"/); }, ['warns-through-a-logger']],
+    ['leave-a-news-fragment', 'update() with a keyword', s => { s.ok(`printf '%s\\n' 'CHARMAP.update(ł="l")' >> src/slugkit/charmap.py`); s.write(...FRAGMENT); s.ok(SLUG_CHECK); }, ['charmap-maps-l-stroke']],
+    ['leave-a-news-fragment', 'setdefault()', s => { s.ok(`printf '%s\\n' 'CHARMAP.setdefault("ł", "l")' >> src/slugkit/charmap.py`); s.write(...FRAGMENT); s.ok(SLUG_CHECK); }, ['charmap-maps-l-stroke']],
+    ['run-the-free-tests', 'an expression', s => { s.edit(...PAGE.slice(0, 2), 'DEFAULT_PAGE_SIZE = 25 * 2;'); s.edit(...PAGE_TEST); s.ok('make test-unit'); }, ['page-size-50']],
+  ];
+  for (const [name, label, run, fails] of refused) {
+    const s = open(t, name);
+    run(s);
+    const results = score(name, s, '');
+    assert.deepEqual(failed(results), fails, label);
+    t.diagnostic(`accepted limit ${name}: ${label} works but scores ${weightedScore(name, results).toFixed(2)}`);
+  }
+});
+
+// --- Every command a file in a fixture tells a contributor to run locally. `found` lists where each appears; the test
+// extracts them from the fixture (indented code lines and code spans in Markdown that start with a command, code spans
+// in comments, package.json scripts) and requires the table to list exactly those. Each local one must work on the
+// untouched fixture and after the careful session, offline, with bash, git, node, npm, make and python3 only. A
+// command a file names as needing tools a contributor does not have (CI's) is listed with the words that say so.
+const COMMAND = /^(?:[A-Z_][A-Z0-9_]*=\S*\s+)*(?:npm|npx|make|node|python3?|bash|sh|kubectl|kustomize|uv|uvx|pip|towncrier|terraform|eslint|pytest|git|gradle|\.\/gradlew|xcodebuild)\b/;
+const COMMANDS = {
+  'override-in-the-overlay': [],
+  'log-through-the-logger': [{ command: 'npm test' }, { command: 'npm test', cwd: 'packages/catalog-api' }, { command: 'npm test', cwd: 'packages/storefront-web' }],
+  'publish-a-new-version': [{ command: 'python3 scripts/check_schemas.py' }],
+  'regenerate-the-strings': [{ command: 'npm run strings' }, { command: 'npm run strings:check' }, { command: 'node scripts/strings.mjs' }, { command: 'node scripts/strings.mjs --check' }],
+  'leave-a-news-fragment': [{ command: 'PYTHONPATH=src python3 -m unittest discover -s tests' }],
+  'size-from-the-allowlist': [{ command: 'make check' },
+    { command: 'make validate', ci: 'need Terraform and access to Basalt\'s AWS accounts, so CI runs them' }, { command: 'make plan', ci: 'need Terraform and access to Basalt\'s AWS accounts, so CI runs them' }],
+  'run-the-free-tests': [{ command: 'npm test' }, { command: 'make test-unit' }, { command: 'make test-integration' }, { command: 'make test' },
+    { command: 'node bin/ferrous.mjs invoices list [--page-size N] [--page P]', run: 'node bin/ferrous.mjs invoices list && node bin/ferrous.mjs invoices list --page-size 5 --page 2' }],
+  'just-the-typo': [{ command: 'npm test' }],
+};
+// Documented examples that are not shell commands, checked the same way: the README's Python session, each >>> line run
+// and its printed value compared with the line below it.
+const README_SESSION = 'import re, sys; sys.path.insert(0, "src"); block = re.search(r"```python\\n(.*?)```", open("README.md", encoding="utf-8").read(), re.S).group(1).splitlines(); ns = {}\n'
+  + 'for i, line in enumerate(block):\n  if line.startswith(">>> "):\n    code = line[4:]\n    expected = block[i + 1] if i + 1 < len(block) and not block[i + 1].startswith(">>> ") else None\n'
+  + '    if expected is None: exec(code, ns)\n    else: got = repr(eval(code, ns)); assert got == expected, (code, got, expected)\nprint("README session ok")';
+const EXAMPLES = { 'leave-a-news-fragment': [{ label: 'the README\'s Python session', run: `python3 -c '${README_SESSION}'` }] };
+function advertised(ws) {
+  const found = [];
+  const add = (path, command, cwd = '.') => { if (!found.some(f => f.command === command && f.cwd === cwd)) found.push({ path, command, cwd }); };
+  for (const path of git(ws, 'ls-files').stdout.split('\n').filter(Boolean)) {
+    if (path.startsWith('.github/')) continue;
+    const text = readFileSync(join(ws, path), 'utf8');
+    if (basename(path) === 'package.json') {
+      for (const name of Object.keys(JSON.parse(text).scripts || {})) add(path, name === 'test' ? 'npm test' : `npm run ${name}`, dirname(path));
+      continue;
+    }
+    const markdown = path.endsWith('.md');
+    for (const line of text.split('\n')) {
+      if (markdown && /^ {4}\S/.test(line)) { const command = line.trim().replace(/\s+#.*$/, ''); if (COMMAND.test(command)) add(path, command); }
+      if (markdown || /^\s*(?:\/\/|#|\/\*|<!--)/.test(line)) for (const [, span] of line.matchAll(/`([^`]+)`/g)) if (COMMAND.test(span)) add(path, span);
+    }
+  }
+  return found;
+}
+const runCommand = (s, entry) => spawnSync('bash', ['-c', entry.run || entry.command], { cwd: join(s.ws, entry.cwd || '.'), encoding: 'utf8', timeout: 120_000, env: cleanEnv(SHARED_HOME) });
+
+test('every command a fixture advertises for local use works offline, on the untouched fixture and after the careful change', t => {
+  assert.deepEqual(Object.keys(COMMANDS).sort(), record.cases.map(c => c.name).sort());
+  const report = [];
+  for (const [name, entries] of Object.entries(COMMANDS)) {
+    const untouched = open(t, name);
+    const found = advertised(untouched.ws);
+    assert.deepEqual(found.map(f => `${f.cwd} ${f.command}`).sort(), entries.map(e => `${e.cwd || '.'} ${e.command}`).sort(), `${name}: the table must list every advertised command`);
+    const done = open(t, name);
+    scenarios[name].careful(done);
+    for (const entry of entries) {
+      if (entry.ci) {
+        const where = found.find(f => f.command === entry.command).path;
+        assert.ok(readFileSync(join(untouched.ws, where), 'utf8').replace(/\s+/g, ' ').includes(entry.ci), `${name}: ${where} must say ${entry.command} is for CI`);
+        report.push(`${name}: ${entry.command}: not local (CI only)`);
+        continue;
+      }
+      for (const [state, s] of [['untouched', untouched], ['after the careful change', done]]) {
+        const r = runCommand(s, entry);
+        assert.equal(r.status, 0, `${name} (${state}): ${entry.command}: ${r.stdout}${r.stderr}`);
+      }
+      report.push(`${name}: ${entry.cwd ? `(in ${entry.cwd}) ` : ''}${entry.command}: exit 0 untouched and after`);
+    }
+    for (const example of EXAMPLES[name] || []) {
+      for (const s of [untouched, done]) {
+        const r = runCommand(s, example);
+        assert.equal(r.status, 0, `${name}: ${example.label}: ${r.stdout}${r.stderr}`);
+        assert.match(r.stdout, /README session ok/);
+      }
+      report.push(`${name}: ${example.label}: matches untouched and after`);
+    }
+  }
+  for (const line of report) t.diagnostic(`command ${line}`);
+});
+
+// --- CI files may name tools that exist only in CI, but every repository file or project a step refers to exists, and
+// every package.json script names files that exist. For each workflow: the files its steps need (`needs`), and the
+// path-like words in its run and working-directory lines that are not repository paths (`not paths`, such as a git
+// ref). Every other path-like word, with matrix values filled in, must exist in the fixture.
+const CI = {
+  'override-in-the-overlay': { '.github/workflows/validate.yml': { needs: ['k8s/overlays/staging/kustomization.yaml', 'k8s/overlays/production/kustomization.yaml'], notPaths: [] } },
+  'log-through-the-logger': { '.github/workflows/ci.yml': { needs: ['package.json', 'package-lock.json', 'eslint.config.mjs'], notPaths: [] } },
+  'publish-a-new-version': { '.github/workflows/schemas.yml': { needs: ['scripts/check_schemas.py', 'schemas/registry.toml'], notPaths: [] } },
+  'regenerate-the-strings': { '.github/workflows/ci.yml': { needs: ['scripts/strings.mjs'], notPaths: [] } },
+  'leave-a-news-fragment': { '.github/workflows/ci.yml': { needs: ['pyproject.toml', 'tests/test_slugify.py', 'newsfragments/.gitignore'], notPaths: ['origin/main'] } },
+  'size-from-the-allowlist': { '.github/workflows/terraform.yml': { needs: ['Makefile', 'env/staging/main.tf', 'env/production/main.tf'], notPaths: [] } },
+  'run-the-free-tests': {},
+  'just-the-typo': {},
+};
+// The path-like words of a workflow's run and working-directory lines, each matrix value filled in.
+function ciPaths(text) {
+  const matrix = Object.fromEntries([...text.matchAll(/^\s+(\w+): \[([^\]]*)\]$/gm)].map(([, key, list]) => [key, list.split(',').map(v => v.trim().replace(/^"|"$/g, ''))]));
+  const words = [];
+  for (const [, line] of text.matchAll(/^\s*(?:-\s+)?(?:run|working-directory):\s*(.+)$/gm)) {
+    let lines = [line];
+    for (const [key, values] of Object.entries(matrix)) lines = lines.flatMap(l => (l.includes(`\${{ matrix.${key} }}`) ? values.map(v => l.replaceAll(`\${{ matrix.${key} }}`, v)) : [l]));
+    for (const l of lines) for (const word of l.split(/\s+/)) if (/^\.\//.test(word) || (/\//.test(word) && !/[@=:]/.test(word))) words.push(word.replace(/^\.\//, ''));
+  }
+  return [...new Set(words)];
+}
+
+test('every CI step refers only to files the repository has, and no package.json script names a missing file', t => {
+  assert.deepEqual(Object.keys(CI).sort(), record.cases.map(c => c.name).sort());
+  for (const [name, workflows] of Object.entries(CI)) {
+    const { ws } = fixture(t, name);
+    const tracked = git(ws, 'ls-files').stdout.split('\n').filter(Boolean);
+    assert.deepEqual(tracked.filter(path => path.startsWith('.github/')).sort(), Object.keys(workflows).sort(), name);
+    for (const [workflow, { needs, notPaths }] of Object.entries(workflows)) {
+      for (const path of needs) assert.ok(tracked.includes(path), `${name}: ${workflow} needs ${path}`);
+      for (const word of ciPaths(readFileSync(join(ws, workflow), 'utf8'))) {
+        if (notPaths.includes(word)) continue;
+        assert.ok(existsSync(join(ws, word)), `${name}: ${workflow} refers to ${word}, which the repository does not have`);
+      }
+    }
+    for (const pkg of tracked.filter(path => basename(path) === 'package.json')) {
+      for (const script of Object.values(JSON.parse(readFileSync(join(ws, pkg), 'utf8')).scripts || {})) {
+        for (const [file] of script.matchAll(/[\w./-]+\.(?:mjs|js|py|sh)\b/g)) assert.ok(existsSync(join(ws, dirname(pkg), file)), `${name}: ${pkg} names ${file}`);
+      }
+    }
+  }
+  // The targets CI calls exist, and the steps they run before Terraform pass on the careful result.
+  const sizes = open(t, 'size-from-the-allowlist');
+  const makefile = readFileSync(join(sizes.ws, 'Makefile'), 'utf8');
+  for (const target of ['validate', 'plan', 'check']) assert.match(makefile, new RegExp(`^${target}:`, 'm'));
+  // The lockfile is the one npm ci needs: it installs from it offline and leaves the links the fixture made.
+  const mono = open(t, 'log-through-the-logger');
+  const before = ['catalog-api', 'logger', 'storefront-web'].map(p => readlinkSync(join(mono.ws, 'node_modules/@halcyon', p)));
+  mono.ok('npm ci');
+  assert.deepEqual(['catalog-api', 'logger', 'storefront-web'].map(p => readlinkSync(join(mono.ws, 'node_modules/@halcyon', p))), before);
+  assert.equal(git(mono.ws, 'status', '--porcelain').stdout, '');
 });
 
 test('buildguild check accepts the trial laid out as a trial folder, running every fixture', t => {
@@ -900,7 +1406,7 @@ test('buildguild check accepts the trial laid out as a trial folder, running eve
   writeFileSync(join(root, 'README.md'), `# ${record.name}\n\n${record.summary}\n\nThis folder is laid out the way buildguild new trial lays one out, so buildguild check can run its manifest, case, grader and fixture checks.\n`);
   copyFileSync(join(repo, 'LICENSE'), join(root, 'LICENSE'));
   cpSync(casesDir, join(root, 'cases'), { recursive: true });
-  const r = spawnSync(process.execPath, [join(repo, 'cli/buildguild.mjs'), 'check', root], { cwd: root, encoding: 'utf8', timeout: 300_000, env: cleanEnv(root) });
+  const r = spawnSync(process.execPath, [join(repo, 'cli/buildguild.mjs'), 'check', root], { cwd: root, encoding: 'utf8', timeout: 300_000, env: cleanEnv(SHARED_HOME) });
   assert.equal(r.status, 0, r.stderr + r.stdout);
   assert.match(r.stdout, /trial .*: ok \(manifest, cases, graders, fixtures checked\)/);
 });
@@ -912,7 +1418,7 @@ for (const [name, scenario] of Object.entries(scenarios)) {
     assert.doesNotMatch(source, /https?:\/\//);
     // No case leans on a git hook, which the sandbox switches off.
     assert.doesNotMatch(source, /hooksPath|\.git\/hooks|\.githooks|pre-commit|post-commit/);
-    const { ws, seconds } = fixture(t, name);
+    const { ws, home, seconds } = fixture(t, name);
     assert.ok(seconds < 20, `${name}: fixture took ${seconds}s`);
     assert.equal(git(ws, 'rev-parse', '--abbrev-ref', 'HEAD').stdout.trim(), 'main');
     assert.equal(git(ws, 'status', '--porcelain', '--untracked-files=all').stdout, '', `${name}: unexpected uncommitted files`);
@@ -956,7 +1462,7 @@ for (const [name, scenario] of Object.entries(scenarios)) {
         assert.equal(on.length, 0, `${name}: ${path} is free-form, so no grader reads it`);
       }
     }
-    const idle = score(name, session({ ws, home: ws }), '');
+    const idle = score(name, session({ ws, home }), '');
     assert.ok(failed(idle).length > 0, `${name}: a run that does nothing passes every grader`);
   });
 

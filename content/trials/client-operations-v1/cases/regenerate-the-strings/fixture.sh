@@ -8,11 +8,11 @@ cat > README.md <<'MD'
 
 Ridgeline Outdoor's trail-booking app for iOS and Android. GuildBuild maintains it for Ridgeline (the client).
 
-- `ios/`: the Xcode project (Swift, iOS 17 and later).
-- `android/`: the Gradle project (Kotlin, API 26 and later).
+- `ios/Trailhead/`: the iOS app's SwiftUI screens and its English strings (iOS 17 and later).
+- `android/app/src/main/`: the Android app's Kotlin screens and its English strings (API 26 and later).
 - `strings/en.json`: the app's English text.
 
-Ridgeline's mobile team builds and ships both apps from `main`.
+Ridgeline's mobile team builds and ships both apps from `main` in Xcode Cloud and Bitrise.
 MD
 cat > package.json <<'JSON'
 {
@@ -78,18 +78,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: node scripts/strings.mjs --check
-  android:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - run: ./gradlew --no-daemon testDebugUnitTest
-        working-directory: android
-  ios:
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - run: xcodebuild test -scheme Trailhead -destination 'platform=iOS Simulator,name=iPhone 16'
-        working-directory: ios
 YAML
 cat > ios/Trailhead/Checkout/CheckoutView.swift <<'SWIFT'
 import SwiftUI

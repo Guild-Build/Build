@@ -8,9 +8,7 @@ cat > README.md <<'MD'
 Kubernetes configuration for Osprey Freight's tracking API. GuildBuild maintains it for Osprey (the client).
 
 Argo CD applies `k8s/overlays/staging` to the staging cluster and `k8s/overlays/production` to the production
-cluster whenever `main` changes. To see what an environment gets:
-
-    kubectl kustomize k8s/overlays/staging
+cluster whenever `main` changes. CI renders and validates both overlays on every pull request.
 
 ## Changing configuration
 

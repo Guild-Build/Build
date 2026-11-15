@@ -1,8 +1,8 @@
 ---
 type: regex
-pattern: 'reporting_worker\s*=\s*\{[^}]*\binstance_type\s*=\s*"r6i\.large"[^}]*\}'
+pattern: '\breporting_worker\s*=\s*\{(?=(?:[^{}]*?[,\n])?[ \t]*(?:instance_type|"instance_type")\s*[=:]\s*"r6i\.large"(?=[ \t]*(?:[,}\r\n#]|\/\/)))'
 target:
   source: file
   path: env/production/workers.auto.tfvars
-weight: 5
+weight: 4
 ---

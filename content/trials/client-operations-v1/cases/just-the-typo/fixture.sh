@@ -8,9 +8,7 @@ cat > README.md <<'MD'
 The API behind Juniper Books' storefront and apps: catalogue, accounts and orders. GuildBuild maintains it for Juniper
 (the client).
 
-    npm ci
     npm test        # unit tests
-    npm start       # local server on port 8080
 
 Read CONTRIBUTING.md before you open a pull request.
 MD
@@ -107,7 +105,6 @@ cat > package.json <<'JSON'
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node src/server.mjs",
     "test": "node --test"
   }
 }

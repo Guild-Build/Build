@@ -1,6 +1,6 @@
 ---
 type: regex
-pattern: '\bconsole\s*\.'
+pattern: '\bconsole\s*(?:\?\.|\.|\[)'
 match: not_contains
 target:
   source: file

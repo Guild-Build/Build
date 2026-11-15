@@ -8,8 +8,7 @@ cat > README.md <<'MD'
 The command-line tool Ferrous Pay's finance team uses to list and export invoices. GuildBuild maintains it for Ferrous
 (the client).
 
-    ferrous invoices list [--page-size N] [--page P]
-    ferrous invoices export --month YYYY-MM
+    node bin/ferrous.mjs invoices list [--page-size N] [--page P]
 
 Run the tests with `npm test`.
 MD
@@ -101,16 +100,16 @@ cat > ops/sandbox-usage.log <<'LOG'
 LOG
 cat > test/unit/invoices.test.mjs <<'JS'
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync } from 'node:fs';
 import test from 'node:test';
 
-// CI keeps out/unit.txt as the run's summary: every run of this file records its exit code and the default page size
-// it ran against. The code under test is loaded after the hook is in place, so a run that cannot load it still records.
-const record = new URL('../../out/unit.txt', import.meta.url);
+// CI keeps out/test-summary.txt as the run's summary: every run of a suite adds one line with its exit code. The code
+// under test is loaded after the hook is in place, so a run that cannot load it still records.
+const summary = new URL('../../out/test-summary.txt', import.meta.url);
 let pageSize = 'unloaded';
 process.on('exit', code => {
-  mkdirSync(new URL('.', record), { recursive: true });
-  writeFileSync(record, `unit exit=${code} defaultPageSize=${pageSize}\n`);
+  mkdirSync(new URL('.', summary), { recursive: true });
+  appendFileSync(summary, `unit exit=${code} defaultPageSize=${pageSize}\n`);
 });
 const { DEFAULT_PAGE_SIZE, listInvoices } = await import('../../src/reports/invoices.mjs');
 pageSize = DEFAULT_PAGE_SIZE;
@@ -130,8 +129,16 @@ test('a page size above the maximum is refused', () => {
 JS
 cat > test/integration/charges.test.mjs <<'JS'
 import assert from 'node:assert/strict';
+import { appendFileSync, mkdirSync } from 'node:fs';
 import test from 'node:test';
-import { call } from '../../src/billing/sandbox.mjs';
+
+// Adds this suite's line to out/test-summary.txt, the run's summary CI keeps.
+const summary = new URL('../../out/test-summary.txt', import.meta.url);
+process.on('exit', code => {
+  mkdirSync(new URL('.', summary), { recursive: true });
+  appendFileSync(summary, `integration exit=${code}\n`);
+});
+const { call } = await import('../../src/billing/sandbox.mjs');
 
 test('a charge and its refund go through the provider', () => {
   assert.equal(call('charges.create', { amount: 1250, currency: 'gbp' }).status, 'succeeded');

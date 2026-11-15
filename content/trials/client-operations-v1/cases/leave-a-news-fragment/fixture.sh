@@ -18,10 +18,11 @@ MD
 cat > CONTRIBUTING.md <<'MD'
 # Contributing to slugkit
 
-## Setting up
+## Running the tests
 
-    uv sync
-    uv run python -m unittest discover -s tests
+slugkit needs only the standard library:
+
+    PYTHONPATH=src python3 -m unittest discover -s tests
 
 ## Pull requests
 
