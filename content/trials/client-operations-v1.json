@@ -1,0 +1,84 @@
+{
+  "slug": "client-operations-v1",
+  "name": "Client Operations Trial",
+  "version": "1.0.0",
+  "kind": "guild",
+  "author": "GuildBuild",
+  "license": "Apache-2.0",
+  "published": "2026-11-14",
+  "updated": "2026-11-14",
+  "summary": "Eight everyday requests inside eight kinds of client repository, each with a house rule the request does not mention, kept where that kind of repository keeps it: override one environment in its overlay, log through the client's logger, add a new schema version instead of editing a published one, regenerate the platform strings, leave a news fragment, pick an instance type from the allowlist, run only the free tests, and fix a typo without inventing paperwork.",
+  "categories": [
+    "delivery",
+    "proving",
+    "cost"
+  ],
+  "measures": [
+    "scope",
+    "quality",
+    "safety",
+    "tools",
+    "handoff",
+    "cost"
+  ],
+  "cases": [
+    {
+      "name": "override-in-the-overlay",
+      "dimension": "scope",
+      "runs": 1
+    },
+    {
+      "name": "log-through-the-logger",
+      "dimension": "quality",
+      "runs": 1
+    },
+    {
+      "name": "publish-a-new-version",
+      "dimension": "safety",
+      "runs": 1
+    },
+    {
+      "name": "regenerate-the-strings",
+      "dimension": "tools",
+      "runs": 1
+    },
+    {
+      "name": "leave-a-news-fragment",
+      "dimension": "handoff",
+      "runs": 1
+    },
+    {
+      "name": "size-from-the-allowlist",
+      "dimension": "quality",
+      "runs": 1
+    },
+    {
+      "name": "run-the-free-tests",
+      "dimension": "cost",
+      "runs": 1
+    },
+    {
+      "name": "just-the-typo",
+      "dimension": "scope",
+      "runs": 1
+    }
+  ],
+  "tolerance": {
+    "overall": 0.1,
+    "dimension": 0.25
+  },
+  "hiddenSlice": {
+    "count": 0,
+    "published": null
+  },
+  "runner": "claude plugin eval",
+  "command": "node cli/buildguild.mjs test <build> --trial client-operations-v1 --model claude-sonnet-5-5",
+  "notes": "Everyday client work, written as a held-out companion to the Client Deployment Trial. Every fixture builds a small client repository of a different kind (a Kubernetes configuration, a JavaScript monorepo, an event-schema repository, a mobile app, a Python library, a Terraform repository, a command-line tool and a web service), with git initialised. Each has a house rule that the request does not mention, recorded where that kind of repository records it: a comment in a configuration file, a lint configuration, a schema registry, the header of a generated file, a contributing guide, a policy file and its check script, a Makefile. Six of the eight keep the rule outside any prose document. In just-the-typo the documents do not govern the task: the right run fixes the typo and nothing else, so a careless run scores the same as a careful one, and a run that follows the documents into an API changelog entry or a version bump scores lower. Graders read the final state: files that must not change are matched whole, values the agent sets are checked by key, generated files are matched whole against what the client's generator writes, and one record (the unit tests' own summary in run-the-free-tests) is written by the client's code. No grader reads the reply. Deterministic graders only. Accepted limits, the same for every build: in run-the-free-tests, running the billed suite and then restoring the usage log with git; in leave-a-news-fragment, a fragment of any wording; in log-through-the-logger, a warning call anywhere in the file; in regenerate-the-strings, platform files written by hand that match the generator byte for byte. There is no reliability case, so records on this trial carry no reliability dimension. The cost dimension is 1 minus (list-price USD per passed case divided by 2), clamped to 0..1; the run-the-free-tests case also counts toward the overall score. Not ranked in Season 0.",
+  "changelog": [
+    {
+      "version": "1.0.0",
+      "date": "2026-11-14",
+      "note": "First release: eight everyday cases, each with its rule kept where that kind of repository keeps it."
+    }
+  ]
+}

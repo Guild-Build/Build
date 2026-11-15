@@ -99,7 +99,7 @@ test('the rest of the suite passes under a caller whose git setup is broken in a
   rmSync(elsewhere, { recursive: true, force: true });
   const files = readdirSync(join(repo, 'tests')).filter(name => name.endsWith('.test.mjs') && name !== self).sort().map(name => join('tests', name));
   // The files whose tests start git are among them.
-  for (const name of ['client-deployment-trial', 'handoff-trial', 'operating-docs-notice']) assert.ok(files.includes(`tests/${name}.test.mjs`), files.join(', '));
+  for (const name of ['client-deployment-trial', 'client-operations-trial', 'handoff-trial', 'operating-docs-notice']) assert.ok(files.includes(`tests/${name}.test.mjs`), files.join(', '));
   const r = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...files], { cwd: repo, encoding: 'utf8', env, timeout: 600_000, maxBuffer: 256 * 1024 * 1024 });
   const problems = runProblems(r);
   const failures = r.stdout.split('\n').filter(line => /^\s*not ok /.test(line) || /\bfatal: /.test(line)).slice(0, 40).join('\n');
