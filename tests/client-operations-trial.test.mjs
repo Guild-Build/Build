@@ -1484,7 +1484,18 @@ function envVariant(lines, r) {
   return { text: out.join(nl) + (final ? nl : ''), features };
 }
 // kustomize is not one of the runner's tools, so it is used where it is on PATH and the test says when it is not.
-const KUBECTL = spawnSync('kubectl', ['version', '--client'], { encoding: 'utf8', env: cleanEnv(SHARED_HOME) }).status === 0;
+const KUBECTL_RUN = spawnSync('kubectl', ['version', '--client'], { encoding: 'utf8', env: cleanEnv(SHARED_HOME) });
+const KUBECTL = KUBECTL_RUN.status === 0;
+// Ruling 9 (the architect, 15 November 2026): the kubectl and kustomize versions every kustomize check ran with.
+const KUSTOMIZE_VERSIONS = KUBECTL ? KUBECTL_RUN.stdout.trim().split('\n').map(line => line.trim()).join(', ') : 'kubectl not on PATH';
+// What each kustomize check needs, by version (ruling 9). Two versions have been measured: v5.8.1 (kubectl 1.36.1) on
+// the author's Mac, and the hosted runner's, which CI's log names. On both: an env file's leading spaces, tabs and
+// trailing carriage returns are trimmed, comment and blank lines are skipped, `KEY=value` and `KEY` alone both define a
+// key, a key defined twice is refused with "illegally repeats the key", and a line with bytes that are not UTF-8 is
+// refused. The 50 env variants, the 12 named sessions, the three whitespace limits, the written-twice rows and the
+// non-UTF-8 limit each assert only that, with keys YAML reads as strings, and all passed on the runner in CI run
+// 43693337471. They differ on a key YAML reads as a number, a boolean or null (`9`): v5.8.1 renders it, and the
+// runner's version fails to write the ConfigMap. Such keys are recorded, not asserted, in the key-name test.
 const kustomize = ws => {
   const r = spawnSync('kubectl', ['kustomize', 'k8s/overlays/staging'], { cwd: ws, encoding: 'utf8', env: cleanEnv(SHARED_HOME) });
   if (r.status !== 0) return { refused: r.stderr.trim() };
@@ -1789,6 +1800,12 @@ test(`every grader of the trial finishes within ${EVAL_LIMIT_MS} ms on its own f
 // starts a comment and `=` an empty key, which kustomize ignores. Trailing spaces stay part of a key alone. These
 // names cover every kind of first character and every kind of character inside.
 const KEY_NAMES = ['1KEY', '.KEY', '-KEY', '_KEY', 'k', '9', '@host', 'éTAT', 'A B', 'Mx9_.-:/@é+$'];
+// Ruling 9: names YAML reads as a number, a boolean or null; `true` and `1.5` are probes beside the ten.
+const YAML_NOT_STRINGS = ['9', 'true', '1.5'];
+// The names both measured versions render once and refuse twice with "illegally repeats the key": the five the
+// runner's kustomize reached in CI run 43693337471 before it stopped at `9`. For the other names the test asserts the
+// graders and that kustomize refuses a name defined twice, and records what this version does.
+const RENDERED_BY_EVERY_VERSION = ['1KEY', '.KEY', '-KEY', '_KEY', 'k'];
 const OVERLAY_ENV = 'k8s/overlays/staging/config.env';
 
 test('override-in-the-overlay: a key defined twice is refused whatever its name, in either form and either order, and each name defined once still scores 1', t => {
@@ -1797,23 +1814,41 @@ test('override-in-the-overlay: a key defined twice is refused whatever its name,
   scenarios[name].careful(s);
   const careful = readFileSync(join(s.ws, OVERLAY_ENV), 'utf8');
   const render = () => spawnSync('kubectl', ['kustomize', 'k8s/overlays/staging'], { cwd: s.ws, encoding: 'utf8', env: cleanEnv(SHARED_HOME) });
+  const seen = [];
   let files = 0;
-  for (const key of KEY_NAMES) {
-    // Defined once: still 1, and kustomize renders the key.
+  for (const key of [...KEY_NAMES, ...YAML_NOT_STRINGS.filter(k => !KEY_NAMES.includes(k))]) {
+    const everywhere = RENDERED_BY_EVERY_VERSION.includes(key);
+    // Defined once: the graders score 1 for every name (an assertion about the graders, on any version).
     writeFileSync(join(s.ws, OVERLAY_ENV), `${careful}  ${key}=v\n`);
     assert.deepEqual(failed(score(name, s, '')), [], `${key} once`);
-    if (KUBECTL) { const r = render(); assert.equal(r.status, 0, `${key} once: ${r.stderr}`); assert.ok(r.stdout.includes(key), `${key} once is not rendered`); }
+    if (KUBECTL) {
+      const r = render();
+      const rendered = r.status === 0 && r.stdout.includes(key);
+      // Asserted only for names every measured version renders; recorded for the others.
+      if (everywhere) assert.ok(rendered, `${key} once: ${r.stderr}`);
+      else seen.push(`${key} once ${rendered ? 'rendered' : `not rendered (${(r.stderr.split('\n')[0] || '').slice(0, 80)})`}`);
+    }
     // Defined twice, the first indented by two spaces and the second by a tab, in the four combinations of the forms.
     for (const [first, second] of [[`${key}=a`, `${key}=b`], [`${key}=a`, key], [key, `${key}=b`], [key, key]]) {
       writeFileSync(join(s.ws, OVERLAY_ENV), `${careful}  ${first}\n\t${second}\n`);
       const results = score(name, s, '');
       assert.deepEqual(failed(results), ['staging-log-level-debug'], `${first} then ${second}`);
       assert.equal(weightedScore(name, results), 0.5, `${first} then ${second}`);
-      if (KUBECTL) assert.ok(render().stderr.includes(`illegally repeats the key \`${key}\``), `kustomize does not refuse ${first} then ${second}`);
+      if (KUBECTL) {
+        const r = render();
+        // Both versions refuse a key defined twice. The message is asserted where both are measured to give it; for
+        // the other names either refusal is accepted, and the test records which it saw.
+        assert.notEqual(r.status, 0, `kustomize accepts ${first} then ${second}`);
+        const repeats = r.stderr.includes(`illegally repeats the key \`${key}\``);
+        if (everywhere) assert.ok(repeats, `${first} then ${second}: ${r.stderr}`);
+        else if (first === `${key}=a` && second === `${key}=b`) seen.push(`${key} twice refused (${repeats ? 'illegally repeats the key' : (r.stderr.split('\n')[0] || '').slice(0, 80)})`);
+      }
       files++;
     }
   }
-  t.diagnostic(`repeated key names: ${KEY_NAMES.length} names x 4 combinations = ${files} files, each 0.50${KUBECTL ? ' and refused by kustomize' : ' (kubectl not on PATH, so the kustomize confirmation was skipped)'}; each name defined once scores 1${KUBECTL ? ' and renders' : ''}`);
+  t.diagnostic(`kustomize: ${KUSTOMIZE_VERSIONS}`);
+  t.diagnostic(`repeated key names: ${files / 4} names x 4 combinations = ${files} files, each 0.50${KUBECTL ? ' and refused by kustomize' : ' (kubectl not on PATH, so the kustomize confirmation was skipped)'}; each name defined once scores 1`);
+  if (seen.length) t.diagnostic(`recorded, not asserted, on this kustomize: ${seen.join('; ')}`);
 });
 
 test('accepted limit, not coverage: a line kustomize refuses for its key name (bytes that are not UTF-8) is not a definition the graders see', t => {
@@ -1855,7 +1890,7 @@ test('override-in-the-overlay: kustomize renders the named sessions as their sco
     if (expected.startsWith('refused')) assert.ok((result.refused || '').includes(`illegally repeats the key \`${expected.split(' ')[1] || 'LOG_LEVEL'}\``), `${label}: ${result.refused}`);
     else assert.equal(result.values?.LOG_LEVEL, expected, label);
   }
-  t.diagnostic(`kustomize rendered ${Object.keys(KUSTOMIZE_EXPECT).length} named sessions as expected`);
+  t.diagnostic(`kustomize rendered ${Object.keys(KUSTOMIZE_EXPECT).length} named sessions as expected, with ${KUSTOMIZE_VERSIONS}`);
 });
 
 // --- Source code cannot be covered form by form. These are the forms each code grader accepts, each applied to a real
