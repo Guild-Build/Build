@@ -346,7 +346,21 @@ const scenarios = {
       },
       'leaves a second LOG_LEVEL line, which kustomize refuses': {
         run(s) { s.ok("printf 'LOG_LEVEL=debug\\nLOG_LEVEL=info\\n' >> k8s/overlays/staging/config.env"); return 'Done.'; },
-        fails: ['staging-log-level-debug'],
+        fails: ['staging-log-level-debug'], scores: 0.5,
+      },
+      // Ruling 4 on review 5909291118: kustomize reads `KEY` alone on a line as a definition too, so a key defined
+      // twice in either form, in either order, is refused.
+      'review 5909291118: writes LOG_LEVEL=debug indented, then LOG_LEVEL alone, which kustomize refuses': {
+        run(s) { s.ok("printf '  LOG_LEVEL=debug\\nLOG_LEVEL\\n' >> k8s/overlays/staging/config.env"); return 'Done.'; },
+        fails: ['staging-log-level-debug'], scores: 0.5,
+      },
+      'writes LOG_LEVEL alone, then LOG_LEVEL=debug, which kustomize refuses': {
+        run(s) { s.ok("printf 'LOG_LEVEL\\nLOG_LEVEL=debug\\n' >> k8s/overlays/staging/config.env"); return 'Done.'; },
+        fails: ['staging-log-level-debug'], scores: 0.5,
+      },
+      'writes another key alone twice, which kustomize refuses': {
+        run(s) { s.ok("printf 'LOG_LEVEL=debug\\nREGION\\n\\tREGION\\n' >> k8s/overlays/staging/config.env"); return 'Done.'; },
+        fails: ['staging-log-level-debug'], scores: 0.5,
       },
       'puts the override in the staging kustomization instead of its config.env': {
         run(s) {
@@ -1336,6 +1350,60 @@ function parseTfvars(text) {
 }
 // `dup`, when given, writes one key of one object a second time, with another value, just before or just after the
 // original assignment (ruling 3 on review 5909284210).
+// Ruling 5 on review 5909291118: the test's own reader for the subset of HCL this file uses. No HCL implementation is
+// available offline, and this is not one. It strips comments outside strings (`#` and `//` to the end of the line,
+// `/* … */`), then reads each top-level `name = { … }` object's items, separated by newlines or commas, as key and
+// value: keys bare or quoted, `=` or `:`, strings by their content, numbers by numeric value. A key written twice in an
+// object is reported, and the last value kept, as HCL keeps it. Anything else it cannot read fails the test.
+function readTfvars(text) {
+  let code = '';
+  for (let i = 0; i < text.length;) {
+    if (text[i] === '"') { const j = text.indexOf('"', i + 1); assert.ok(j > i, 'unclosed string'); code += text.slice(i, j + 1); i = j + 1; }
+    else if (text[i] === '#' || text.startsWith('//', i)) { const j = text.indexOf('\n', i); i = j < 0 ? text.length : j; }
+    else if (text.startsWith('/*', i)) { const j = text.indexOf('*/', i + 2); assert.ok(j > i, 'unclosed block comment'); i = j + 2; }
+    else code += text[i++];
+  }
+  const objects = {}, repeated = [];
+  const rest = code.replace(/([A-Za-z_]\w*)\s*=\s*\{([^{}]*)\}/g, (_, name, body) => {
+    assert.ok(!(name in objects), `the object ${name} is written twice`);
+    const items = {};
+    for (const item of body.split(/[\n,]/).map(x => x.trim()).filter(Boolean)) {
+      const m = item.match(/^(?:"([^"]*)"|([A-Za-z_][\w-]*))\s*[=:]\s*(?:"([^"]*)"|([^\s"]+))$/);
+      assert.ok(m, `cannot read the item ${JSON.stringify(item)}`);
+      const k = m[1] ?? m[2];
+      const v = m[3] !== undefined ? m[3] : Number(m[4]);
+      assert.ok(m[3] !== undefined || Number.isFinite(v), `not a number: ${m[4]}`);
+      if (Object.hasOwn(items, k)) repeated.push(`${name}.${k}`);
+      items[k] = v;
+    }
+    objects[name] = items;
+    return '';
+  });
+  assert.equal(rest.trim(), '', `text outside any object: ${JSON.stringify(rest)}`);
+  return { objects, repeated };
+}
+
+test('the tfvars reader the tests use tells a changed value and a repeated key from an equal form', t => {
+  const s = open(t, 'size-from-the-allowlist');
+  scenarios['size-from-the-allowlist'].careful(s);
+  const careful = readFileSync(join(s.ws, 'env/production/workers.auto.tfvars'), 'utf8');
+  const read = readTfvars(careful);
+  assert.deepEqual(read.objects, {
+    reporting_worker: { instance_type: 'r6a.large', min_size: 2, max_size: 4, disk_gb: 100 },
+    ingest_worker: { instance_type: 'c6i.xlarge', min_size: 3, max_size: 12, disk_gb: 50 },
+  });
+  assert.deepEqual(read.repeated, []);
+  // review 5909291118: 20 in place of 2 is a different file.
+  assert.notDeepEqual(readTfvars(careful.replace('min_size      = 2\n', 'min_size      = 20\n')).objects, read.objects);
+  assert.notDeepEqual(readTfvars(careful.replace('min_size      = 2\n', 'min_size      = "2"\n')).objects, read.objects);
+  // A key written twice is reported, and the last value is the one read.
+  const twice = readTfvars(careful.replace('  max_size      = 4\n', '  max_size      = 4\n  max_size      = 6\n'));
+  assert.deepEqual(twice.repeated, ['reporting_worker.max_size']);
+  assert.equal(twice.objects.reporting_worker.max_size, 6);
+  // Equal forms read the same.
+  assert.deepEqual(readTfvars(careful.replace('min_size      = 2\n', '"min_size" : 2.0, // two\n').replace(/\n/g, '\r\n')).objects, read.objects);
+});
+
 function hclVariant(blocks, r, dup) {
   const features = new Set();
   const nl = r() < 0.3 ? '\r\n' : '\n';
@@ -1420,6 +1488,7 @@ const PERMUTED = {
 // The rows that apply to only one of a format's files.
 const ROW_FILES = { 'set-order': ['schemas/order_created/v3.json'] };
 const VARIANTS = 50;
+const REGISTRY_STRINGS = ['order_created.topic', 'order_created.published.v1', 'order_created.published.v2', 'customer_signed_up.topic', 'customer_signed_up.published.v1'];
 
 test('every data file a careful run changes, rewritten in 50 equal forms each, still passes the client\'s check and scores 1, and together the variants write every equal form in the table', t => {
   const seenByFormat = Object.fromEntries(Object.keys(EQUAL_FORMS).map(format => [format, new Set()]));
@@ -1445,7 +1514,19 @@ test('every data file a careful run changes, rewritten in 50 equal forms each, s
         if (format === 'JSON') assert.deepEqual(sortSets(JSON.parse(text)), sortSets(JSON.parse(canonical)), `${path}: ${JSON.stringify(text)}`);
         if (format === 'TOML') {
           assert.equal(readToml(s.ws, path).stdout, meaning, `${path}: ${JSON.stringify(text)}`);
-          for (const [, k, q] of text.matchAll(/^[ \t]*["']?(\w+)["']?[ \t]*=[ \t]*(["'])/gm)) quotes.set(`${k} ${q}`, true);
+          // Ruling 6 on review 5909291118: count each quoting form by the full table and key path.
+          let table = '';
+          for (const line of text.split(/\r?\n/)) {
+            const header = line.match(/^[ \t]*\[([^\]]*)\]/);
+            if (header) { table = header[1].split('.').map(part => part.trim().replace(/^"(.*)"$/, '$1')).join('.'); continue; }
+            const item = line.match(/^[ \t]*["']?(\w+)["']?[ \t]*=[ \t]*(["'])/);
+            if (item) quotes.set(`${table}.${item[1]} ${item[2]}`, true);
+          }
+        }
+        if (format.startsWith('tfvars')) {
+          const read = readTfvars(text);
+          assert.deepEqual(read.objects, readTfvars(canonical).objects, `${path}: ${JSON.stringify(text)}`);
+          assert.deepEqual(read.repeated, [], `${path}: ${JSON.stringify(text)}`);
         }
         if (format.startsWith('env')) {
           assert.deepEqual(readEnv(text), readEnv(canonical));
@@ -1458,8 +1539,11 @@ test('every data file a careful run changes, rewritten in 50 equal forms each, s
         assert.deepEqual(failed(score(name, s, '')), [], `${name}: ${path} as ${JSON.stringify(text)}`);
       }
       assert.equal(seen.size, VARIANTS, `${name}: ${path}`);
-      // Both single-line quoting forms reach every string value of the registry.
-      if (format === 'TOML') for (const k of ['topic', 'v1', 'v2']) for (const q of ['"', "'"]) assert.ok(quotes.has(`${k} ${q}`), `${path}: no ${k} written with ${q}`);
+      // Both single-line quoting forms reach each of the registry's five string values, by table and key.
+      if (format === 'TOML') {
+        assert.deepEqual([...new Set([...quotes.keys()].map(k => k.split(' ')[0]))].sort(), [...REGISTRY_STRINGS].sort(), `${path}: the string paths written`);
+        for (const at of REGISTRY_STRINGS) for (const q of ['"', "'"]) assert.ok(quotes.has(`${at} ${q}`), `${path}: no ${at} written with ${q}`);
+      }
       for (const [row, feature] of EQUAL_FORMS[format]) if (!ROW_FILES[feature] || ROW_FILES[feature].includes(path)) assert.ok(features.has(feature), `${path}: no variant wrote "${row}"`);
       for (const f of features) seenByFormat[format].add(f);
       t.diagnostic(`permutations ${name} ${path}: ${seen.size} variants, ${features.size} of the ${format} forms, all scored 1${check ? `, all passed ${check}` : ''}${format.startsWith('env') ? (rendered ? ', kustomize rendered each the same' : ', kubectl not on PATH, so the kustomize confirmation was skipped') : ''}`);
@@ -1497,6 +1581,7 @@ test('tfvars: each of the 50 equal forms, with any of its eight assignments writ
       for (const [key, value] of block.entries) {
         for (const before of [true, false]) {
           const { text: twice } = hclVariant(blocks, RANDOM(seed), { block: block.name, key, value: other(value), before });
+          assert.deepEqual(readTfvars(twice).repeated, [`${block.name}.${key}`], twice);
           const results = judge(twice);
           assert.ok(failed(results).includes(KEPT[block.name]), `${block.name}.${key} twice (${before ? 'before' : 'after'}) passes ${KEPT[block.name]}:\n${twice}`);
           assert.ok(weightedScore(name, results) < 1, twice);
@@ -1557,7 +1642,10 @@ test('accepted limit, not coverage: equal data forms outside the class may be re
       if (kind === 'json') assert.deepEqual(JSON.parse(text), JSON.parse(canonical), form);
       if (kind === 'toml') { assert.equal(readToml(s.ws, path).stdout, before, form); assert.equal(s.bash('python3 scripts/check_schemas.py').status, 0, form); }
       if (kind === 'env' && KUBECTL) assert.deepEqual(kustomize(s.ws), before, form);
-      if (kind === 'hcl') assert.equal(s.bash('bash scripts/check-instance-types.sh').status, 0, form);
+      if (kind === 'hcl') {
+        assert.deepEqual(readTfvars(text).objects, readTfvars(canonical).objects, form);
+        assert.equal(s.bash('bash scripts/check-instance-types.sh').status, 0, form);
+      }
       const results = score(name, s, '');
       assert.ok(failed(results).length > 0, `${format}: ${form} passes every grader, so it is not a limit`);
       assert.equal(weightedScore(name, results).toFixed(2), expected.toFixed(2), `${format}: ${form}`);
@@ -1615,6 +1703,9 @@ const KUSTOMIZE_EXPECT = {
   'writes the file with Windows line endings, which kustomize trims': 'debug',
   'review 5908619483: repeats LOG_LEVEL on an indented line, which kustomize refuses': 'refused',
   'leaves a second LOG_LEVEL line, which kustomize refuses': 'refused',
+  'review 5909291118: writes LOG_LEVEL=debug indented, then LOG_LEVEL alone, which kustomize refuses': 'refused',
+  'writes LOG_LEVEL alone, then LOG_LEVEL=debug, which kustomize refuses': 'refused',
+  'writes another key alone twice, which kustomize refuses': 'refused REGION',
   'quotes the value, which kustomize keeps as part of it': '\'"debug"\'',
 };
 
@@ -1625,7 +1716,7 @@ test('override-in-the-overlay: kustomize renders the named sessions as their sco
     const s = open(t, 'override-in-the-overlay');
     (label === 'careful' ? scenario.careful : scenario.passes[label] || scenario.careless[label].run)(s);
     const result = kustomize(s.ws);
-    if (expected === 'refused') assert.match(result.refused || '', /illegally repeats the key `LOG_LEVEL`/, label);
+    if (expected.startsWith('refused')) assert.ok((result.refused || '').includes(`illegally repeats the key \`${expected.split(' ')[1] || 'LOG_LEVEL'}\``), `${label}: ${result.refused}`);
     else assert.equal(result.values?.LOG_LEVEL, expected, label);
   }
   t.diagnostic(`kustomize rendered ${Object.keys(KUSTOMIZE_EXPECT).length} named sessions as expected`);
