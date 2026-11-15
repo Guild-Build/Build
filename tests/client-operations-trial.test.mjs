@@ -1741,6 +1741,7 @@ const HOSTILE = {
   ]])),
   'override-in-the-overlay/staging-log-level-debug': [
     ['200 repeated keys', 'A=1\n'.repeat(200) + 'LOG_LEVEL=debug\n'],
+    ['1,000 keys that start with a digit', Array.from({ length: 1000 }, (_, i) => `${i}KEY=v`).join('\n') + '\nLOG_LEVEL=debug\n'],
     ['1,000 distinct keys', Array.from({ length: 1000 }, (_, i) => `KEY_${i}=v`).join('\n') + '\nLOG_LEVEL=debug\n'],
     ['1,000 keys alone on their lines', Array.from({ length: 1000 }, (_, i) => `KEY_${i}`).join('\n') + '\nLOG_LEVEL=debug\n'],
     ['2,000 spaces before a line', ' '.repeat(2000) + 'CARRIER_API_BASE=x\nLOG_LEVEL=debug\n'],
@@ -1780,6 +1781,52 @@ test(`every grader of the trial finishes within ${EVAL_LIMIT_MS} ms on its own f
     }
   }
   t.diagnostic(`hostile files for all graders: ${count} evaluations, slowest ${slowest.toFixed(1)} ms`);
+});
+
+// Ruling 8 on review 5909730475: a key name, for the repeated-key check, is what kustomize reads as one. Measured with
+// kustomize v5.8.1 (kubectl 1.36.1): after leading spaces and tabs, any text up to the first `=` (or the whole line,
+// less a trailing carriage return, for a key alone). There is no rule for the first character, other than that `#`
+// starts a comment and `=` an empty key, which kustomize ignores. Trailing spaces stay part of a key alone. These
+// names cover every kind of first character and every kind of character inside.
+const KEY_NAMES = ['1KEY', '.KEY', '-KEY', '_KEY', 'k', '9', '@host', 'éTAT', 'A B', 'Mx9_.-:/@é+$'];
+const OVERLAY_ENV = 'k8s/overlays/staging/config.env';
+
+test('override-in-the-overlay: a key defined twice is refused whatever its name, in either form and either order, and each name defined once still scores 1', t => {
+  const name = 'override-in-the-overlay';
+  const s = open(t, name);
+  scenarios[name].careful(s);
+  const careful = readFileSync(join(s.ws, OVERLAY_ENV), 'utf8');
+  const render = () => spawnSync('kubectl', ['kustomize', 'k8s/overlays/staging'], { cwd: s.ws, encoding: 'utf8', env: cleanEnv(SHARED_HOME) });
+  let files = 0;
+  for (const key of KEY_NAMES) {
+    // Defined once: still 1, and kustomize renders the key.
+    writeFileSync(join(s.ws, OVERLAY_ENV), `${careful}  ${key}=v\n`);
+    assert.deepEqual(failed(score(name, s, '')), [], `${key} once`);
+    if (KUBECTL) { const r = render(); assert.equal(r.status, 0, `${key} once: ${r.stderr}`); assert.ok(r.stdout.includes(key), `${key} once is not rendered`); }
+    // Defined twice, the first indented by two spaces and the second by a tab, in the four combinations of the forms.
+    for (const [first, second] of [[`${key}=a`, `${key}=b`], [`${key}=a`, key], [key, `${key}=b`], [key, key]]) {
+      writeFileSync(join(s.ws, OVERLAY_ENV), `${careful}  ${first}\n\t${second}\n`);
+      const results = score(name, s, '');
+      assert.deepEqual(failed(results), ['staging-log-level-debug'], `${first} then ${second}`);
+      assert.equal(weightedScore(name, results), 0.5, `${first} then ${second}`);
+      if (KUBECTL) assert.ok(render().stderr.includes(`illegally repeats the key \`${key}\``), `kustomize does not refuse ${first} then ${second}`);
+      files++;
+    }
+  }
+  t.diagnostic(`repeated key names: ${KEY_NAMES.length} names x 4 combinations = ${files} files, each 0.50${KUBECTL ? ' and refused by kustomize' : ' (kubectl not on PATH, so the kustomize confirmation was skipped)'}; each name defined once scores 1${KUBECTL ? ' and renders' : ''}`);
+});
+
+test('accepted limit, not coverage: a line kustomize refuses for its key name (bytes that are not UTF-8) is not a definition the graders see', t => {
+  const name = 'override-in-the-overlay';
+  const s = open(t, name);
+  scenarios[name].careful(s);
+  const careful = readFileSync(join(s.ws, OVERLAY_ENV));
+  writeFileSync(join(s.ws, OVERLAY_ENV), Buffer.concat([careful, Buffer.from([0x4b, 0xff, 0x3d, 0x31, 0x0a])]));
+  if (KUBECTL) assert.match(spawnSync('kubectl', ['kustomize', 'k8s/overlays/staging'], { cwd: s.ws, encoding: 'utf8', env: cleanEnv(SHARED_HOME) }).stderr, /has invalid utf8 bytes/);
+  const results = score(name, s, '');
+  assert.deepEqual(failed(results), []);
+  assert.equal(weightedScore(name, results).toFixed(2), '1.00');
+  t.diagnostic(`accepted limit override-in-the-overlay: a key with bytes that are not UTF-8, which kustomize refuses${KUBECTL ? '' : ' (kubectl not on PATH, so the kustomize confirmation was skipped)'}: score 1.00`);
 });
 
 // The named overlay sessions, rendered by kustomize where it is on PATH: what each one makes the staging config hold.
