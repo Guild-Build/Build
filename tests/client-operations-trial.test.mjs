@@ -724,8 +724,11 @@ test('the per-key and pattern graders accept ordinary forms and refuse the carel
   const LOGGER = "import { logger } from '@halcyon/logger';\n";
   check(grader('log-through-the-logger', 'no-console'), [code(LOGGER, WARN), code('', '  // consoles are for games\n')],
     [code('', '  console.warn(sku);\n'), code('', '  console .warn(sku);\n'), code('', '  globalThis.console.log(sku);\n')], prices);
-  check(grader('log-through-the-logger', 'warns-through-a-logger'), [code(LOGGER, WARN), code('', '  log.warn("miss");\n'), code('', '  logger .warn ("miss");\n')],
-    [code('', '  console.warn(sku);\n'), code(LOGGER, "  logger.info('miss');\n"), code('', '  logger.warning("miss");\n')], prices);
+  // The pattern uses lookaheads only, no lookbehind, so it reads the same in any JavaScript regex engine.
+  assert.doesNotMatch(grader('log-through-the-logger', 'warns-through-a-logger').pattern, /\(\?<[!=]/);
+  check(grader('log-through-the-logger', 'warns-through-a-logger'),
+    [code(LOGGER, WARN), code('', '  log.warn("miss");\n'), code('', '  logger .warn ("miss");\n'), code('', '  this.logger.warn("miss");\n'), code('', '  consoleLogger.warn("miss");\n')],
+    [code('', '  console.warn(sku);\n'), code('', '  console .warn(sku);\n'), code('', '  globalThis.console.warn(sku);\n'), code(LOGGER, "  logger.info('miss');\n"), code('', '  logger.warning("miss");\n')], prices);
   check(grader('log-through-the-logger', 'imports-the-logger'),
     [code(LOGGER, ''), code('import { logger as log } from "@halcyon/logger";\n', ''), code("import { logger } from '../../logger/index.mjs';\n", ''), code("import { logger } from '../../logger';\n", '')],
     [code('', ''), code("import { logger } from './logger.mjs';\n", ''), code("import { logger } from '@halcyon/loggers';\n", '')], prices);
