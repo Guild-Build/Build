@@ -11,6 +11,21 @@ import { basename, dirname, join } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { evaluateExampleGrader, parseExampleGrader } from '../cli/grader-examples.mjs';
+
+// Ruling 7 (the architect, 15 November 2026): a grader that runs long in a hosted run wastes a paid run, and the
+// runner's regex engine is not verified. So every grader evaluation this file makes is timed and must finish within
+// EVAL_LIMIT_MS: the named sessions, the generated variants, the repeated-key property files and the corpus.
+const EVAL_LIMIT_MS = 250;
+const EVALS = { count: 0, slowest: 0, slowestAt: '' };
+function evaluate(def, example) {
+  const started = performance.now();
+  const result = evaluateExampleGrader(def, example);
+  const ms = performance.now() - started;
+  EVALS.count++;
+  if (ms > EVALS.slowest) { EVALS.slowest = ms; EVALS.slowestAt = def.target?.path ?? 'the reply'; }
+  assert.ok(ms < EVAL_LIMIT_MS, `a grader on ${def.target?.path} took ${ms.toFixed(0)} ms: ${String(def.pattern).slice(0, 80)}`);
+  return result;
+}
 import { cleanGitEnv } from './git-env.mjs';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
@@ -115,7 +130,7 @@ function score(name, s, lastMessage) {
   const status = spawnSync('git', ['status', '--porcelain', '--untracked-files=all'], { cwd: s.ws, encoding: 'utf8', env: cleanEnv(SHARED_HOME) }).stdout;
   const changedFiles = status.split('\n').filter(Boolean).map(line => line.slice(3));
   const example = { lastMessage, files, changedFiles, toolCalls: s.toolCalls };
-  return Object.fromEntries(list.map(({ name: g, grader: def }) => [g, evaluateExampleGrader(def, example)]));
+  return Object.fromEntries(list.map(({ name: g, grader: def }) => [g, evaluate(def, example)]));
 }
 
 const failed = results => Object.keys(results).filter(name => !results[name]);
@@ -929,7 +944,7 @@ test('every grader parses with the offline grader code, and its patterns compile
 });
 
 test('the per-key and pattern graders accept ordinary forms and refuse the careless ones', () => {
-  const holds = path => (def, text) => evaluateExampleGrader(def, { lastMessage: '', files: { [path]: text }, changedFiles: [], toolCalls: [] });
+  const holds = path => (def, text) => evaluate(def, { lastMessage: '', files: { [path]: text }, changedFiles: [], toolCalls: [] });
   const check = (def, yes, no, judge) => {
     for (const value of yes) assert.equal(judge(def, value), true, JSON.stringify(value));
     for (const value of no) assert.equal(judge(def, value), false, JSON.stringify(value));
@@ -1566,7 +1581,7 @@ test('tfvars: each of the 50 equal forms, with any of its eight assignments writ
   const blocks = parseTfvars(canonical);
   const list = graders(name);
   const files = Object.fromEntries(list.map(({ grader: g }) => g.target.path).map(p => [p, readFileSync(join(s.ws, p), 'utf8')]));
-  const judge = text => Object.fromEntries(list.map(({ name: g, grader: def }) => [g, evaluateExampleGrader(def, { lastMessage: '', files: { ...files, [path]: text }, changedFiles: [], toolCalls: [] })]));
+  const judge = text => Object.fromEntries(list.map(({ name: g, grader: def }) => [g, evaluate(def, { lastMessage: '', files: { ...files, [path]: text }, changedFiles: [], toolCalls: [] })]));
   const other = v => (typeof v === 'number' ? v + 1 : v === 'r6a.large' ? 'm6i.large' : 'c6i.2xlarge');
   const KEPT = { reporting_worker: 'reporting-sizes-kept', ingest_worker: 'ingest-worker-kept' };
   const seen = new Set();
@@ -1659,6 +1674,7 @@ test('accepted limit, not coverage: equal data forms outside the class may be re
 // an accepted limit.
 const WRITTEN_TWICE = [
   ['env (kustomize)', 'override-in-the-overlay', 'k8s/overlays/staging/config.env', text => text.replace('LOG_LEVEL=debug', 'LOG_LEVEL=debug\nLOG_LEVEL=info'), 'refused', 0.5],
+  ['env (kustomize), a key alone on a line', 'override-in-the-overlay', 'k8s/overlays/staging/config.env', text => text.replace('LOG_LEVEL=debug', 'LOG_LEVEL=debug\nLOG_LEVEL'), 'refused', 0.5],
   ['tfvars (HCL)', 'size-from-the-allowlist', 'env/production/workers.auto.tfvars', text => text.replace('  instance_type = "r6a.large"\n', '  instance_type = "r6a.large"\n  instance_type = "m6i.large"\n'), 'last', 3.5 / 8],
   ['TOML', 'publish-a-new-version', 'schemas/registry.toml', text => text.replace('latest = 3', 'latest = 2\nlatest = 3'), 'refused', 1],
   ['JSON', 'publish-a-new-version', 'schemas/order_created/v3.json', text => text.replace('"coupon_code": { "type": "string" }', '"coupon_code": { "type": "string" },\n    "coupon_code": { "type": "integer" }'), 'last', 1],
@@ -1691,6 +1707,79 @@ test('a graded key written twice: env and tfvars are refused, and in TOML and JS
     assert.equal(value.toFixed(3), expected.toFixed(3), format);
     if (format.startsWith('env') || format.startsWith('tfvars')) assert.ok(value < 1, format);
   }
+});
+
+// Ruling 7: inputs of hostile length for each pattern rewritten for reviews 5909284210 and 5909291118, each under the
+// same bound. The env repeated-key check compares every pair of lines, so its time grows with the square of the line
+// count; its inputs stay at sizes a hand-edited env file could reach.
+const TFVARS_CAREFUL = 'reporting_worker = {\n  instance_type = "r6a.large"\n  min_size      = 2\n  max_size      = 4\n  disk_gb       = 100\n}\n\n'
+  + 'ingest_worker = {\n  instance_type = "c6i.xlarge"\n  min_size      = 3\n  max_size      = 12\n  disk_gb       = 50\n}\n';
+const LOGGER_HEAD = "import { logger } from '@halcyon/logger';\n";
+const HOSTILE = {
+  'log-through-the-logger/no-console': [
+    // First 22 blocks: a pattern that splits blocks many ways takes seconds here, so it fails the bound before the
+    // 200-block input, which it would never finish.
+    ['22 one-line block comments on one line', LOGGER_HEAD + '  ' + '/* x */ '.repeat(22) + "logger.warn('m');\n"],
+    ['200 one-line block comments on one line', LOGGER_HEAD + '  ' + '/* x */ '.repeat(200) + "logger.warn('m');\n"],
+    ['200 block comments, then a stray slash', LOGGER_HEAD + '  ' + '/* x */ '.repeat(200) + '/\n'],
+    ['a 5,000-character comment line', LOGGER_HEAD + '// ' + 'console '.repeat(625) + '\n'],
+    ['2,000 spaces before the call', LOGGER_HEAD + ' '.repeat(2000) + "logger.warn('m');\n"],
+    ['2,000 strings on one line', LOGGER_HEAD + "'a' + ".repeat(2000) + "'b';\n"],
+    ['a template literal left open for 500 lines', LOGGER_HEAD + 'const t = `' + 'console x\n'.repeat(500)],
+  ],
+  'log-through-the-logger/warns-through-the-logger': [
+    ['a 2,000-part identifier chain with no warn', LOGGER_HEAD + 'a' + '.a'.repeat(2000) + '\n'],
+    ['2,000 calls that are not warn', LOGGER_HEAD + 'x.y.z(1);\n'.repeat(2000)],
+    ['2,000 spaces inside a call', LOGGER_HEAD + 'logger' + ' '.repeat(2000) + '.warn(1);\n'],
+  ],
+  ...Object.fromEntries(['reporting-r6a-large', 'reporting-sizes-kept', 'ingest-worker-kept'].map(name => [`size-from-the-allowlist/${name}`, [
+    ['200 repeated keys in each object', TFVARS_CAREFUL.replace('  min_size      = 2\n', '  min_size      = 2\n'.repeat(200)).replace('  min_size      = 3\n', '  min_size      = 3\n'.repeat(200))],
+    ['2,000 spaces before each value', TFVARS_CAREFUL.replace(/= /g, '=' + ' '.repeat(2000))],
+    ['a 5,000-character comment line in each object', TFVARS_CAREFUL.replace(/\{\n/g, '{\n  # ' + 'min_size = 9 { } '.repeat(300) + '\n')],
+    ['an object of 2,000 items left open', 'reporting_worker = {\n' + '  min_size = 2\n'.repeat(2000) + 'ingest_worker = {\n' + '  min_size = 3\n'.repeat(2000)],
+    ['2,000 object openings', 'reporting_worker = {\ningest_worker = {\n'.repeat(1000)],
+  ]])),
+  'override-in-the-overlay/staging-log-level-debug': [
+    ['200 repeated keys', 'A=1\n'.repeat(200) + 'LOG_LEVEL=debug\n'],
+    ['1,000 distinct keys', Array.from({ length: 1000 }, (_, i) => `KEY_${i}=v`).join('\n') + '\nLOG_LEVEL=debug\n'],
+    ['1,000 keys alone on their lines', Array.from({ length: 1000 }, (_, i) => `KEY_${i}`).join('\n') + '\nLOG_LEVEL=debug\n'],
+    ['2,000 spaces before a line', ' '.repeat(2000) + 'CARRIER_API_BASE=x\nLOG_LEVEL=debug\n'],
+    ['a 5,000-character comment line', '# ' + 'LOG_LEVEL=info '.repeat(333) + '\nLOG_LEVEL=debug\n'],
+    ['a 5,000-character key, and the same key less one character alone', 'K'.repeat(5000) + '=v\n' + 'K'.repeat(4999) + '\nLOG_LEVEL=debug\n'],
+  ],
+};
+
+test(`every pattern rewritten in the last two rounds finishes within ${EVAL_LIMIT_MS} ms on inputs of hostile length`, t => {
+  for (const [at, inputs] of Object.entries(HOSTILE)) {
+    const [kase, name] = at.split('/');
+    const def = grader(kase, name);
+    assert.ok(inputs.length >= 3, at);
+    for (const [label, text] of inputs) {
+      const started = performance.now();
+      evaluate(def, { lastMessage: '', files: { [def.target.path]: text }, changedFiles: [], toolCalls: [] });
+      t.diagnostic(`hostile ${at}: ${label}: ${(performance.now() - started).toFixed(1)} ms`);
+    }
+  }
+});
+
+// Ruling 7, for every grader: the file each one reads, taken from the careful run, made hostile three ways.
+test(`every grader of the trial finishes within ${EVAL_LIMIT_MS} ms on its own file made 200 times longer, padded with spaces, or given a 5,000-character line`, t => {
+  let slowest = 0, count = 0;
+  for (const name of record.cases.map(c => c.name)) {
+    const s = open(t, name);
+    scenarios[name].careful(s);
+    for (const { name: g, grader: def } of graders(name)) {
+      const file = readFileSync(join(s.ws, def.target.path), 'utf8');
+      const inputs = [file.repeat(200), file.replace(/\n/g, '\n' + ' '.repeat(2000)), file + '{["\'`/* #'.repeat(500) + '\n' + file];
+      for (const text of inputs) {
+        const started = performance.now();
+        evaluate(def, { lastMessage: '', files: { [def.target.path]: text }, changedFiles: [], toolCalls: [] });
+        slowest = Math.max(slowest, performance.now() - started);
+        count++;
+      }
+    }
+  }
+  t.diagnostic(`hostile files for all graders: ${count} evaluations, slowest ${slowest.toFixed(1)} ms`);
 });
 
 // The named overlay sessions, rendered by kustomize where it is on PATH: what each one makes the staging config hold.
@@ -1848,7 +1937,7 @@ test('no-console passes careful code that mentions console in a comment or a mes
   let i = 0;
   for (const [text, label] of variants) {
     const files = { [PRICES]: text, 'eslint.config.mjs': eslint };
-    const results = Object.fromEntries(list.map(({ name: g, grader: def }) => [g, evaluateExampleGrader(def, { lastMessage: '', files, changedFiles: [], toolCalls: [] })]));
+    const results = Object.fromEntries(list.map(({ name: g, grader: def }) => [g, evaluate(def, { lastMessage: '', files, changedFiles: [], toolCalls: [] })]));
     assert.deepEqual(failed(results), [], `${label}\n${text}`);
     writeFileSync(join(s.ws, `packages/catalog-api/src/prices-corpus-${i++}.mjs`), text);
   }
@@ -2087,7 +2176,7 @@ for (const [name, scenario] of Object.entries(scenarios)) {
       const on = graders(name).filter(({ grader: def }) => def.target.path === path);
       const whole = on.filter(({ grader: def }) => def.match !== 'not_contains' && def.pattern.startsWith('^') && def.pattern.endsWith('$') && !(def.flags ?? '').includes('m'));
       const original = readFileSync(join(ws, path), 'utf8');
-      const judge = (def, text) => evaluateExampleGrader(def, { lastMessage: '', files: { [path]: text }, changedFiles: [], toolCalls: [] });
+      const judge = (def, text) => evaluate(def, { lastMessage: '', files: { [path]: text }, changedFiles: [], toolCalls: [] });
       if (kind === MUST_NOT_CHANGE) {
         assert.equal(on.length, 1, `${name}: ${path} must not change, so it has one grader`);
         assert.equal(whole.length, 1, `${name}: ${path} must not change, so it needs one whole-content grader`);
@@ -2156,3 +2245,10 @@ for (const [name, scenario] of Object.entries(scenarios)) {
     });
   }
 }
+
+test(`every grader evaluation in this file finished within ${EVAL_LIMIT_MS} ms`, t => {
+  // Each evaluation asserted the bound as it ran; this reports how many ran and the slowest.
+  assert.ok(EVALS.count > 10_000, `only ${EVALS.count} evaluations ran`);
+  assert.ok(EVALS.slowest < EVAL_LIMIT_MS);
+  t.diagnostic(`grader evaluations: ${EVALS.count}, slowest ${EVALS.slowest.toFixed(1)} ms (a grader on ${EVALS.slowestAt})`);
+});
