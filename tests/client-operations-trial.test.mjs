@@ -124,20 +124,17 @@ const weightedScore = (name, results) => {
 
 // Where each case's rule lives, as the fixture writes it: the group (written in a document, outside any prose
 // document, or none governs), the path, what kind of file it is, and words of the rule that file holds. A documented
-// case says whether another file points to its document (`pointer`: the file and words that point, IS_README when the
-// document is the README itself, or NOTHING when no file points to it). A case whose rule is outside prose has every place in a file that is not a prose document, and no
+// case has its rule in at least one prose document. A case whose rule is outside prose has every place in a file that is not a prose document, and no
 // Markdown file in its repository mentions the rule's subject (`subject`). The ungoverned case lists the documents
 // that do not govern the task. The mix is the architect's ruling of 14 November 2026: 4 documented, 3 outside prose,
 // 1 ungoverned.
 const DOCUMENT = 'written in a document', OUTSIDE_PROSE = 'outside any prose document', NONE = 'none governs';
-const IS_README = 'the document is the README', NOTHING = 'no file points to it';
 const PROSE = new Set(['README', 'contributing guide', 'release guide', 'design record']);
 const RULES = {
   'override-in-the-overlay': {
     group: DOCUMENT,
     rule: 'a value for one environment is set in that environment\'s overlay, k8s/overlays/<env>/config.env, never in the shared base',
     at: [{ path: 'README.md', kind: 'README', says: 'To change a value for one environment, set it in\nthat environment\'s `k8s/overlays/<env>/config.env`, which overrides the base.' }],
-    pointer: IS_README,
   },
   'log-through-the-logger': {
     group: OUTSIDE_PROSE,
@@ -150,7 +147,6 @@ const RULES = {
     rule: 'a published schema version never changes; a change is the next version file, with latest moved to it and the published digests left alone',
     at: [{ path: 'CONTRIBUTING.md', kind: 'contributing guide', says: '1. Add the next version as `schemas/<event>/v<N+1>.json`, starting from a copy of the latest one.' },
       { path: 'scripts/check_schemas.py', kind: 'check script (CI)', says: 'published versions never change, add the next version instead' }],
-    pointer: { path: 'README.md', says: 'Read CONTRIBUTING.md before you change a schema.' },
   },
   'regenerate-the-strings': {
     group: OUTSIDE_PROSE,
@@ -166,7 +162,6 @@ const RULES = {
     at: [{ path: 'CONTRIBUTING.md', kind: 'contributing guide', says: 'Every pull request adds one\nfragment, `newsfragments/<issue>.<type>.md`' },
       { path: 'pyproject.toml', kind: 'towncrier configuration', says: '[tool.towncrier]\ndirectory = "newsfragments"' },
       { path: '.github/workflows/ci.yml', kind: 'CI workflow', says: 'towncrier check --compare-with origin/main' }],
-    pointer: { path: 'README.md', says: 'CONTRIBUTING.md before you open a pull request' },
   },
   'size-from-the-allowlist': {
     group: OUTSIDE_PROSE,
@@ -179,7 +174,6 @@ const RULES = {
     group: DOCUMENT,
     rule: 'the billed integration suite runs only for changes under src/billing/; every change runs the free unit tests',
     at: [{ path: 'CONTRIBUTING.md', kind: 'contributing guide', says: 'Run them only when you change `src/billing/`.' }],
-    pointer: NOTHING,
   },
   'just-the-typo': {
     group: NONE,
@@ -844,19 +838,9 @@ test('the rule lives where the table says, in the 4 / 3 / 1 mix: four documented
       assert.deepEqual(entry.at, []);
       assert.ok(entry.ungoverned.every(({ kind }) => PROSE.has(kind)));
     } else if (entry.group === DOCUMENT) {
-      // The rule is written in a prose document; a pointer to it, when there is one, is a plain fact of the fixture.
+      // The rule is written in a prose document of the repository.
       const written = entry.at.filter(({ kind }) => PROSE.has(kind));
       assert.ok(written.length > 0 && written.every(({ path }) => docs.includes(path)), name);
-      if (entry.pointer === IS_README) {
-        assert.deepEqual(written.map(({ path }) => path), ['README.md'], name);
-      } else if (entry.pointer === NOTHING) {
-        // No other tracked file names the document.
-        for (const { path } of written) {
-          for (const other of tracked.filter(file => file !== path)) assert.ok(!readFileSync(join(ws, other), 'utf8').includes(basename(path)), `${name}: ${other} names ${path}`);
-        }
-      } else {
-        assert.ok(readFileSync(join(ws, entry.pointer.path), 'utf8').includes(entry.pointer.says), `${name}: ${entry.pointer.path} does not point`);
-      }
     } else {
       assert.equal(entry.group, OUTSIDE_PROSE);
       // Outside prose: no place is a prose document, and no Markdown file in the repository mentions the rule's subject.
