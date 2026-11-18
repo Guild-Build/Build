@@ -430,13 +430,13 @@ test('on each of the Client Deployment Trial\'s eight repositories the whole out
 
 // Rule 2: a file the README names is listed when it exists, with one of the five endings in any case. A name is a whole
 // run of name characters: a sentence's closing period is not part of it, a longer ending (kept.md.bak) is not a
-// documentation ending, a leading ./ is dropped, and an absolute name, one holding .., and one inside a web address are
-// refused.
+// documentation ending, nor is a name wrapped in underscores (_kept.md_, as Markdown emphasis), a leading ./ is
+// dropped, and an absolute name, one holding .., and one inside a web address are refused.
 test('a file the README names is listed when it exists, under each of the five endings', t => {
   const docs = ['MAINTAINING.md', 'guide/Setup.markdown', 'docs/api.rst', 'notes/changes.txt', 'docs/ops.adoc', 'UPPER.MD', 'ops/handover.md', 'local.md'];
   const files = Object.fromEntries([...docs, 'kept.md', 'kept.md.bak', 'abs.md', 'up.md', 'url.md', 'docs/x.md'].map(name => [name, 'x\n']));
   files['README.md'] = 'MAINTAINING.md, guide/Setup.markdown, docs/api.rst, notes/changes.txt and docs/ops.adoc. Also UPPER.MD; see ops/handover.md.\n'
-    + 'Then ./local.md, missing.md, kept.md.bak, /abs.md, docs/../up.md and https://example.com/url.md.\n';
+    + 'Then ./local.md, missing.md, kept.md.bak, _kept.md_, /abs.md, docs/../up.md and https://example.com/url.md.\n';
   assert.equal(run(gitRepo(folder(t, files))).text, context(docs.map(named).join(', ')));
 });
 
@@ -472,22 +472,27 @@ test('a file the README names is left out when it or a folder on its path is a s
 // Rule 4: a folder name ends in / with no name character after it, and the folder is listed, as one entry, when it is a
 // folder of documents: not a symbolic link nor under one, at most 200 entries, every entry directly in it (hidden ones
 // included) a folder or a regular file with a documentation ending, and at least one such file. Its entries are tested
-// by name and type only: the hook reads only the README.
+// by name and type only: the hook reads only the README. A folder whose entries cannot be listed is left out, with no
+// error.
 test('a folder the README names is listed as one entry when it is a folder of documents', t => {
   const files = { 'handbook/a.md': 'x', 'handbook/b.rst': 'x', 'src/main.js': 'x', 'mixed/a.md': 'x', 'mixed/run.sh': 'x', 'hidden/a.md': 'x',
     'hidden/.DS_Store': 'x', 'hiddendoc/.notes.md': 'x', 'hiddendoc/b.md': 'x', 'nested/a.md': 'x', 'nested/code/main.js': 'x',
-    'onlyfolders/sub/a.md': 'x', 'real/docs/a.md': 'x', 'linkentry/a.md': 'x', 'docs/guide.md': 'x', 'period/a.md': 'x', 'handbook2/a.md': 'x' };
+    'onlyfolders/sub/a.md': 'x', 'real/docs/a.md': 'x', 'linkentry/a.md': 'x', 'docs/guide.md': 'x', 'period/a.md': 'x', 'handbook2/a.md': 'x',
+    'locked/a.md': 'x' };
   for (let i = 0; i < 201; i++) files[`big/${String(i).padStart(3, '0')}.md`] = 'x';
   for (let i = 0; i < 200; i++) files[`full/${String(i).padStart(3, '0')}.md`] = 'x';
-  files['README.md'] = 'handbook/ src/ mixed/ empty/ hidden/ hiddendoc/ nested/ onlyfolders/ linked/ via/docs/ linkentry/ big/ full/\n'
+  files['README.md'] = 'handbook/ src/ mixed/ empty/ hidden/ hiddendoc/ nested/ onlyfolders/ linked/ via/docs/ linkentry/ big/ full/ locked/\n'
     + 'docs/guide.md, then period/. and https://example.com/handbook2/\n';
   const dir = gitRepo(folder(t, files));
   mkdirSync(join(dir, 'empty'));
   symlinkSync('handbook', join(dir, 'linked'));
   symlinkSync('real', join(dir, 'via'));
   symlinkSync('a.md', join(dir, 'linkentry/b.md'));
+  chmodSync(join(dir, 'locked'), 0); // root may still list it
   const r = run(dir, { record: true });
-  assert.equal(r.text, context([docFolder('handbook/'), docFolder('hiddendoc/'), docFolder('nested/'), docFolder('full/'), named('docs/guide.md')].join(', ')));
+  assert.deepEqual([r.status, r.signal, r.stderr], [0, null, '']);
+  assert.equal(r.text, context([docFolder('handbook/'), docFolder('hiddendoc/'), docFolder('nested/'), docFolder('full/'), ...(asRoot ? [docFolder('locked/')] : []),
+    named('docs/guide.md')].join(', ')));
   assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 2);
 });
 
