@@ -1,7 +1,7 @@
 {
   "schema": "buildguild.build.v1",
   "slug": "runbook-first",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "branches": [
     "claude-code"
   ],
@@ -19,6 +19,6 @@
     }
   ],
   "name": "Runbook First",
-  "summary": "One SessionStart hook: when a session starts in a repository, the agent is told which of the repository's operating documents exist and to read the ones that govern the change, run the checks they name and say which it read.",
+  "summary": "One SessionStart hook: when a session starts in a repository, the agent is told which of the repository's operating documents exist, by conventional name or because the README names them, and to read the ones that govern the change, run the checks they name and say which it read.",
   "license": "Apache-2.0"
 }
