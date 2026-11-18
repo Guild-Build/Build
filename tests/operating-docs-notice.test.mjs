@@ -114,29 +114,20 @@ function run(dir, { cwd = dir, projectDir = dir, record = false, timeout = 10_00
   return { ...base, text: out.hookSpecificOutput.additionalContext };
 }
 // The commands the hook may run, with the only arguments it may give them: git to find the top folder, head for the
-// README's first 64 KB, ls for the entries of a folder in the repository, and grep, head -n 20, head -n 203 (one for
-// each ls) and tr on standard input. Returns how many times the README was read: twice when there is one, once for the
-// pointers to conventional documents and once for the other names it holds.
+// README's first 64 KB, find for the entries of a folder the README names (run inside that folder, and only when there
+// is a README), and grep, head -n 20 and tr on standard input. Returns how many times the README was read: twice when
+// there is one, once for the pointers to conventional documents and once for the other names it holds.
 function onlyReadsReadme(calls, readme) {
   let heads = 0;
-  let lists = 0;
-  let cuts = 0;
   for (const [name, ...args] of calls) {
-    if (name === 'head' && args[0] === '-n' && args[1] === '203') { assert.equal(args.length, 2); cuts++; }
-    else if (name === 'head' && args[0] === '-n') assert.deepEqual(args, ['-n', '20']);
+    if (name === 'head' && args[0] === '-n') assert.deepEqual(args, ['-n', '20']);
     else if (name === 'head') { assert.deepEqual(args, ['-c', '65536', readme]); heads++; }
-    else if (name === 'ls') {
-      assert.deepEqual(args.slice(0, 3), ['-1', '-f', '-q']);
-      assert.equal(args.length, 4);
-      assert.ok(readme && realpathSync(args[3]).startsWith(`${dirname(readme)}/`), `ls ${args.join(' ')}`);
-      lists++;
-    }
+    else if (name === 'find') assert.ok(readme, 'find with no README'), assert.deepEqual(args, ['.', '-mindepth', '1', '-maxdepth', '1', '-print0']);
     else if (name === 'grep') assert.deepEqual(args.slice(0, 4), ['-a', '-o', '-i', '-E']), assert.equal(args.length, 5);
     else if (name === 'tr') assert.deepEqual(args, ['A-Z', 'a-z']);
     else if (name === 'git') assert.deepEqual(args, ['rev-parse', '--show-toplevel']);
     else assert.fail(`the hook ran ${[name, ...args].join(' ')}`);
   }
-  assert.equal(cuts, lists, 'every ls is cut off by head -n 203');
   return heads;
 }
 // The CPU time, in seconds, that one run of the hook uses together with the commands it starts: the second line bash's
@@ -603,12 +594,14 @@ function parseList(text) {
   assert.equal(entries.join(', '), body, 'every character of the list is in an entry');
   return { entries, count: ending ? Number(ending[2]) : 0 };
 }
-// The rule for the entries 0.2.0 adds (the ruling on finding 1 of the review), from the list 0.1.0 writes (t1), the
-// added entries that are within the eight documents listed (shown in the order the README names them) and how many
-// more were added beyond the eight: the entries t1 shows stay, the added ones go between its documents and the README's
-// own entry, each one that fits after the ones kept before it together with the ending, and the ending counts every
-// document and entry left out. Returns the list, or null when even that count does not fit beside what t1 shows and
-// the text stays 0.1.0's.
+// The rule for the entries 0.2.0 adds (the rulings on finding 1 of both reviews), from the list 0.1.0 writes (t1), the
+// added entries that are within the eight documents listed (in the order the README names them) and how many more were
+// added beyond the eight: the entries t1 shows stay, the README's own entry last, and the ending counts every document
+// and entry left out. The added entries go between t1's documents and the README's entry, admitted by 0.1.0's own
+// two-pass procedure: an entry stays when it fits after the ones kept before it together with the ending sized for a
+// one-digit count, and, if the count then has two digits, the whole pass is made again with the ending sized for two.
+// The procedure is the rule, so this mirrors it. Returns the list, or null when even that count does not fit beside
+// what t1 shows and the text stays 0.1.0's.
 function withAdded(t1, added, addedExtra) {
   const own = t1.entries.find(entry => entry.includes(' (points to '));
   const docs = t1.entries.filter(entry => entry !== own);
@@ -676,6 +669,29 @@ test('the entries 0.2.0 adds use the room 0.1.0 leaves to the character', t => {
   assert.equal(check([207, 207, 208, 208, 200], [0, 1, 2, 4], '(c)'), 993);
 });
 
+// An accepted limit of 0.2.0 (the ruling on finding 1 of the second review). Added entries are admitted by 0.1.0's own
+// two-pass procedure, so the second pass can leave out an entry that would fit beside a count one digit shorter. Here
+// the first pass, with room for a one-digit count, admits the 662-character entry and leaves 12 out; the second, with
+// room for two digits, drops it and admits three of the four smaller entries, leaving 10 out, although the fourth would
+// fit beside "and 9 more" in exactly 1,200 characters. The test pins the behaviour as it is, so that a change to it is
+// deliberate.
+test('an accepted limit: the second pass can leave out an entry that would fit beside a one-digit count', t => {
+  const legacy = [0, 1, 2].map(i => `runbook-${i}-${'a'.repeat(27)}.md`);
+  const added = [`${['p', 'p', 'p'].map(c => c.repeat(150)).join('/')}/n0-${'a'.repeat(203)}.md`,
+    ...[147, 147, 148, 148].map((length, i) => `n${i + 1}-${'a'.repeat(length - 6)}.md`)];
+  const extra = Array.from({ length: 8 }, (_, i) => `extra${i}.md`);
+  assert.deepEqual(added.map(name => name.length), [662, 147, 147, 148, 148]);
+  const dir = folder(t, Object.fromEntries([...legacy, ...added, ...extra].map(name => [name, 'x'])));
+  writeFileSync(join(dir, 'README.md'), [...legacy, ...added, ...extra].join(' '));
+  const docs = legacy.map(name => `${name} (runbook)`);
+  const own = `README.md (points to ${legacy.join(', ')})`;
+  const r = run(dir);
+  assert.equal(r.text, context(`${[...docs, ...added.slice(1, 4).map(named), own].join(', ')}, and 10 more`));
+  assert.equal(r.text.length, 1029);
+  // What a fit that sized the ending for each count could show: the fourth smaller entry too, in exactly 1,200.
+  assert.equal(context(`${[...docs, ...added.slice(1, 5).map(named), own].join(', ')}, and 9 more`).length, LIMIT);
+});
+
 // The ruling on finding 1, held against the saved 0.1.0 script over generated repositories, from a fixed seed. Each
 // has some of the conventional documents (one spelling of each), runbooks the README points to by path, file names of
 // conventional documents it points to, and new files and folders of documents it names, in a shuffled order and with
@@ -684,7 +700,9 @@ test('the entries 0.2.0 adds use the room 0.1.0 leaves to the character', t => {
 // whole and in order, with the README's entry last; (ii) the other entries are the new ones, in the order the README
 // names them, between the documents and the README's entry; (iii) unless the text is 0.1.0's, the count is 0.1.0's
 // plus the new entries not shown; (iv) the text is 0.1.0's, with new entries, only when that count does not fit beside
-// what 0.1.0 shows; (v) with no new entry, the output is 0.1.0's byte for byte. And the text is what the rule gives.
+// what 0.1.0 shows; (v) with no new entry, the output is 0.1.0's byte for byte. Those checks, and that the text is
+// within 1,200 characters, hold whatever procedure admits the new entries, and are made on their own. Then the text
+// must be exactly what the rule's two-pass procedure gives, which withAdded mirrors.
 test('the entries 0.2.0 adds never displace what 0.1.0 shows: a seeded comparison with the 0.1.0 script', t => {
   let seed = 20261118;
   const rand = () => { seed = (seed + 0x6d2b79f5) | 0; let x = Math.imul(seed ^ (seed >>> 15), 1 | seed); x ^= x + Math.imul(x ^ (x >>> 7), 61 | x); return ((x ^ (x >>> 14)) >>> 0) / 4294967296; };
@@ -732,15 +750,13 @@ test('the entries 0.2.0 adds never displace what 0.1.0 shows: a seeded compariso
     const r = run(dir);
     const where = `repository ${n}`;
     assert.deepEqual([old.status, r.status, old.stderr, r.stderr], [0, 0, '', ''], where);
+    assert.ok(r.text === null || r.text.length <= LIMIT, `${where}: within 1,200 characters`);
     const added = tokens.map(([, entry]) => entry).filter(Boolean);
     const slots = Math.max(0, 8 - found);
     const t1 = parseList(old.text);
     const t2 = parseList(r.text);
     // (v)
     if (!added.length) { assert.equal(r.stdout, old.stdout, `${where}: (v)`); seen.v++; continue; }
-    // The rule, exactly.
-    const expected = withAdded(t1, added.slice(0, slots), added.length - Math.min(slots, added.length));
-    assert.equal(r.text, expected === null ? old.text : context(expected), where);
     // (i): 0.1.0's entries, whole and in order, the README's entry last.
     const own = t1.entries.find(entry => entry.includes(' (points to '));
     const kept = t2.entries.filter(entry => t1.entries.includes(entry));
@@ -764,6 +780,9 @@ test('the entries 0.2.0 adds never displace what 0.1.0 shows: a seeded compariso
       if (t1.count < 10 && t2.count >= 10) seen.twoDigits++;
       if (own && shown.length) seen.ownWithAdded++;
     }
+    // The text the rule's two-pass procedure gives.
+    const expected = withAdded(t1, added.slice(0, slots), added.length - Math.min(slots, added.length));
+    assert.equal(r.text, expected === null ? old.text : context(expected), `${where}: the procedure`);
     if (found > 8) seen.beyondEight++;
   }
   t.diagnostic(JSON.stringify(seen));
@@ -771,26 +790,59 @@ test('the entries 0.2.0 adds never displace what 0.1.0 shows: a seeded compariso
   for (const [kind, count] of Object.entries(seen)) assert.ok(count >= 3, `${kind}: ${count} repositories`);
 });
 
-// The ruling on finding 2 of the review: a glob reads a whole folder before the 200-entry limit can stop it, and Bash 5
-// takes tens of microseconds per entry to do so (20 folders of 10,000 entries took 7.6 seconds). So the hook reads a
-// named folder's entries through ls, unsorted, cut off by head after 203 lines, for every folder it looks into: a
-// folder holding 250 entries costs no more than one holding 201. A name that ls cannot print (here, one with a line
-// break) names no entry and leaves its folder out.
-test('a named folder\'s entries are read through ls cut off by head, never all of them', t => {
+// The ruling on finding 2 of the first review: a glob reads a whole folder before the 200-entry limit can stop it, and
+// Bash 5 takes tens of microseconds per entry to do so (20 folders of 10,000 entries took 7.6 seconds). So the hook
+// reads a named folder's entries from find, run inside that folder, and stops reading at the 201st, which ends find: a
+// folder holding 250 entries costs no more than one holding 201. The test fails if the shell lists a folder itself
+// again. Every entry keeps its exact name, so a line break in one is no obstacle, and variables that change how ls
+// prints names change nothing.
+test('a named folder\'s entries come from find, which the hook stops at the 201st, never from the shell reading the whole folder', t => {
   const files = { 'handbook/a.md': 'x', 'handbook/b.rst': 'x', 'odd/good.md': 'x', 'odd/bad\nname.md': 'x' };
   for (let i = 0; i < 250; i++) files[`big/${String(i).padStart(3, '0')}.md`] = 'x';
   files['README.md'] = 'See handbook/, big/ and odd/ first.\n';
   const dir = gitRepo(folder(t, files));
+  const expected = context([docFolder('handbook/'), docFolder('odd/')].join(', '));
   const r = run(dir, { record: true });
-  assert.deepEqual([r.status, r.stderr, r.text], [0, '', context(docFolder('handbook/'))]);
+  assert.deepEqual([r.status, r.stderr, r.text], [0, '', expected]);
   assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 2);
-  const root = realpathSync(dir);
-  assert.deepEqual(r.calls.filter(([name]) => name === 'ls').map(([, ...args]) => args),
-    ['handbook', 'big', 'odd'].map(name => ['-1', '-f', '-q', `${root}/${name}`]));
-  assert.equal(r.calls.filter(([name, ...args]) => name === 'head' && args.join(' ') === '-n 203').length, 3);
-  // Colour forced on (macOS ls) or a quoting style (GNU ls) in the environment do not change the names ls prints.
+  assert.equal(r.calls.filter(([name]) => name === 'find').length, 3, 'one find for each named folder');
   const forced = run(dir, { vars: { CLICOLOR: '1', CLICOLOR_FORCE: '1', TERM: 'xterm-256color', QUOTING_STYLE: 'shell-always' } });
-  assert.deepEqual([forced.status, forced.stderr, forced.text], [0, '', context(docFolder('handbook/'))]);
+  assert.deepEqual([forced.status, forced.stderr, forced.text], [0, '', expected]);
+});
+
+// The ruling on finding 2 of the second review: a folder is judged by its entries' exact names. Its two reproductions,
+// under the C locale with and without colour and quoting variables set: (1) a non-document file named "bad" and a line
+// break, beside a folder "bad?" and ok.md, leaves the folder out (with ls -q both names read as "bad?", the folder);
+// (2) "a", a line break and "b.md", beside a literal "a?b.md", are both documents, so the folder is listed.
+test('a folder is judged by its entries\' exact names: the second review\'s two reproductions', t => {
+  const settings = [{ LC_ALL: 'C' }, { LC_ALL: 'C', CLICOLOR: '1', CLICOLOR_FORCE: '1', TERM: 'xterm-256color', QUOTING_STYLE: 'shell-always' }];
+  const first = gitRepo(folder(t, { 'handbook/ok.md': 'x', 'handbook/bad\n': 'not a document', 'README.md': 'handbook/\n' }));
+  mkdirSync(join(first, 'handbook/bad?'));
+  const second = gitRepo(folder(t, { 'handbook/a\nb.md': 'x', 'handbook/a?b.md': 'x', 'README.md': 'handbook/\n' }));
+  for (const vars of settings) {
+    const one = run(first, { vars });
+    assert.deepEqual([one.status, one.stderr, one.text], [0, '', null], `(1) ${JSON.stringify(vars)}`);
+    const two = run(second, { vars });
+    assert.deepEqual([two.status, two.stderr, two.text], [0, '', context(docFolder('handbook/'))], `(2) ${JSON.stringify(vars)}`);
+  }
+});
+
+// Entry names that hold a line break, a tab, a ?, a space, a leading dash or a non-ASCII letter, under the C locale and,
+// where the machine has one, a UTF-8 locale: a folder of documents so named is listed, and in six more folders one
+// non-document so named, beside ok.md, leaves its folder out. Only find and the README reads run.
+test('entries named with a line break, a tab, a ?, a space, a leading dash or non-ASCII are each judged by their own name', t => {
+  const odd = ['line\nbreak', 'tab\there', 'what?', 'with space', '-dash', 'naïve'];
+  const files = { 'README.md': `docs/ ${odd.map((_, i) => `bad${i}/`).join(' ')}\n` };
+  for (const name of odd) files[`docs/${name}.md`] = 'x';
+  odd.forEach((name, i) => { files[`bad${i}/ok.md`] = 'x'; files[`bad${i}/${name}`] = 'not a document'; });
+  const dir = gitRepo(folder(t, files));
+  const utf8 = (spawnSync('locale', ['-a'], { encoding: 'utf8' }).stdout || '').split('\n').find(name => /^(C|en_US)\.(UTF-8|utf8)$/.test(name));
+  for (const LC_ALL of ['C', ...(utf8 ? [utf8] : [])]) {
+    const r = run(dir, { vars: { LC_ALL }, record: true });
+    assert.deepEqual([r.status, r.stderr, r.text], [0, '', context(docFolder('docs/'))], LC_ALL);
+    assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 2, LC_ALL);
+    t.diagnostic(`${LC_ALL}: docs/ listed, bad0/ to bad5/ left out`);
+  }
 });
 
 // The Client Operations Trial 2.0.0 is not a held-out test for 0.2.0: 0.2.0 was written after a check showed 0.1.0

@@ -11,7 +11,7 @@
 # more. The text never exceeds 1,200 characters. It reads file names and the first 64 KB of the README only (it opens no
 # other file, and looks at no more than the first 201 entries of a named folder, by name and type), writes nothing,
 # makes no network or model call, and exits 0 whatever happens, so it never fails a session. Bash 3.2 or later, with
-# head, grep, tr and ls; git is used when present to find the top folder.
+# head, grep, tr and find; git is used when present to find the top folder.
 trap 'exit 0' EXIT
 
 dir="${CLAUDE_PROJECT_DIR:-$PWD}"
@@ -129,12 +129,12 @@ not_operating() {
 # documentation ending, at least one of them such a file, and it has at most 200 entries. Entries are tested by name
 # and type only: no file in it is opened.
 # A glob would read the whole folder before the 200-entry limit could stop it, and Bash 5 takes tens of microseconds
-# per entry to do so. So the entries come from ls, unsorted (-f, which also lists . and ..), one per line, with any
-# character that cannot be printed shown as ? (-q), and head stops after 203 lines: . and .. and 201 entries. A name
-# that ls cannot print names no entry, so it leaves the folder out. Colour and quoting set in the environment are
-# cleared for ls, so that it prints the names alone.
+# per entry to do so. So find lists the entries, each with its exact name whatever bytes it holds (each one ends in a
+# NUL, the one byte besides / that no name holds), and the loop stops reading at the 201st entry, which ends find. Every
+# entry is tested by its own name. find runs inside the folder, so it prints ./ and the name, whatever the folder's
+# path: read takes them a byte at a time, so a long path would cost time for every entry.
 doc_folder() {
-  local rest="$1" path="$root" part entries name e n=0 docs=0 r=0
+  local rest="$1" path="$root" part e n=0 docs=0 r=0
   case "$rest" in ''|/*|*/|*//*|*..*) return 1 ;; esac
   while :; do
     part="${rest%%/*}"
@@ -144,17 +144,13 @@ doc_folder() {
     rest="${rest#*/}"
   done
   [ -d "$path" ] || return 1
-  entries="$(unset CLICOLOR CLICOLOR_FORCE QUOTING_STYLE; ls -1 -f -q "$path" 2>/dev/null | head -n 203)"
-  while IFS= read -r name; do
-    case "$name" in ''|.|..) continue ;; esac
+  while IFS= read -r -d '' e; do
     n=$((n + 1))
-    e="$path/$name"
+    e="$path/${e#./}"
     if [ "$n" -gt 200 ] || [ -L "$e" ]; then r=1; break; fi
     [ -d "$e" ] && continue
-    if [ -f "$e" ] && doc_ending "$name"; then docs=$((docs + 1)); else r=1; break; fi
-  done <<EOF
-$entries
-EOF
+    if [ -f "$e" ] && doc_ending "${e##*/}"; then docs=$((docs + 1)); else r=1; break; fi
+  done < <(CDPATH='' cd -- "$path" 2>/dev/null && exec find . -mindepth 1 -maxdepth 1 -print0 2>/dev/null)
   [ "$r" -eq 0 ] && [ "$docs" -gt 0 ]
 }
 # Adds a folder once, as add_doc adds a document: after the first eight it is only counted.
@@ -247,10 +243,12 @@ if [ "${#list}" -gt "$budget" ]; then
   if [ -n "$kept" ]; then list="$kept, and $more more"; else list="$more, with names too long to list"; fi
 fi
 # The added entries take only the room that list leaves. Every entry it shows stays, whole and in its order, with the
-# README's own entry last; the added entries go between the documents and the README's entry, each one that fits after
-# the ones kept before it together with the ending, by the same rule; and N counts every document and entry left out,
-# added ones included. When even that N does not fit beside what the list shows, the list stays as 0.1.0 writes it,
-# and the added entries are neither listed nor counted. When there is no added entry, it stays as 0.1.0 writes it.
+# README's own entry last, and N counts every document and entry left out, added ones included. The added entries go
+# between the documents and the README's entry, admitted by 0.1.0's own two-pass procedure above: an entry stays when
+# it fits after the ones kept before it together with the ending sized for a one-digit N, and, if N then has two
+# digits, the whole pass is made again with the ending sized for two. So near the limit an added entry can be left out
+# although it would fit beside an N one digit shorter. When even N does not fit beside what the list shows, the list
+# stays as 0.1.0 writes it, and the added entries are neither listed nor counted. With no added entry it stays so too.
 if [ "${#added[@]}" -gt 0 ] || [ "$added_extra" -gt 0 ]; then
   docs=""
   last=""
