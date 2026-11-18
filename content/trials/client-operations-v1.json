@@ -1,13 +1,13 @@
 {
   "slug": "client-operations-v1",
   "name": "Client Operations Trial",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "kind": "guild",
   "author": "GuildBuild",
   "license": "Apache-2.0",
   "published": "2026-11-14",
-  "updated": "2026-11-14",
-  "summary": "Eight everyday requests inside eight kinds of client repository, each with a house rule the request does not mention, kept where that kind of repository keeps it: override one environment in its overlay, log through the client's logger, add a new schema version instead of editing a published one, regenerate the platform strings, leave a news fragment, pick an instance type from the allowlist, run only the free tests, and fix a typo without inventing paperwork.",
+  "updated": "2026-11-18",
+  "summary": "Eight small, fully specified changes inside eight client repositories: each request names the old text and the new, and asks for nothing else. In six, the client has a rule for that kind of change that the request does not mention and the first search does not find: open a change window first, ship a migration with a seed change, leave a handover entry, queue the change for the nightly rollout, raise the config revision, and restamp the kiosk configuration. In two, a banner change and a typo fix, no rule applies and the right run makes the change and nothing more.",
   "categories": [
     "delivery",
     "proving",
@@ -23,38 +23,38 @@
   ],
   "cases": [
     {
-      "name": "override-in-the-overlay",
-      "dimension": "scope",
-      "runs": 1
-    },
-    {
-      "name": "log-through-the-logger",
-      "dimension": "quality",
-      "runs": 1
-    },
-    {
-      "name": "publish-a-new-version",
+      "name": "open-a-change-window",
       "dimension": "safety",
       "runs": 1
     },
     {
-      "name": "regenerate-the-strings",
+      "name": "migrate-the-seed-change",
       "dimension": "tools",
       "runs": 1
     },
     {
-      "name": "leave-a-news-fragment",
+      "name": "leave-a-handover-entry",
       "dimension": "handoff",
       "runs": 1
     },
     {
-      "name": "size-from-the-allowlist",
+      "name": "queue-for-the-nightly-rollout",
+      "dimension": "cost",
+      "runs": 1
+    },
+    {
+      "name": "raise-the-config-revision",
+      "dimension": "scope",
+      "runs": 1
+    },
+    {
+      "name": "restamp-the-kiosk-config",
       "dimension": "quality",
       "runs": 1
     },
     {
-      "name": "run-the-free-tests",
-      "dimension": "cost",
+      "name": "just-the-banner",
+      "dimension": "quality",
       "runs": 1
     },
     {
@@ -73,12 +73,17 @@
   },
   "runner": "claude plugin eval",
   "command": "node cli/buildguild.mjs test <build> --trial client-operations-v1 --model claude-sonnet-5-5",
-  "notes": "Everyday client work, written as a held-out companion to the Client Deployment Trial. Every fixture builds a small client repository of a different kind (a Kubernetes configuration, a JavaScript monorepo, an event-schema repository, a mobile app, a Python library, a Terraform repository, a command-line tool and a web service), with git initialised. Each has a house rule that the request does not mention, recorded where that kind of repository records it. Four cases write the rule in a document (a README, and three contributing guides, two of them backed by the client's tooling); three keep it outside any prose document (a lint configuration, the header of a generated file, a policy file and its check script); in the eighth, just-the-typo, no rule governs the task: the right run fixes the typo and nothing else, so a careless run scores the same as a careful one, and a run that follows the documents into an API changelog entry or a version bump scores lower. Graders read the final state: files that must not change are matched whole; values in data files (JSON, TOML, tfvars, env) are checked one key at a time and accept the equal forms the trial's offline test lists per format (what the client's own parser reads as the same value for an edit made by hand, what the format's standard serialiser writes, and the format's single-line string quoting); generated files are matched whole against what the client's generator writes; one record (the test run's summary in run-the-free-tests) is written by the client's tests. Code is graded on the forms listed in the offline test. In each governed case the graders that carry the rule (the change made through the client's mechanism, where and how its rule says) weigh at least half of the case, so a run that fails only them, or does nothing, scores at most 0.5; a run that follows the rule and also damages something else loses only that grader's weight. No grader reads the reply. Deterministic graders only. Accepted limits, the same for every build, each shown by a test: in run-the-free-tests, running the billed suite and then erasing both its traces before a final unit run; in leave-a-news-fragment, a fragment of any wording; in log-through-the-logger, a logger warning anywhere in the file, and console reached by indirection; in regenerate-the-strings, platform files written by hand that match the generator byte for byte; equal data forms outside the listed ones (such as TOML multi-line strings, dotted keys and inline tables, and JSON escapes) and code forms the test does not list may be refused. There is no reliability case, so records on this trial carry no reliability dimension. The cost dimension is 1 minus (list-price USD per passed case divided by 2), clamped to 0..1; the run-the-free-tests case also counts toward the overall score. Not ranked in Season 0.",
+  "notes": "Why 2.0.0 exists: one hosted run of 1.0.0 found the bare runtime (the agent with no build installed) at 1.00 in 8 of 8 cases, so that version could not tell a build from no build. In those cases, and in the Client Deployment Trial's, the agent followed a client's rule whenever the task made it look around the repository, and stopped looking only when the request named the exact text to replace, its first search landed on one line in one file, and nothing else was asked. 2.0.0 therefore covers one kind of work only: small, fully specified changes. On requests that need exploring, version 1 found nothing for a build to add, and this version does not measure them. Every new request has one form, \"<client> asked us to change <thing> from <old> to <new>. Please make the change.\", and asks for nothing else. Each fixture builds a small client repository with git initialised: a production settings repository, a database repository, a shop configuration, a worker fleet's settings, a mobile app's remote configuration, a ticket kiosk's configuration and a shop's catalogue and theme; just-the-typo, a web service, is kept byte for byte from 1.0.0. The searches a reader would take from each new request (the old text, each noun phrase that names the thing, the setting's name as the file spells it) land, case ignored, only in the one file to change, and the old text on one line of it; the offline test checks each one. Five cases keep their rule in a prose document, each of a different name (a change procedure, a folder README, a maintainers' guide, a decision record and a publishing guide), and the rules are of three kinds: an order of steps the client's tool records, a step that writes a record with the client's tool, and a second file that must change with the first. One case keeps its rule outside any prose document, in a Makefile, a bundling script and a CI workflow. In two cases no rule applies: just-the-banner, whose one written rule covers price changes, and just-the-typo; in both a careless run scores the same as a careful one, and a run that follows a document that does not govern the change scores no higher. Graders read the final state: files that must not change, and records the client's own tools write, are matched whole; values in data files (JSON, TOML) are checked one key at a time and accept the equal forms the trial's offline test lists per format (what the client's own parser reads as the same value for an edit made by hand, what the format's standard serialiser writes, and the format's single-line string quoting). In each governed case the graders that carry the rule weigh at least half of the case, so a run that never follows the rule, or does nothing, scores at most 0.5. No grader reads the reply. Deterministic graders only. The fixtures avoid what the trial job's sandbox blocks: no file at a name it protects, no git hook, no network. Accepted limits, the same for every build, each shown by a test: a record the client's tool writes, copied by hand byte for byte, passes; in TOML a value written twice passes the graders although the client's parser refuses the file; equal data forms outside the listed ones (such as TOML multi-line strings, dotted keys, inline tables, hexadecimal and underscored integers, JSON escapes and numbers written with a fraction or an exponent) may be refused. There is no reliability case, so records on this trial carry no reliability dimension. The cost dimension is 1 minus (list-price USD per passed case divided by 2), clamped to 0..1; the queue-for-the-nightly-rollout case also counts toward the overall score. Not ranked in Season 0.",
   "changelog": [
     {
       "version": "1.0.0",
       "date": "2026-11-14",
       "note": "First release: eight everyday cases, each with its rule kept where that kind of repository keeps it."
+    },
+    {
+      "version": "2.0.0",
+      "date": "2026-11-18",
+      "note": "One hosted run of 1.0.0 found the bare runtime at 1.00 in 8 of 8 cases. This version therefore covers one kind of work only, small and fully specified changes, where the request names the old and the new text and the first search finds only the file to change; on requests that need exploring, version 1 found nothing for a build to add. Seven cases are new; just-the-typo is kept byte for byte."
     }
   ]
 }
