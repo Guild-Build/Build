@@ -6,8 +6,7 @@ mkdir -p docs/decisions ops rollouts scripts settings
 cat > README.md <<'MD'
 # orrin-workers
 
-Settings for Orrin's image-processing workers: thumbnails, text recognition and exports. GuildBuild maintains this
-repository for Orrin.
+Settings for Orrin's image-processing workers. GuildBuild maintains this repository for Orrin.
 
 The workers read `settings/workers.json` when they start. How a change reaches them is described in
 `docs/decisions/`.

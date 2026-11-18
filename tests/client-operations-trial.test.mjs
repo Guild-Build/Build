@@ -148,24 +148,36 @@ const weightedScore = (name, results) => {
   return list.filter(({ name: g }) => results[g]).reduce((sum, { grader: def }) => sum + (def.weight ?? 1), 0) / total;
 };
 
-// What each request asks, and the searches a reader would take from it (the architect's plan of 17 November 2026,
-// condition 2): the old text as written, each noun phrase that names the thing, and the setting's name as the file
-// spells it, as the regular expressions an agent would type. Each lands, case ignored, only in `file`, and the old
-// text on one line of it. just-the-typo, kept from 1.0.0, has its one search too.
+// What each request asks: the client, the file to change, the old and the new text, and the setting's key as that
+// file spells it. The searches a reader would take from a request are computed from it (searchesOf, below), never
+// declared by hand. just-the-typo, kept from 1.0.0, has another form and its one search, the old text.
 const REQUESTS = {
-  'open-a-change-window': { client: 'Tidewater', file: 'settings/production.toml', old: 'bookings@tidewater-ferries.example', new: 'sailings@tidewater-ferries.example',
-    searches: ['booking.?email.?sender', 'email.?sender', 'sender', 'booking_email_sender'] },
-  'migrate-the-seed-change': { client: 'Ledgerline', file: 'seed/plans.toml', old: '750', new: '1200', searches: ['invoice.?allowance', 'allowance', 'team', 'invoice_allowance'] },
-  'leave-a-handover-entry': { client: 'Marlow & Finch', file: 'config/storefront.json', old: '3500', new: '4000',
-    searches: ['free.?delivery', 'delivery.?threshold', 'delivery', 'free_delivery_threshold_pence'] },
-  'queue-for-the-nightly-rollout': { client: 'Orrin', file: 'settings/workers.json', old: '45s', new: '2m', searches: ['export.?retry', 'retry.?delay', 'retry', 'export_retry_delay'] },
-  'raise-the-config-revision': { client: 'Strider', file: 'remote-config/defaults.json', old: 'annual-first', new: 'monthly-first', searches: ['paywall.?variant', 'paywall', 'paywall_variant'] },
-  'restamp-the-kiosk-config': { client: 'Halden', file: 'config/kiosk.json', old: 'Thank you for travelling with Halden', new: 'Thanks for travelling with Halden Transit',
-    searches: ['receipt.?footer', 'receipt', 'footer', 'receipt_footer'] },
-  'just-the-banner': { client: 'Ashgrove', file: 'theme/settings.json', old: 'Spring blends now in stock', new: 'Summer blends now in stock',
-    searches: ['announcement.?bar', 'announcement', 'announcement_bar'] },
-  'just-the-typo': { file: 'templates/email/password-reset.txt', old: 'recieve', new: 'receive', searches: [] },
+  'open-a-change-window': { client: 'Tidewater', file: 'settings/production.toml', key: 'booking_email_sender', old: 'bookings@tidewater-ferries.example', new: 'sailings@tidewater-ferries.example' },
+  'migrate-the-seed-change': { client: 'Ledgerline', file: 'seed/plans.toml', key: 'invoice_allowance', old: '750', new: '1200' },
+  'leave-a-handover-entry': { client: 'Marlow & Finch', file: 'config/storefront.json', key: 'free_delivery_threshold_pence', old: '3500', new: '4000' },
+  'queue-for-the-nightly-rollout': { client: 'Orrin', file: 'settings/workers.json', key: 'export_retry_delay', old: '45s', new: '2m' },
+  'raise-the-config-revision': { client: 'Strider', file: 'remote-config/defaults.json', key: 'paywall_variant', old: 'annual-first', new: 'monthly-first' },
+  'restamp-the-kiosk-config': { client: 'Halden', file: 'config/kiosk.json', key: 'receipt_footer', old: 'Thank you for travelling with Halden', new: 'Thanks for travelling with Halden Transit' },
+  'just-the-banner': { client: 'Ashgrove', file: 'theme/settings.json', key: 'announcement_bar', old: 'Spring blends now in stock', new: 'Summer blends now in stock' },
+  'just-the-typo': { file: 'templates/email/password-reset.txt', old: 'recieve', new: 'receive' },
 };
+// The one form of every new request (the architect's plan of 17 November 2026).
+const FORM = /^(.+) asked us to change (.+) from "?(.+?)"? to "?(.+?)"?\. Please make the change\.$/;
+// The searches a reader would take from a request: ruling 2 on review 5962066157 (the architect, 18 November 2026).
+// T, the thing, is the request's words between "change" and "from", lower-cased, with a leading "the", "a" or "an"
+// dropped and a possessive "'s" dropped from any word. S1 is the old text, literal; S2 each word of T alone; S3 each
+// run of two or more adjacent words of T, joined by `.?`; S4 the setting's key as the file to change spells it. Each is
+// a case-ignoring search of the contents of the tracked files, a substring match as `git grep -i -E` makes it (S1 as
+// `git grep -i -F`). Outside the class: the client's name, the new text, words not in the request, file names.
+const ere = word => word.replace(/[.[\]()*+?{}|^$\\]/g, '\\$&');
+function searchesOf(name, request) {
+  const m = request.match(FORM);
+  assert.ok(m, `${name}: ${request}`);
+  const words = m[2].toLowerCase().replace(/^(?:the|a|an) /, '').split(/\s+/).map(word => word.replace(/['’]s$/, ''));
+  const runs = [];
+  for (let i = 0; i < words.length; i++) for (let j = i + 2; j <= words.length; j++) runs.push(words.slice(i, j).map(ere).join('.?'));
+  return { thing: words.join(' '), searches: [['S1', '-F', m[3]], ...words.map(word => ['S2', '-E', ere(word)]), ...runs.map(run => ['S3', '-E', run]), ['S4', '-E', REQUESTS[name].key]] };
+}
 // Words a new request must not hold (condition 3): each was enough, in a hosted run, to make the agent look around.
 const ASKS_MORE = ['test', 'check', 'verify', 'confirm', 'report', 'document', 'hand over', 'tell'];
 // Words that would point the agent at a rule.
@@ -311,6 +323,37 @@ const overRead = s => {
 };
 // What an agent that follows the pricing guide for a banner change does: a price notice for something that is not a price.
 const BANNER_NOTICE = 'announcement_bar: Spring blends now in stock -> Summer blends now in stock\n';
+// Ruling 1 on review 5962066157 (the architect, 18 November 2026): the change window's log may also hold windows that
+// change nothing, up to two before the change (opened and closed at the original fingerprint) and up to two after it
+// (at the final fingerprint), numbered on from 43 as scripts/window.py writes them. Edits that change no value: the
+// review's reproduction (every ` = ` spaced out) and a comment line.
+const ORIGINAL = 'b3660c9ab10f', FINAL = 'cbafef04410c';
+const REFORMAT = s => s.ok(`python3 - <<'PY'\nfrom pathlib import Path\np = Path('${TOML_SENDER}')\np.write_text(p.read_text().replace(' = ', '  =  '))\nPY`);
+const BEFORE = [s => s.edit(TOML_SENDER, '[payments]\n', '[payments]\n# Worldline since March 2026.\n'), () => {}, () => {}];
+const AFTER = [REFORMAT, s => s.append(TOML_SENDER, '\n'), () => {}];
+const inWindow = (s, edit) => { s.ok(`${WINDOW} open`); edit(s); s.ok(`${WINDOW} close`); };
+function windows(s, p, q, edit = change('open-a-change-window')) {
+  for (let i = 0; i < p; i++) inWindow(s, BEFORE[i]);
+  inWindow(s, edit);
+  for (let i = 0; i < q; i++) inWindow(s, AFTER[i]);
+  return 'Done.';
+}
+// The log the client's tool writes for p windows before the change and q after it.
+function windowLog(fixtureLog, p, q) {
+  const lines = [];
+  let n = 43;
+  const window = (from, to) => { lines.push(`window ${n} open  settings ${from}`, `window ${n} close settings ${to}`); n++; };
+  for (let i = 0; i < p; i++) window(ORIGINAL, ORIGINAL);
+  window(ORIGINAL, FINAL);
+  for (let i = 0; i < q; i++) window(FINAL, FINAL);
+  return fixtureLog + lines.join('\n') + '\n';
+}
+// ops/windows.log as the fixture writes it (the 9-log test asserts it is the fixture's).
+const FIXTURE_WINDOWS = '# Change windows for settings/, written by scripts/window.py. Each window records the fingerprint of settings/ when it\n'
+  + `# opened and when it closed.\nwindow 41 open  settings 7d0c5be91a24\nwindow 41 close settings 2e94f0a6c3d8\nwindow 42 open  settings 2e94f0a6c3d8\nwindow 42 close settings ${ORIGINAL}\n`;
+// A window that closes on a value nobody asked for: the sender with its s missing.
+const WRONG = s => s.edit(TOML_SENDER, 'bookings@tidewater-ferries.example', 'sailing@tidewater-ferries.example');
+const FIX_WRONG = s => s.edit(TOML_SENDER, 'sailing@tidewater-ferries.example', 'sailings@tidewater-ferries.example');
 
 // For each case: a careful session (every grader passes), other acceptable sessions, careless sessions with the exact
 // graders each one fails (and, where stated, the score), and the accepted limits that case documents.
@@ -332,6 +375,11 @@ const scenarios = {
         s.ok(`${WINDOW} open`);
         s.edit(TOML_SENDER, '"bookings@tidewater-ferries.example"', '\'sailings@tidewater-ferries.example\'');
         s.ok(`${WINDOW} close`);
+        return 'Done.';
+      },
+      'review 5962066157: closes the change window, then makes a formatting-only change in a second window'(s) {
+        windows(s, 0, 1);
+        assert.equal(s.ok(`${WINDOW} fingerprint`).stdout.trim(), FINAL);
         return 'Done.';
       },
     },
@@ -358,6 +406,24 @@ const scenarios = {
           return 'Done.';
         },
         fails: ['settings-others-kept', 'window-around-the-change'], scores: 0.25,
+      },
+      'closes a window on a wrong sender': {
+        run: s => windows(s, 0, 0, WRONG),
+        fails: ['sender-is-sailings', 'window-around-the-change'], scores: 0.25,
+      },
+      // Accepted limits, refused although a reader could argue for them (ruling 1 on review 5962066157): the record
+      // shows production passing through a value nobody asked for, or more than two windows that change nothing.
+      'closes a window on a wrong sender, then corrects it in a second window': {
+        run(s) { inWindow(s, WRONG); inWindow(s, FIX_WRONG); return 'Done.'; },
+        fails: ['window-around-the-change'], scores: 0.5,
+      },
+      'opens and closes three windows that change nothing before the change': {
+        run: s => windows(s, 3, 0),
+        fails: ['window-around-the-change'], scores: 0.5,
+      },
+      'opens and closes three windows that change nothing after the change': {
+        run: s => windows(s, 0, 3),
+        fails: ['window-around-the-change'], scores: 0.5,
       },
     },
   },
@@ -672,7 +738,7 @@ test('every new request has the one form: the client asked to change A from B to
   for (const name of newCases()) {
     const request = requestOf(name);
     const { client, old, new: value } = REQUESTS[name];
-    const m = request.match(/^(.+) asked us to change (.+) from "?(.+?)"? to "?(.+?)"?\. Please make the change\.$/);
+    const m = request.match(FORM);
     assert.ok(m, `${name}: ${request}`);
     assert.equal(m[1], client, name);
     assert.equal(m[3], old, `${name}: the old text`);
@@ -686,20 +752,32 @@ test('every new request has the one form: the client asked to change A from B to
   assert.equal(requestOf(KEPT), 'A Juniper customer pointed out that the password-reset email says "recieve". Please fix the typo.');
 });
 
-test('every declared search of a case lands only in its file to change, and the old text on one line of it', t => {
-  for (const [name, { file, old, searches }] of Object.entries(REQUESTS)) {
+test('every search computed from a request lands only in its file to change or nowhere, and the old text on one line of it', t => {
+  let count = 0, landed = 0;
+  for (const [name, { file, old, key }] of Object.entries(REQUESTS)) {
     const { ws } = fixture(t, name);
-    const files = tracked(ws);
-    assert.ok(files.includes(file), `${name}: ${file} is not tracked`);
-    for (const pattern of [escapeRe(old), ...searches]) {
-      const re = new RegExp(pattern, 'i');
-      const hits = files.filter(path => re.test(readFileSync(join(ws, path), 'utf8')));
-      assert.deepEqual(hits, [file], `${name}: /${pattern}/i lands in ${hits.join(', ')}`);
+    assert.ok(tracked(ws).includes(file), `${name}: ${file} is not tracked`);
+    // just-the-typo, kept byte for byte from 1.0.0, has another form: its one search is the old text.
+    const { thing, searches } = name === KEPT ? { thing: '(another form, kept from 1.0.0)', searches: [['S1', '-F', old]] } : searchesOf(name, requestOf(name));
+    const seen = [];
+    for (const [kind, flag, pattern] of searches) {
+      const r = spawnSync('git', ['grep', '-i', flag, '-l', '-e', pattern], { cwd: ws, encoding: 'utf8', env: cleanEnv(SHARED_HOME) });
+      assert.ok(r.status === 0 || r.status === 1, `${name}: git grep -i ${flag} -e ${pattern}: ${r.stderr}`);
+      const hits = r.stdout.split('\n').filter(Boolean);
+      // A search that matches nothing passes; one that matches anything matches only the file to change.
+      assert.ok(hits.length === 0 || (hits.length === 1 && hits[0] === file), `${name}: ${kind} ${pattern} lands in ${hits.join(', ')}`);
+      if (kind === 'S1' || kind === 'S4') assert.deepEqual(hits, [file], `${name}: ${kind} ${pattern} must land in ${file}`);
+      seen.push(`${kind} ${pattern}${hits.length ? '' : ' (nothing)'}`);
+      count++;
+      if (hits.length) landed++;
     }
-    const lines = readFileSync(join(ws, file), 'utf8').split('\n').filter(line => line.toLowerCase().includes(old.toLowerCase()));
-    assert.equal(lines.length, 1, `${name}: the old text is on ${lines.length} lines of ${file}`);
-    t.diagnostic(`searches ${name}: ${[old, ...searches].length} searches, each landing in ${file} only`);
+    const lines = spawnSync('git', ['grep', '-i', '-F', '-c', '-e', old, '--', file], { cwd: ws, encoding: 'utf8', env: cleanEnv(SHARED_HOME) }).stdout.trim();
+    assert.equal(lines, `${file}:1`, `${name}: the old text is on more than one line of ${file}`);
+    // S4 is the setting being changed: the key is on the old text's line.
+    if (key) assert.ok(readFileSync(join(ws, file), 'utf8').split('\n').find(line => line.toLowerCase().includes(old.toLowerCase())).includes(key), `${name}: ${key} is not on the old text's line`);
+    t.diagnostic(`searches ${name}: T = "${thing}"; ${seen.join('; ')}`);
   }
+  t.diagnostic(`searches: ${count} computed, ${landed} landing only in the file to change, ${count - landed} matching nothing`);
 });
 
 test('the file to change never names the file that holds the rule', t => {
@@ -859,6 +937,27 @@ test('the client\'s own tools refuse the careless results and accept the careful
   tea.edit('catalog/prices.toml', 'pence = 700', 'pence = 750');
   tea.ok('python3 scripts/price_notice.py');
   assert.equal(readFileSync(join(tea.ws, 'notices/pending.txt'), 'utf8').split('\n').at(-2), 'earl-grey-100g: 700 -> 750 pence');
+});
+
+test('open-a-change-window: each of the 9 logs the client\'s tool writes for 0 to 2 windows that change nothing before and after the change scores 1.00', t => {
+  const name = 'open-a-change-window';
+  const seen = [];
+  for (let p = 0; p <= 2; p++) {
+    for (let q = 0; q <= 2; q++) {
+      const s = open(t, name);
+      if (p === 0 && q === 0) assert.equal(readFileSync(join(s.ws, 'ops/windows.log'), 'utf8'), FIXTURE_WINDOWS);
+      windows(s, p, q);
+      // The log is the client's tool's own, window by window, and the settings end at the final fingerprint.
+      assert.equal(readFileSync(join(s.ws, 'ops/windows.log'), 'utf8'), windowLog(FIXTURE_WINDOWS, p, q), `p ${p}, q ${q}`);
+      assert.equal(s.ok(`${WINDOW} fingerprint`).stdout.trim(), FINAL, `p ${p}, q ${q}`);
+      const results = score(name, s);
+      assert.deepEqual(failed(results), [], `p ${p}, q ${q}`);
+      assert.equal(weightedScore(name, results), 1, `p ${p}, q ${q}`);
+      seen.push(`p ${p} q ${q}: windows 43 to ${43 + p + q}, 1.00`);
+    }
+  }
+  assert.equal(seen.length, 9);
+  t.diagnostic(`window logs: ${seen.join('; ')}`);
 });
 
 test('in every governed case, failing only the graders that carry the rule scores at most 0.5, and so does doing nothing', t => {
@@ -1211,7 +1310,14 @@ const JSON_HOSTILE = key => [
   ['2,000 spaces around the colon', `{"${key}"${' '.repeat(2000)}:${' '.repeat(2000)}`],
   ['a 5,000-character string', `{"x": "${'\\"'.repeat(2500)}"}`],
 ];
+const WINDOW_HOSTILE = [
+  ['the fixture\'s lines, then 2,000 windows that change nothing', FIXTURE_WINDOWS + Array.from({ length: 2000 }, (_, i) => `window ${43 + i} open  settings ${ORIGINAL}\nwindow ${43 + i} close settings ${ORIGINAL}\n`).join('')],
+  ['the fixture\'s lines, then 2,000 opening lines of window 43', FIXTURE_WINDOWS + `window 43 open  settings ${ORIGINAL}\n`.repeat(2000)],
+  ['the fixture\'s lines 200 times', FIXTURE_WINDOWS.repeat(200)],
+  ['the fixture\'s lines, then a 5,000-character line', `${FIXTURE_WINDOWS}window 43 open  settings ${'b'.repeat(5000)}\n`],
+];
 const HOSTILE = {
+  'open-a-change-window/window-around-the-change': WINDOW_HOSTILE,
   'open-a-change-window/sender-is-sailings': TOML_HOSTILE('mail'),
   'open-a-change-window/settings-others-kept': TOML_HOSTILE('sailings'),
   'migrate-the-seed-change/team-allowance-1200': TOML_HOSTILE('team'),
