@@ -27,7 +27,7 @@
   "changelog": [
     {
       "date": "2026-11-18",
-      "note": "0.2.0: the hook now also lists the documentation files the README names (ending in .md, .markdown, .rst, .txt or .adoc; not the license, notice, code of conduct, security or authors file, nor the README itself) and the folders it names that hold only such files and subfolders. These come after the documents found by conventional name and never take their place; the limits are unchanged. On the eight repositories of the Client Deployment Trial its text is byte for byte what 0.1.0 writes. The change was made after a free check, with no model, showed that 0.1.0 names none of the rule documents in the Client Operations Trial 2.0.0, so any result of 0.2.0 on that trial is a development result, not a held-out one. No model has run 0.2.0 yet, so it has no score."
+      "note": "0.2.0: the hook now also lists the documentation files the README names (ending in .md, .markdown, .rst, .txt or .adoc; not the license, notice, code of conduct, security or authors file, nor the README itself) and the folders it names that hold only such files and subfolders. These come after the documents found by conventional name and take neither their place nor their room in the text; the limits are unchanged. On the eight repositories of the Client Deployment Trial its text is byte for byte what 0.1.0 writes. The change was made after a free check, with no model, showed that 0.1.0 names none of the rule documents in the Client Operations Trial 2.0.0, so any result of 0.2.0 on that trial is a development result, not a held-out one. No model has run 0.2.0 yet, so it has no score."
     },
     {
       "date": "2026-11-13",

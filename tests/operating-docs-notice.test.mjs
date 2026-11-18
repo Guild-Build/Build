@@ -3,6 +3,7 @@
 // CLAUDE_PROJECT_DIR set to it and the hook input on standard input. No model, network or paid service is used.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync,
   truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,6 +15,9 @@ import { cleanGitEnv } from './git-env.mjs';
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const BUNDLE = join(repo, 'bundles/runbook-first');
 const HOOK = join(BUNDLE, 'scripts/operating-docs-notice.sh');
+// The 0.1.0 script, a byte copy of Build 0c02fe5's, and the eight outputs saved from it before 0.2.0 changed the script.
+const SAVED = join(repo, 'tests/fixtures/operating-docs-notice-0.1.0');
+const OLD_HOOK = join(SAVED, 'operating-docs-notice.sh');
 const INPUT = JSON.stringify({ session_id: 'test', cwd: '', hook_event_name: 'SessionStart', source: 'startup' });
 const READ = 'Before you change anything, read the ones that govern the requested change.';
 const REPLY = 'Run the checks they name, and say in your reply which of these documents you read.';
@@ -89,14 +93,16 @@ function recorder() {
   }
   return recordingPath;
 }
-// Runs the hook as Claude Code does. Returns its exit status and signal, its context text (null when it printed
-// nothing), its standard error, how long it took, and, with record, every command it ran as [name, ...arguments].
-function run(dir, { cwd = dir, projectDir = dir, record = false, timeout = 10_000 } = {}) {
-  const extra = projectDir === null ? {} : { CLAUDE_PROJECT_DIR: projectDir };
+// Runs the hook as Claude Code does (or, with hook, another script such as the saved 0.1.0 one, and with vars, more
+// environment variables). Returns its exit status
+// and signal, its standard output and context text (null when it printed nothing), its standard error, how long it
+// took, and, with record, every command it ran as [name, ...arguments].
+function run(dir, { cwd = dir, projectDir = dir, record = false, timeout = 10_000, hook = HOOK, vars = {} } = {}) {
+  const extra = projectDir === null ? { ...vars } : { ...vars, CLAUDE_PROJECT_DIR: projectDir };
   const calls = record ? join(mkdtempSync(join(tmpdir(), 'docs-notice-calls-')), 'calls') : null;
   if (record) Object.assign(extra, { PATH: `${recorder()}:${process.env.PATH}`, DOCS_NOTICE_CALLS: calls });
   const started = Date.now();
-  const r = spawnSync(BASH, [HOOK], { cwd, encoding: 'utf8', input: INPUT, timeout, env: env(dir, extra) });
+  const r = spawnSync(BASH, [hook], { cwd, encoding: 'utf8', input: INPUT, timeout, env: env(dir, extra) });
   const ms = Date.now() - started;
   const ran = record && existsSync(calls) ? readFileSync(calls, 'utf8').split('\n').filter(Boolean).map(line => line.split('\x1f')) : [];
   const base = { status: r.status, signal: r.signal, ms, stderr: r.stderr, stdout: r.stdout, calls: ran };
@@ -108,18 +114,29 @@ function run(dir, { cwd = dir, projectDir = dir, record = false, timeout = 10_00
   return { ...base, text: out.hookSpecificOutput.additionalContext };
 }
 // The commands the hook may run, with the only arguments it may give them: git to find the top folder, head for the
-// README's first 64 KB, and grep, head -n 20 and tr on standard input. Returns how many times the README was read: twice
-// when there is one, once for the pointers to conventional documents and once for the other names it holds.
+// README's first 64 KB, ls for the entries of a folder in the repository, and grep, head -n 20, head -n 203 (one for
+// each ls) and tr on standard input. Returns how many times the README was read: twice when there is one, once for the
+// pointers to conventional documents and once for the other names it holds.
 function onlyReadsReadme(calls, readme) {
   let heads = 0;
+  let lists = 0;
+  let cuts = 0;
   for (const [name, ...args] of calls) {
-    if (name === 'head' && args[0] === '-n') assert.deepEqual(args, ['-n', '20']);
+    if (name === 'head' && args[0] === '-n' && args[1] === '203') { assert.equal(args.length, 2); cuts++; }
+    else if (name === 'head' && args[0] === '-n') assert.deepEqual(args, ['-n', '20']);
     else if (name === 'head') { assert.deepEqual(args, ['-c', '65536', readme]); heads++; }
+    else if (name === 'ls') {
+      assert.deepEqual(args.slice(0, 3), ['-1', '-f', '-q']);
+      assert.equal(args.length, 4);
+      assert.ok(readme && realpathSync(args[3]).startsWith(`${dirname(readme)}/`), `ls ${args.join(' ')}`);
+      lists++;
+    }
     else if (name === 'grep') assert.deepEqual(args.slice(0, 4), ['-a', '-o', '-i', '-E']), assert.equal(args.length, 5);
     else if (name === 'tr') assert.deepEqual(args, ['A-Z', 'a-z']);
     else if (name === 'git') assert.deepEqual(args, ['rev-parse', '--show-toplevel']);
     else assert.fail(`the hook ran ${[name, ...args].join(' ')}`);
   }
+  assert.equal(cuts, lists, 'every ls is cut off by head -n 203');
   return heads;
 }
 // The CPU time, in seconds, that one run of the hook uses together with the commands it starts: the second line bash's
@@ -416,9 +433,9 @@ test('in each of the Client Deployment Trial\'s eight repositories the hook name
 // clean git environment, before the script was changed.
 test('on each of the Client Deployment Trial\'s eight repositories the whole output is byte for byte what 0.1.0 wrote', t => {
   const cases = join(repo, 'content/trials/client-deployment-v1/cases');
-  const saved = join(repo, 'tests/fixtures/operating-docs-notice-0.1.0');
+  const saved = SAVED;
   const names = readdirSync(cases).sort();
-  assert.deepEqual(readdirSync(saved).sort(), names.map(name => `${name}.json`));
+  assert.deepEqual(readdirSync(saved).filter(name => name.endsWith('.json')).sort(), names.map(name => `${name}.json`));
   for (const name of names) {
     const dir = folder(t);
     const fx = spawnSync('bash', ['-e', join(cases, name, 'fixture.sh')], { cwd: dir, encoding: 'utf8', env: env(dir) });
@@ -438,6 +455,10 @@ test('a file the README names is listed when it exists, under each of the five e
   files['README.md'] = 'MAINTAINING.md, guide/Setup.markdown, docs/api.rst, notes/changes.txt and docs/ops.adoc. Also UPPER.MD; see ops/handover.md.\n'
     + 'Then ./local.md, missing.md, kept.md.bak, _kept.md_, /abs.md, docs/../up.md and https://example.com/url.md.\n';
   assert.equal(run(gitRepo(folder(t, files))).text, context(docs.map(named).join(', ')));
+  // Each of the five endings in mixed case.
+  const mixed = ['one.Md', 'two.MaRkDoWn', 'three.RsT', 'four.TxT', 'five.AdOc'];
+  const dir = gitRepo(folder(t, { ...Object.fromEntries(mixed.map(name => [name, 'x\n'])), 'README.md': `${mixed.join(' ')}\n` }));
+  assert.equal(run(dir).text, context(mixed.map(named).join(', ')));
 });
 
 // The first 20 distinct file names count, in order of first appearance, whether or not they are then listed: missing,
@@ -496,11 +517,14 @@ test('a folder the README names is listed as one entry when it is a folder of do
   assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 2);
 });
 
+// The first 20 distinct folder names count, in order of first appearance. A repeat, with or without ./, is not a new
+// name; ./ alone and an absolute name count though neither is listed. The 20th distinct name, after the repeats, is a
+// folder of documents and is listed; the 21st is one too and is not. File names are counted apart.
 test('only the first 20 distinct folder names the README holds count', t => {
-  const missing = Array.from({ length: 17 }, (_, i) => `f${String(i + 2).padStart(2, '0')}/`);
-  const dir = gitRepo(folder(t, { 'f01/a.md': 'x', 'g/a.md': 'x', 'late.md': 'x',
-    'README.md': `f01/ ./f01/ ${missing.join(' ')} ./ /abs/ f01/ g/ late.md\n` }));
-  assert.equal(run(dir).text, context([docFolder('f01/'), named('late.md')].join(', ')));
+  const missing = Array.from({ length: 16 }, (_, i) => `f${String(i + 2).padStart(2, '0')}/`);
+  const dir = gitRepo(folder(t, { 'f01/a.md': 'x', 'k20/a.md': 'x', 'g21/a.md': 'x', 'late.md': 'x',
+    'README.md': `f01/ f01/ ./f01/ ./ /abs/ ${missing.join(' ')} f01/ k20/ g21/ late.md\n` }));
+  assert.equal(run(dir).text, context([docFolder('f01/'), docFolder('k20/'), named('late.md')].join(', ')));
 });
 
 // The fixed order: the documents 0.1.0 lists, as 0.1.0 orders them; then the new entries, files and folders together,
@@ -557,6 +581,216 @@ test('with long names the README holds, the text stays within 1,200 characters a
     }
   }
   assert.deepEqual(last, { 'file, 0': 978, 'file, 1': 946, 'folder, 0': 956, 'folder, 1': 924 });
+});
+
+// The saved 0.1.0 script is a byte copy of the one at Build 0c02fe5 (git show 0c02fe5:bundles/runbook-first/scripts/
+// operating-docs-notice.sh), which the tests below compare 0.2.0 against.
+test('the saved 0.1.0 script is the one at Build 0c02fe5', () => {
+  const digest = createHash('sha256').update(readFileSync(OLD_HOOK)).digest('hex');
+  assert.ok(digest.startsWith('275248f57ead3180'), digest);
+});
+
+// The list 0.1.0 writes, read back from a context text: its entries in order and its count (0 without one).
+const ENTRY = /\S+ \((?:agent instructions|runbook|contributing guide|named in the README|folder of documents, named in the README|points to [^()]*)\)/g;
+function parseList(text) {
+  if (text === null) return { entries: [], count: 0 };
+  const list = text.split('\n')[0].replace(/^Operating documents in this repository: /, '').replace(/\.$/, '');
+  const tooLong = /^(\d+), with names too long to list$/.exec(list);
+  if (tooLong) return { entries: [], count: Number(tooLong[1]) };
+  const ending = /^(.*), and (\d+) more$/.exec(list);
+  const body = ending ? ending[1] : list;
+  const entries = body.match(ENTRY) || [];
+  assert.equal(entries.join(', '), body, 'every character of the list is in an entry');
+  return { entries, count: ending ? Number(ending[2]) : 0 };
+}
+// The rule for the entries 0.2.0 adds (the ruling on finding 1 of the review), from the list 0.1.0 writes (t1), the
+// added entries that are within the eight documents listed (shown in the order the README names them) and how many
+// more were added beyond the eight: the entries t1 shows stay, the added ones go between its documents and the README's
+// own entry, each one that fits after the ones kept before it together with the ending, and the ending counts every
+// document and entry left out. Returns the list, or null when even that count does not fit beside what t1 shows and
+// the text stays 0.1.0's.
+function withAdded(t1, added, addedExtra) {
+  const own = t1.entries.find(entry => entry.includes(' (points to '));
+  const docs = t1.entries.filter(entry => entry !== own);
+  const compose = (picked, n) => {
+    const list = [...docs, ...picked, ...(own ? [own] : [])].join(', ');
+    return n > 0 ? (list ? `${list}, and ${n} more` : `${n}, with names too long to list`) : list;
+  };
+  let out = compose(added, t1.count + addedExtra);
+  if (FIXED + out.length > LIMIT) {
+    let picked = [];
+    let left = 0;
+    for (const digits of [1, 2]) {
+      picked = [];
+      left = t1.count + addedExtra;
+      for (const entry of added) if (FIXED + compose([...picked, entry], 0).length + 11 + digits <= LIMIT) picked.push(entry); else left++;
+      if (String(left).length <= digits) break;
+    }
+    out = compose(picked, left);
+  }
+  return FIXED + out.length <= LIMIT ? out : null;
+}
+
+// The review's two reproductions. In the first, 0.1.0 shows AGENTS.md and the README's own entry; 0.2.0 keeps both, the
+// README's entry last, and fits four of the five long names the README holds, counting the fifth. In the second, 0.1.0
+// shows eight runbooks and "and 1 more" in exactly 1,200 characters; twelve more names would make the count two digits,
+// which does not fit beside the eight, so the text is 0.1.0's, byte for byte.
+test('the entries 0.2.0 adds take only the room the 0.1.0 text leaves: the review\'s two reproductions', t => {
+  const long = Array.from({ length: 5 }, (_, i) => `${i}${'a'.repeat(162)}.md`);
+  let dir = folder(t, Object.fromEntries(['AGENTS.md', ...long].map(name => [name, 'x'])));
+  writeFileSync(join(dir, 'README.md'), ['AGENTS.md', ...long].join(' '));
+  const old = run(dir, { hook: OLD_HOOK });
+  assert.equal(old.text, context('AGENTS.md (agent instructions), README.md (points to AGENTS.md)'));
+  assert.equal(old.text.length, 263);
+  const r = run(dir);
+  assert.equal(r.text, context(['AGENTS.md (agent instructions)', ...long.slice(0, 4).map(named), 'README.md (points to AGENTS.md), and 1 more'].join(', ')));
+  assert.equal(r.text.length, 1035);
+  const runbooks = [110, 110, 110, 110, 110, 110, 110, 124].map((n, i) => `runbook-${i}${'a'.repeat(n - 12)}.md`);
+  const others = Array.from({ length: 12 }, (_, i) => `other${i}.md`);
+  dir = folder(t, Object.fromEntries([...runbooks, ...others].map(name => [name, 'x'])));
+  writeFileSync(join(dir, 'README.md'), [...runbooks, ...others].join(' '));
+  const before = run(dir, { hook: OLD_HOOK });
+  assert.equal(before.text, context(`${runbooks.map(name => `${name} (runbook)`).join(', ')}, and 1 more`));
+  assert.equal(before.text.length, LIMIT);
+  assert.equal(run(dir).stdout, before.stdout);
+});
+
+// The room, to the character. AGENTS.md and the README's own entry take 63 characters of the 1,000 with their
+// separators, and each added file of length L takes L + 24. (a) Four files that bring the list to exactly 1,000, with
+// nothing left out, are all shown, with no ending. (b) One character more, and the fourth is counted instead: "and 1
+// more". (c) A fourth file that would bring the list to 989 leaves 11 characters, one short of the ending ", and 1
+// more", so it is counted, while a shorter fifth after it still fits.
+test('the entries 0.2.0 adds use the room 0.1.0 leaves to the character', t => {
+  const note = (i, length) => `notes/${i}${'q'.repeat(length - 10)}.md`;
+  const check = (lengths, shown, label) => {
+    const names = lengths.map((length, i) => note(i, length));
+    const dir = folder(t, Object.fromEntries(['AGENTS.md', ...names].map(name => [name, 'x'])));
+    writeFileSync(join(dir, 'README.md'), ['AGENTS.md', ...names].join(' '));
+    const left = names.length - shown.length;
+    const list = ['AGENTS.md (agent instructions)', ...shown.map(i => named(names[i])), 'README.md (points to AGENTS.md)'].join(', ') + (left ? `, and ${left} more` : '');
+    assert.equal(run(dir).text, context(list), label);
+    return list.length;
+  };
+  assert.equal(check([210, 210, 210, 211], [0, 1, 2, 3], '(a)'), 1000);
+  assert.equal(check([210, 210, 210, 212], [0, 1, 2], '(b)'), 777);
+  assert.equal(check([207, 207, 208, 208, 200], [0, 1, 2, 4], '(c)'), 993);
+});
+
+// The ruling on finding 1, held against the saved 0.1.0 script over generated repositories, from a fixed seed. Each
+// has some of the conventional documents (one spelling of each), runbooks the README points to by path, file names of
+// conventional documents it points to, and new files and folders of documents it names, in a shuffled order and with
+// names long enough to reach the 1,200 characters; a fifth are tight: eight runbooks that fill 0.1.0's list to within
+// 12 characters of its 1,000 (half of them to exactly 1,000), and 4 to 13 new names beyond them. For each: (i) every entry 0.1.0 shows is shown,
+// whole and in order, with the README's entry last; (ii) the other entries are the new ones, in the order the README
+// names them, between the documents and the README's entry; (iii) unless the text is 0.1.0's, the count is 0.1.0's
+// plus the new entries not shown; (iv) the text is 0.1.0's, with new entries, only when that count does not fit beside
+// what 0.1.0 shows; (v) with no new entry, the output is 0.1.0's byte for byte. And the text is what the rule gives.
+test('the entries 0.2.0 adds never displace what 0.1.0 shows: a seeded comparison with the 0.1.0 script', t => {
+  let seed = 20261118;
+  const rand = () => { seed = (seed + 0x6d2b79f5) | 0; let x = Math.imul(seed ^ (seed >>> 15), 1 | seed); x ^= x + Math.imul(x ^ (x >>> 7), 61 | x); return ((x ^ (x >>> 14)) >>> 0) / 4294967296; };
+  const pick = n => Math.floor(rand() * n);
+  const endings = ['.md', '.markdown', '.rst', '.txt', '.adoc'];
+  const places = [['AGENTS.md'], ['CLAUDE.md'], ['.github/copilot-instructions.md'], ['RUNBOOK.md', 'runbook.md'], ['docs/RUNBOOK.md', 'docs/runbook.md'],
+    ['CONTRIBUTING.md'], ['docs/CONTRIBUTING.md'], ['.github/CONTRIBUTING.md']];
+  const seen = { v: 0, all: 0, some: 0, counted: 0, iv: 0, twoDigits: 0, beyondEight: 0, ownWithAdded: 0 };
+  for (let n = 0; n < 200; n++) {
+    const tight = n % 5 === 4;
+    const files = {};
+    const tokens = []; // [name as the README writes it, entry 0.2.0 adds or null]
+    let conventional = 0;
+    if (!tight) {
+      const named = [];
+      for (const place of places) if (rand() < 0.35) { const name = place[pick(place.length)]; files[name] = 'x'; named.push(name); conventional++; }
+      for (const name of named.slice(0, 3)) if (rand() < 0.5) tokens.push([name.split('/').pop(), null]);
+    }
+    // Runbooks the README points to by path, of the given lengths (16 at least); in a tight repository, eight that fill
+    // 0.1.0's list, with its ending ", and 1 more" for the README's own entry, to 988 to 1,000 characters.
+    const lengths = tight ? [110, 110, 110, 110, 110, 110, 110, 124 - (rand() < 0.5 ? 0 : pick(13))]
+      : Array.from({ length: pick(9) }, () => 16 + pick(pick(3) ? 40 : 200));
+    const runbooks = lengths.map((length, i) => `ops/runbook-${i}${'x'.repeat(length - 16)}.md`);
+    for (const name of runbooks) { files[name] = 'x'; tokens.push([name, null]); }
+    const found = conventional + runbooks.length;
+    // New files and folders of documents.
+    const none = n % 8 === 1; // one in eight names nothing new
+    const nFiles = none ? 0 : tight ? 4 + pick(5) : pick(9);
+    const nFolders = none ? 0 : pick(6);
+    for (let i = 0; i < nFiles; i++) {
+      const name = `notes/n${i}-${'y'.repeat(pick(pick(3) ? 30 : 240))}${endings[pick(5)]}`;
+      files[name] = 'x';
+      tokens.push([name, `${name} (named in the README)`]);
+    }
+    for (let i = 0; i < nFolders; i++) {
+      const name = `manual${i}${'z'.repeat(pick(pick(3) ? 20 : 200))}`;
+      files[`${name}/a.md`] = 'x';
+      if (rand() < 0.5) files[`${name}/b.txt`] = 'x';
+      tokens.push([`${name}/`, `${name}/ (folder of documents, named in the README)`]);
+    }
+    for (let i = tokens.length - 1; i > 0; i--) { const j = pick(i + 1); [tokens[i], tokens[j]] = [tokens[j], tokens[i]]; }
+    files['README.md'] = tokens.map(([name]) => name).join(['\n', ' ', ', '][pick(3)]) + '\n';
+    const dir = folder(t, files);
+    const old = run(dir, { hook: OLD_HOOK });
+    const r = run(dir);
+    const where = `repository ${n}`;
+    assert.deepEqual([old.status, r.status, old.stderr, r.stderr], [0, 0, '', ''], where);
+    const added = tokens.map(([, entry]) => entry).filter(Boolean);
+    const slots = Math.max(0, 8 - found);
+    const t1 = parseList(old.text);
+    const t2 = parseList(r.text);
+    // (v)
+    if (!added.length) { assert.equal(r.stdout, old.stdout, `${where}: (v)`); seen.v++; continue; }
+    // The rule, exactly.
+    const expected = withAdded(t1, added.slice(0, slots), added.length - Math.min(slots, added.length));
+    assert.equal(r.text, expected === null ? old.text : context(expected), where);
+    // (i): 0.1.0's entries, whole and in order, the README's entry last.
+    const own = t1.entries.find(entry => entry.includes(' (points to '));
+    const kept = t2.entries.filter(entry => t1.entries.includes(entry));
+    assert.deepEqual(kept, t1.entries, `${where}: (i)`);
+    if (own) assert.equal(t2.entries.at(-1), own, `${where}: (i) the README's entry last`);
+    // (ii): the other entries are new ones, in the README's order, between the documents and the README's entry.
+    const shown = t2.entries.filter(entry => !t1.entries.includes(entry));
+    assert.deepEqual(shown, added.filter(entry => shown.includes(entry)), `${where}: (ii) in the README's order`);
+    const docsEnd = t2.entries.findIndex(entry => shown.includes(entry));
+    if (shown.length) assert.deepEqual(t2.entries.slice(docsEnd, docsEnd + shown.length), shown, `${where}: (ii) together, after the documents`);
+    const honest = (() => { const docs = t1.entries.filter(entry => entry !== own); const list = [...docs, ...(own ? [own] : [])].join(', ');
+      const count = t1.count + added.length; return list ? `${list}, and ${count} more` : `${count}, with names too long to list`; })();
+    if (r.stdout === old.stdout) {
+      // (iv): 0.1.0's text, with new entries, only when the honest count does not fit.
+      assert.ok(FIXED + honest.length > LIMIT, `${where}: (iv)`);
+      seen.iv++;
+    } else {
+      // (iii)
+      assert.equal(t2.count, t1.count + added.length - shown.length, `${where}: (iii)`);
+      if (shown.length === added.length) seen.all++; else if (shown.length) seen.some++; else seen.counted++;
+      if (t1.count < 10 && t2.count >= 10) seen.twoDigits++;
+      if (own && shown.length) seen.ownWithAdded++;
+    }
+    if (found > 8) seen.beyondEight++;
+  }
+  t.diagnostic(JSON.stringify(seen));
+  // Each kind of case is met at least three times.
+  for (const [kind, count] of Object.entries(seen)) assert.ok(count >= 3, `${kind}: ${count} repositories`);
+});
+
+// The ruling on finding 2 of the review: a glob reads a whole folder before the 200-entry limit can stop it, and Bash 5
+// takes tens of microseconds per entry to do so (20 folders of 10,000 entries took 7.6 seconds). So the hook reads a
+// named folder's entries through ls, unsorted, cut off by head after 203 lines, for every folder it looks into: a
+// folder holding 250 entries costs no more than one holding 201. A name that ls cannot print (here, one with a line
+// break) names no entry and leaves its folder out.
+test('a named folder\'s entries are read through ls cut off by head, never all of them', t => {
+  const files = { 'handbook/a.md': 'x', 'handbook/b.rst': 'x', 'odd/good.md': 'x', 'odd/bad\nname.md': 'x' };
+  for (let i = 0; i < 250; i++) files[`big/${String(i).padStart(3, '0')}.md`] = 'x';
+  files['README.md'] = 'See handbook/, big/ and odd/ first.\n';
+  const dir = gitRepo(folder(t, files));
+  const r = run(dir, { record: true });
+  assert.deepEqual([r.status, r.stderr, r.text], [0, '', context(docFolder('handbook/'))]);
+  assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 2);
+  const root = realpathSync(dir);
+  assert.deepEqual(r.calls.filter(([name]) => name === 'ls').map(([, ...args]) => args),
+    ['handbook', 'big', 'odd'].map(name => ['-1', '-f', '-q', `${root}/${name}`]));
+  assert.equal(r.calls.filter(([name, ...args]) => name === 'head' && args.join(' ') === '-n 203').length, 3);
+  // Colour forced on (macOS ls) or a quoting style (GNU ls) in the environment do not change the names ls prints.
+  const forced = run(dir, { vars: { CLICOLOR: '1', CLICOLOR_FORCE: '1', TERM: 'xterm-256color', QUOTING_STYLE: 'shell-always' } });
+  assert.deepEqual([forced.status, forced.stderr, forced.text], [0, '', context(docFolder('handbook/'))]);
 });
 
 // The Client Operations Trial 2.0.0 is not a held-out test for 0.2.0: 0.2.0 was written after a check showed 0.1.0
