@@ -1,4 +1,0 @@
-schema_version: "1.1"
-name: leave-a-news-fragment
-context:
-  scaffold_script: fixture.sh
