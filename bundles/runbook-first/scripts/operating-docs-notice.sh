@@ -2,11 +2,16 @@
 # SessionStart hook. When a session starts in a repository, it looks for the repository's own operating documents by
 # conventional names (agent instructions, a runbook, a contributing guide, and any of these a README points to) and
 # adds a few lines to the agent's context: which documents it found, to read the ones that govern the requested change
-# before changing anything, to run the checks they name, and to say in its reply which it read. It adds nothing when it
-# finds none. A document or the README counts only when it is a regular file that is not a symbolic link and no folder
-# on its path below the top folder is one. It lists at most eight documents and counts any more. The text never exceeds
-# 1,200 characters. It reads file names and the first 64 KB of the README only, writes nothing, makes no network or
-# model call, and exits 0 whatever happens, so it never fails a session. Bash 3.2 or later, with head, grep and tr; git is used when present to find the top folder.
+# before changing anything, to run the checks they name, and to say in its reply which it read. It also lists the other
+# documentation files the README names (ending in .md, .markdown, .rst, .txt or .adoc, but not the license, notice,
+# code of conduct, security or authors file, nor the README itself) and the folders it names that hold only such files
+# and subfolders; those come after the documents found by convention and never take their place. It adds nothing when
+# it finds none. A document or the README counts only when it is a regular file that is not a symbolic link and no
+# folder on its path below the top folder is one. It lists at most eight documents and counts any more. The text never
+# exceeds 1,200 characters. It reads file names and the first 64 KB of the README only (it opens no other file, and
+# looks at the entries of a named folder by name and type), writes nothing, makes no network or model call, and exits
+# 0 whatever happens, so it never fails a session. Bash 3.2 or later, with head, grep and tr; git is used when present
+# to find the top folder.
 trap 'exit 0' EXIT
 
 dir="${CLAUDE_PROJECT_DIR:-$PWD}"
@@ -88,6 +93,102 @@ if [ -n "$readme" ]; then
     case ", $pointed, " in *", $target, "*) ;; *) pointed="${pointed:+$pointed, }$target" ;; esac
   done <<EOF
 $refs
+EOF
+fi
+
+# Then what else the README names, in order of first appearance: files that end in a documentation ending, and folders
+# of such files. A name is a whole run of the characters A-Z a-z 0-9 . _ / - that holds a / or a documentation ending;
+# it is a folder name when it ends in /, and otherwise a file name when, without the periods that end it (a sentence
+# may end right after it), it ends in an ending. The first 20 distinct file names and the first 20 distinct folder
+# names count, each with a leading ./ dropped, whether or not they are then listed. An absolute name (so any name in a
+# web address, which follows a /) or one holding .. is refused. The README's own entry above is not changed by these.
+
+# True when the name ends in one of the documentation endings, case ignored.
+doc_ending() {
+  local r=1
+  shopt -s nocasematch
+  case "$1" in *.md|*.markdown|*.rst|*.txt|*.adoc) r=0 ;; esac
+  shopt -u nocasematch
+  return "$r"
+}
+# True when the file's name without its ending, case ignored, is that of a legal or community file.
+not_operating() {
+  local stem="${1##*/}" r=1
+  stem="${stem%.*}"
+  shopt -s nocasematch
+  case "$stem" in license|licence|copying|notice|code_of_conduct|code-of-conduct|security|authors) r=0 ;; esac
+  shopt -u nocasematch
+  return "$r"
+}
+# True when the path below the root names a folder that is not a symbolic link, with no symbolic link on the way to it,
+# and every entry directly in it, hidden ones included, is a folder (not entered) or a regular file with a
+# documentation ending, at least one of them such a file, and it has at most 200 entries. Entries are tested by name
+# and type only: no file in it is opened.
+doc_folder() {
+  local rest="$1" path="$root" part e n=0 docs=0 r=0
+  case "$rest" in ''|/*|*/|*//*|*..*) return 1 ;; esac
+  while :; do
+    part="${rest%%/*}"
+    path="$path/$part"
+    [ -L "$path" ] && return 1
+    [ "$part" = "$rest" ] && break
+    rest="${rest#*/}"
+  done
+  [ -d "$path" ] || return 1
+  shopt -s nullglob dotglob
+  for e in "$path"/*; do
+    case "${e##*/}" in .|..) continue ;; esac
+    n=$((n + 1))
+    if [ "$n" -gt 200 ] || [ -L "$e" ]; then r=1; break; fi
+    [ -d "$e" ] && continue
+    if [ -f "$e" ] && doc_ending "$e"; then docs=$((docs + 1)); else r=1; break; fi
+  done
+  shopt -u nullglob dotglob
+  [ "$r" -eq 0 ] && [ "$docs" -gt 0 ]
+}
+# Adds a folder once, as add_doc adds a document: after the first eight it is only counted.
+add_folder() {
+  local q
+  for q in "${paths[@]}"; do [ "$root/$q" -ef "$root/$1" ] && return 0; done
+  for q in "${extras[@]}"; do [ "$root/$q" -ef "$root/$1" ] && return 1; done
+  if [ "${#paths[@]}" -ge 8 ]; then extras+=("$1/"); return 1; fi
+  paths+=("$1/")
+  kinds+=('folder of documents, named in the README')
+}
+if [ -n "$readme" ]; then
+  names="$(head -c 65536 "$root/$readme" 2>/dev/null | grep -a -o -i -E '[A-Za-z0-9._/-]*(/|\.(md|markdown|rst|txt|adoc))[A-Za-z0-9._/-]*' 2>/dev/null)"
+  files='|'
+  folders='|'
+  nfiles=0
+  nfolders=0
+  while IFS= read -r name; do
+    [ "$nfiles" -ge 20 ] && [ "$nfolders" -ge 20 ] && break
+    ref="${name#./}"
+    case "$name" in
+      */)
+        ref="${ref%/}"
+        case "$folders" in *"|$ref|"*) continue ;; esac
+        [ "$nfolders" -lt 20 ] || continue
+        folders="$folders$ref|"
+        nfolders=$((nfolders + 1))
+        doc_folder "$ref" && add_folder "$ref"
+        ;;
+      *)
+        # A sentence may end right after a file name: the periods that end the name are not part of it.
+        while :; do case "$ref" in *.) ref="${ref%.}" ;; *) break ;; esac; done
+        doc_ending "$ref" || continue
+        case "$files" in *"|$ref|"*) continue ;; esac
+        [ "$nfiles" -lt 20 ] || continue
+        files="$files$ref|"
+        nfiles=$((nfiles + 1))
+        not_operating "$ref" && continue
+        plain_file "$ref" || continue
+        [ "$root/$ref" -ef "$root/$readme" ] && continue
+        add_doc "$ref" 'named in the README'
+        ;;
+    esac
+  done <<EOF
+$names
 EOF
 fi
 
