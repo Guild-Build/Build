@@ -452,7 +452,7 @@ test('only the first 20 distinct file names the README holds count', t => {
 
 // Rule 3: legal and community files are left out by the name without its ending, in any case; nothing else is.
 test('legal and community files and the README itself are left out, and nothing else', t => {
-  const left = ['LICENSE.md', 'Licence.txt', 'COPYING.rst', 'Notice.adoc', 'Code_Of_Conduct.md', 'CODE-OF-CONDUCT.markdown', 'docs/Security.md', 'AUTHORS.txt'];
+  const left = ['LiCeNsE.md', 'Licence.txt', 'CoPyInG.rst', 'Notice.ADOC', 'Code_Of_Conduct.md', 'CODE-of-conduct.markdown', 'docs/SecURITY.md', 'AuThOrS.txt'];
   const kept = ['license.old.md', 'docs/LICENSE-notes.md', 'docs/README.md'];
   const files = Object.fromEntries([...left, ...kept].map(name => [name, 'x\n']));
   files['README.md'] = `Read ${[...left, 'README.md', './README.md', ...kept].join(', ')}.\n`;
