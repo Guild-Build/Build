@@ -10,26 +10,34 @@ const names = entries => Array.isArray(entries) ? entries.map(entry => entry?.na
 const uniqueNames = list => list.length > 0 && list.every(name => typeof name === 'string' && name.length > 0)
   && new Set(list).size === list.length;
 
+// The state of one attempt in a runner report, for every reader of those reports (comparison runs here, runs on unpublished
+// cases in buildguild.mjs), so the two cannot drift: 'missing'; 'error' for an error or an abort, whatever its score;
+// 'ungraded' when its graders are not exactly the planned ones, one that counts was not scored, its score is not a fraction,
+// or paid graders were skipped; otherwise 'accepted' (score 1 and every grader that counts passed) or 'failed'. Under the
+// with-without ablation the runner marks some graders with-only: a plugin-fired indicator, not part of the score, reported
+// unscored. withOnlyExempt (for reports with that ablation) lets such a grader go unscored; every other grader must be scored.
+export function attemptStatus(arm, graderNames, { withOnlyExempt = false } = {}) {
+  if (arm == null) return 'missing';
+  if (arm.error || arm.aborted) return 'error';
+  const reportedNames = names(arm.graders);
+  const complete = uniqueNames(graderNames) && uniqueNames(reportedNames)
+    && reportedNames.length === graderNames.length && reportedNames.every(name => graderNames.includes(name));
+  const counts = grade => !(withOnlyExempt && grade?.withOnly === true);
+  if (!complete || !fraction(arm.score)
+    || arm.error !== null || arm.skippedPaidGraders !== false
+    || !arm.graders.every(grade => !counts(grade) || (grade.scored === true && typeof grade.passed === 'boolean'))) return 'ungraded';
+  // Do not use the runner's suite-level pass count. Full acceptance means every
+  // grader passed.
+  return arm.score === 1 && arm.graders.every(grade => !counts(grade) || grade.passed) ? 'accepted' : 'failed';
+}
+
 function summarizeAttempt(arm, number, graderNames) {
   const attempt = { number, status: 'missing', score: null, costUsd: null, durationSeconds: null };
   if (arm == null) return attempt;
   attempt.costUsd = addKnown(nonnegative(arm.costUsd), nonnegative(arm.judgeCostUsd));
   attempt.durationSeconds = nonnegative(arm.durationSeconds);
-  if (arm.error || arm.aborted) return { ...attempt, status: 'error' };
-
-  const reportedNames = names(arm.graders);
-  const complete = uniqueNames(graderNames) && uniqueNames(reportedNames)
-    && reportedNames.length === graderNames.length && reportedNames.every(name => graderNames.includes(name));
-  if (!complete || !fraction(arm.score)
-    || arm.error !== null || arm.skippedPaidGraders !== false
-    || !arm.graders.every(grade => grade.scored === true && typeof grade.passed === 'boolean')) {
-    return { ...attempt, status: 'ungraded' };
-  }
-
-  // Do not use the runner's suite-level pass count. Full acceptance means every
-  // grader passed.
-  const accepted = arm.score === 1 && arm.graders.every(grade => grade.passed);
-  return { ...attempt, score: arm.score, status: accepted ? 'accepted' : 'failed' };
+  const status = attemptStatus(arm, graderNames);
+  return status === 'accepted' || status === 'failed' ? { ...attempt, score: arm.score, status } : { ...attempt, status };
 }
 
 function matchesSuite(suite, plugin, model) {

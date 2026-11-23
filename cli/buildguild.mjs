@@ -12,6 +12,7 @@ import { compare } from './compare.mjs';
 import { prepareComparison } from './comparison-preparation.mjs';
 import { trialTemplateFiles } from './trial-templates.mjs';
 import { checkExamples } from './grader-examples.mjs';
+import { attemptStatus } from './comparison-results.mjs';
 
 const ORIGIN = process.env.BUILDGUILD_ORIGIN || 'https://buildguild.gg';
 const args = process.argv.slice(2);
@@ -208,12 +209,13 @@ const trialSlugOf = s => typeof s === 'string' && SLUG.test(s) ? s : die(`--tria
 // --work-dir is deleted before the run, so refuse one that resolves to anything the author would lose. realpath.native settles
 // symlinks, aliases such as /tmp and letter case on case-insensitive disks before the paths are compared. A work dir that does
 // not exist yet is judged by where it would be made: the nearest existing folder above it, with the rest of the path appended.
-function guardWorkDir(dir, folders) {
+// A path as the disk will resolve it: realpath.native for the part that exists, with the rest of the path appended.
+const settledPath = p => { const rest = []; while (!existsSync(p) && dirname(p) !== p) { rest.unshift(basename(p)); p = dirname(p); } return join(realpathSync.native(p), ...rest); };
+const within = (child, parent) => child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
+function guardWorkDir(dir, folders, fail = die) {
   const real = p => realpathSync.native(p);
-  const settle = p => { const rest = []; while (!existsSync(p) && dirname(p) !== p) { rest.unshift(basename(p)); p = dirname(p); } return join(real(p), ...rest); };
-  const w = settle(dir);
-  const within = (child, parent) => child === parent || child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
-  const refuse = what => die(`--work-dir ${dir} is deleted before the run, so it cannot be ${what}`);
+  const w = settledPath(dir);
+  const refuse = what => fail(`--work-dir ${dir} is deleted before the run, so it cannot be ${what}`);
   if (w === parse(w).root) refuse('the filesystem root');
   if (existsSync(homedir()) && w === real(homedir())) refuse('your home directory');
   if (within(real(process.cwd()), w)) refuse('the current directory or one of its ancestors');
@@ -269,66 +271,122 @@ async function modulePins(bundleDir) {
 }
 
 // ---------- unpublished cases ----------
-// A guild maintainer runs a private folder of cases as the unpublished part (the hidden slice) of a published trial. The
-// folder is an ordinary trial folder; its cases run in place of the published ones, and the record names them only by number.
+// A guild maintainer runs a private folder of cases as the unpublished part (the hidden slice) of a published trial. The mode
+// takes one kind of run: a published build (an archive whose SHA-256 is checked), on the folder's cases exactly as their
+// checksum fixes them, once. Its record names the cases only by number.
 const byteOrder = (a, b) => Buffer.compare(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+// Every refusal of this mode that needs nothing to run goes through refuse, named by why. tests/unpublished-cases.test.mjs holds
+// one row per name and fails while a name has none, so a refusal added later cannot go untested.
+const refuse = (why, message) => die(message);
 // The count and checksum of the unpublished cases, published before the run. files is filesIn(<folder>/cases), the very
 // bytes the run is given. The checksum is the SHA-256 of one line per regular file, "<mode> <sha256 of its bytes> cases/<path>\n",
 // sorted by the bytes of the path; mode is the one the run writes (755 for .sh, 644 otherwise). No file time, folder path or
-// listing order enters it, so the same cases give the same checksum on any machine.
+// listing order enters it, so the same cases give the same checksum on any machine. unpublishedFolder has refused a file name
+// holding a line break, which a line could not list.
 function casesDigest(files, count) {
   const paths = Object.keys(files).sort(byteOrder);
-  const bad = paths.find(rel => /[\n\r]/.test(rel));
-  if (bad !== undefined) die(`a file name under cases/ holds a line break, which the checksum cannot list; rename it`);
   const lines = paths.map(rel => `${modeFor(rel).toString(8)} ${createHash('sha256').update(files[rel]).digest('hex')} cases/${rel}\n`).join('');
   return { count, sha256: createHash('sha256').update(lines).digest('hex') };
 }
-// --unpublished <folder>: the checks that run nothing, in this order: the argument, the structure (every check `check` runs on a
-// trial folder except running its fixtures), then the roster (trial.json lists each case once, and its list is exactly the
-// folders under cases/). The fixtures run later, in test only, once every other refusal is behind it.
+// --unpublished <folder> (a path: onlyFlags has refused the flag without one), read without running anything: the roster (trial.json lists each case once, by name,
+// and its list is exactly the folders under cases/), the structure (every check `check` runs on a trial folder except running
+// its fixtures), the file names, then the cases' bytes, their checksum and each case's graders (its graders/*.md, by name).
 function unpublishedFolder(value) {
-  if (typeof value !== 'string') die('--unpublished needs the path of a trial folder holding the unpublished cases; nothing was run');
   const root = resolve(value);
-  if (!existsSync(root) || !statSync(root).isDirectory()) die(`no trial folder at ${root}; nothing was run`);
-  if (!existsSync(join(root, 'trial.json'))) die(`${root} has no trial.json, so it is not a trial folder; nothing was run`);
+  if (!existsSync(root) || !statSync(root).isDirectory()) refuse('folder-absent', `no trial folder at ${root}; nothing was run`);
+  if (!existsSync(join(root, 'trial.json'))) refuse('folder-no-trial', `${root} has no trial.json, so it is not a trial folder; nothing was run`);
   let record;
-  try { record = JSON.parse(readFileSync(join(root, 'trial.json'), 'utf8')); } catch (err) { die(`${root}/trial.json is not valid JSON (${err.message}); nothing was run`); }
-  const cases = join(root, 'cases');
-  const dirs = existsSync(cases) && lstatSync(cases).isDirectory() ? readdirSync(cases).filter(n => lstatSync(join(cases, n)).isDirectory()) : [];
-  if (!dirs.length || !Array.isArray(record.cases) || !record.cases.length) die(`${root} has no case: it needs at least one folder under cases/ and the same names in trial.json; nothing was run`);
-  checkFolder(root, 'trial', { structuralOnly: true });
+  try { record = JSON.parse(readFileSync(join(root, 'trial.json'), 'utf8')); } catch (err) { refuse('folder-json', `${root}/trial.json is not valid JSON (${err.message}); nothing was run`); }
+  const casesDir = join(root, 'cases');
+  const dirs = existsSync(casesDir) && lstatSync(casesDir).isDirectory() ? readdirSync(casesDir).filter(n => lstatSync(join(casesDir, n)).isDirectory()) : [];
+  if (!dirs.length || !Array.isArray(record?.cases) || !record.cases.length) refuse('folder-no-case', `${root} has no case: it needs at least one folder under cases/ and the same names in trial.json; nothing was run`);
   const names = record.cases.map(c => c?.name);
-  if (names.some(n => typeof n !== 'string')) die(`${root}/trial.json lists a case without a name; nothing was run`);
+  if (names.some(n => typeof n !== 'string' || !n)) refuse('roster-name', `${root}/trial.json lists a case without a name; nothing was run`);
   const twice = [...new Set(names.filter((n, i) => names.indexOf(n) !== i))].sort(byteOrder);
-  if (twice.length) die(`${root}/trial.json lists ${twice.join(', ')} more than once; each case is listed once. Nothing was run.`);
+  if (twice.length) refuse('roster-twice', `${root}/trial.json lists ${twice.join(', ')} more than once; each case is listed once. Nothing was run.`);
   const listed = [...names].sort(byteOrder), found = [...dirs].sort(byteOrder);
-  if (listed.join('\n') !== found.join('\n')) die(`${root}/trial.json lists ${listed.length} cases and cases/ holds ${found.length} folders, and the two do not match; nothing was run`);
-  return { root, record };
+  if (listed.join('\n') !== found.join('\n')) refuse('roster-mismatch', `${root}/trial.json lists ${listed.length} cases and cases/ holds ${found.length} folders, and the two do not match; nothing was run`);
+  const problems = folderProblems(root, 'trial', { structuralOnly: true });
+  if (problems.length) refuse('structure', `trial ${root}: ${problems.length} problem(s)\n  - ${problems.join('\n  - ')}`);
+  const files = filesIn(casesDir);
+  if (Object.keys(files).some(rel => /[\n\r]/.test(rel))) refuse('file-name', `a file name under ${casesDir} holds a line break, which the checksum cannot list; rename it. Nothing was run.`);
+  const graders = Object.fromEntries(names.map(n => [n, Object.keys(files).filter(rel => rel.startsWith(`${n}/graders/`) && rel.endsWith('.md') && rel.split('/').length === 3).map(rel => basename(rel, '.md')).sort(byteOrder)]));
+  return { root, record, files, graders, ...casesDigest(files, names.length) };
 }
 // With --unpublished, --trial names the published trial the cases belong to, by slug; a folder is refused.
 function publishedSlugFor(value) {
-  if (value === undefined || value === true) die('--unpublished needs --trial <slug>, the published trial these cases are the unpublished part of; nothing was run');
-  if (value.startsWith('.') || /[\\/]/.test(value) || existsSync(join(value, 'trial.json'))) die(`--trial ${value} is a folder; with --unpublished, --trial names the published trial by its slug, and the folder of unpublished cases goes to --unpublished. Nothing was run.`);
-  return trialSlugOf(value);
+  if (value === undefined || value === true) refuse('trial-missing', '--unpublished needs --trial <slug>, the published trial these cases are the unpublished part of; nothing was run');
+  if (value.startsWith('.') || /[\\/]/.test(value) || existsSync(join(value, 'trial.json'))) refuse('trial-folder', `--trial ${value} is a folder; with --unpublished, --trial names the published trial by its slug, and the folder of unpublished cases goes to --unpublished. Nothing was run.`);
+  if (!SLUG.test(value)) refuse('trial-slug', `--trial ${JSON.stringify(value)} is not a kebab-case slug; nothing was run`);
+  return value;
 }
 // The record of a run on unpublished cases is always a guild run.
 function guildRoleOnly() {
   const role = flag('role');
-  if (role !== undefined && role !== 'guild') die(`a run on unpublished cases is a guild run, so --role must be guild or left out (got ${JSON.stringify(role)}); nothing was run`);
+  if (role !== undefined && role !== 'guild') refuse('role', `a run on unpublished cases is a guild run, so --role must be guild or left out (got ${JSON.stringify(role)}); nothing was run`);
 }
 // A case may not share a name with a case of the published trial: the record numbers the unpublished cases, and a reader
 // must never be able to take one for a published case.
 function refuseSharedNames(folder, published) {
   const names = new Set((published.cases || []).map(c => c.name));
   const shared = [...new Set([...folder.record.cases.map(c => c.name), ...readdirSync(join(folder.root, 'cases'))])].filter(n => names.has(n)).sort(byteOrder);
-  if (shared.length) die(`${shared.length === 1 ? 'a case' : `${shared.length} cases`} in ${folder.root} ${shared.length === 1 ? 'has' : 'have'} the name of a case of the published trial ${published.slug} (${shared.join(', ')}); rename ${shared.length === 1 ? 'it' : 'them'}. Nothing was run.`);
+  if (shared.length) refuse('shared-name', `${shared.length === 1 ? 'a case' : `${shared.length} cases`} in ${folder.root} ${shared.length === 1 ? 'has' : 'have'} the name of a case of the published trial ${published.slug} (${shared.join(', ')}); rename ${shared.length === 1 ? 'it' : 'them'}. Nothing was run.`);
+}
+// The flags each command of this mode accepts; any other is refused by name, and none may be given twice. --runs is refused
+// because the number of runs is part of each case, which the checksum fixes; --no-fixtures because it skips the check every
+// folder gets; the rest because they are not part of this mode.
+const UNPUBLISHED_FLAGS = {
+  test: ['trial', 'unpublished', 'model', 'runner', 'role', 'max-cost-usd', 'j', 'rep', 'out', 'raw-out', 'work-dir', 'keep-temp'],
+  wrap: ['trial', 'unpublished', 'model', 'runner', 'role', 'build', 'build-version', 'sha256'],
+  unpublished: [],
+};
+const REFUSED_BECAUSE = { runs: 'the number of runs is part of each case, which the checksum fixes', 'no-fixtures': 'every unpublished folder gets the fixture check' };
+const VALUE_FLAGS = ['trial', 'unpublished', 'model', 'runner', 'role', 'max-cost-usd', 'j', 'rep', 'out', 'raw-out', 'work-dir', 'build', 'build-version', 'sha256'];
+function onlyFlags(command) {
+  const accepted = UNPUBLISHED_FLAGS[command];
+  const seen = new Set();
+  for (const a of args.slice(1).filter(a => a.startsWith('-'))) {
+    const name = a.replace(/^--?/, '');
+    if (!accepted.includes(name) || a !== (name.length === 1 ? `-${name}` : `--${name}`)) refuse('flag', `${a} is not accepted ${command === 'unpublished' ? 'by unpublished' : `by ${command} --unpublished`}${REFUSED_BECAUSE[name] ? `: ${REFUSED_BECAUSE[name]}` : ''}. ${accepted.length ? `It accepts ${accepted.map(n => n.length === 1 ? `-${n}` : `--${n}`).join(', ')}.` : 'It takes no flag.'} Nothing was run.`);
+    if (seen.has(name)) refuse('flag', `${a} is given twice; nothing was run`);
+    seen.add(name);
+    if (VALUE_FLAGS.includes(name) && flag(name) === true) refuse('flag-value', `${a} needs a value; nothing was run`);
+  }
+}
+// Where test --unpublished writes: the record (--out, or evidence-unpublished.json), the raw report's copy (--raw-out) and the
+// run folder (--work-dir). Each is resolved through links before anything runs. None may be an existing link, lie inside the
+// unpublished folder or hold it, or be the path of another; the two files may not lie in the run folder, which the run itself
+// writes in; and the run folder gets the guard every run gives it.
+function unpublishedOutputs(folderRoot, repSuffix) {
+  const outputs = [['--out', resolve(String(flag('out', `evidence-unpublished${repSuffix}.json`)))], ['--raw-out', flag('raw-out') ? resolve(String(flag('raw-out'))) : null], ['--work-dir', flag('work-dir') ? resolve(String(flag('work-dir'))) : null]].filter(([, p]) => p);
+  const folder = realpathSync.native(folderRoot);
+  const settled = new Map();
+  for (const [name, p] of outputs) {
+    let link = false;
+    try { link = lstatSync(p).isSymbolicLink(); } catch {}
+    if (link) refuse('output-link', `${name} ${p} is a link; give the path it should write to. Nothing was run.`);
+    const real = settledPath(p);
+    if (within(real, folder) || within(folder, real)) refuse('output-in-folder', `${name} ${p} is inside the unpublished folder ${folder}, or holds it; this run writes nothing there. Nothing was run.`);
+    for (const [other, q] of settled) if (q === real) refuse('output-same', `${name} and ${other} are the same path, ${real}; each output needs its own. Nothing was run.`);
+    settled.set(name, real);
+  }
+  const workDir = settled.get('--work-dir');
+  if (workDir) {
+    for (const name of ['--out', '--raw-out']) if (settled.has(name) && within(settled.get(name), workDir)) refuse('output-in-work-dir', `${name} ${settled.get(name)} is inside --work-dir ${workDir}, the run's own folder; nothing was run`);
+    guardWorkDir(resolve(String(flag('work-dir'))), { trial: folderRoot }, message => refuse('work-dir', message));
+  }
+  return { outPath: resolve(String(flag('out', `evidence-unpublished${repSuffix}.json`))), rawOut: flag('raw-out') ? resolve(String(flag('raw-out'))) : null, workDir: flag('work-dir') ? resolve(String(flag('work-dir'))) : null };
+}
+// A record from the site, read before anything runs; a failed read is a refusal.
+async function lookUp(path, why, what) {
+  try { return await fetchJson(path); } catch (err) { refuse(why, `${what} could not be read from ${ORIGIN} (${err.message}); nothing was run`); }
 }
 // Prints the count and checksum of a folder's unpublished cases without running anything, so both can be published first.
 function unpublished(target) {
+  onlyFlags('unpublished');
   if (!target) die('usage: buildguild unpublished <trial-folder>');
   const folder = unpublishedFolder(target);
-  const digest = casesDigest(filesIn(join(folder.root, 'cases')), folder.record.cases.length);
-  out(`${digest.count} unpublished case${digest.count === 1 ? '' : 's'}\nsha256 ${digest.sha256}\nunpublishedCases ${JSON.stringify(digest)}`);
+  out(`${folder.count} unpublished case${folder.count === 1 ? '' : 's'}\nsha256 ${folder.sha256}\nunpublishedCases ${JSON.stringify({ count: folder.count, sha256: folder.sha256 })}`);
 }
 
 // The dimensions of a run, as the trial page publishes them: each dimension is the mean score of its cases, reliability is the
@@ -368,26 +426,30 @@ function wrap(rawPath, { build, buildVersion, trialRecord, local = false, sha256
 }
 
 // The raw report of a run with --unpublished carries a marker, unpublishedRun, with every fact its record needs from the run:
-// the published trial and version, the cases (their real names and their dimensions at the run: the report is private), their
-// count and checksum, the build, its version and archive checksum, the runner, the date, the --rep suffix and the environment.
-// test writes it; wrap rebuilds the record from it alone, so the two records are the same apart from the id's random part.
+// the published trial and version, the cases (their real names, their dimensions and their graders at the run: the report is
+// private), their count and checksum, the build, its version and archive checksum, the runner, the date, the --rep suffix and
+// the environment. test writes it; wrap rebuilds the record from it alone, so the two records are the same apart from the id's
+// random part.
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const isText = v => typeof v === 'string' && v.length > 0;
+const uniqueTexts = list => Array.isArray(list) && list.length > 0 && list.every(isText) && new Set(list).size === list.length;
 function validMarker(run) {
   if (!run || typeof run !== 'object' || Array.isArray(run)) return false;
   const cases = Array.isArray(run.cases) ? run.cases : [];
   return isText(run.trial) && isText(run.trialVersion) && Number.isInteger(run.count) && run.count > 0 && typeof run.sha256 === 'string' && SHA256_HEX.test(run.sha256)
-    && cases.length === run.count && cases.every(c => isText(c?.name) && isText(c?.dimension)) && new Set(cases.map(c => c.name)).size === cases.length
-    && isText(run.build) && isText(run.buildVersion) && (run.archiveSha256 === null || isText(run.archiveSha256)) && isText(run.runner)
+    && cases.length === run.count && cases.every(c => isText(c?.name) && isText(c?.dimension) && uniqueTexts(c?.graders)) && uniqueTexts(cases.map(c => c.name))
+    && isText(run.build) && isText(run.buildVersion) && typeof run.archiveSha256 === 'string' && SHA256_HEX.test(run.archiveSha256) && isText(run.runner)
     && typeof run.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(run.date) && typeof run.idSuffix === 'string'
     && typeof run.environment === 'object' && run.environment !== null && ['os', 'claudeCode', 'model'].every(k => isText(run.environment[k])) && Array.isArray(run.environment.modules);
 }
 // A record is written only for a complete run on exactly the folder's cases: not partial; run with and without the build, on the
-// model the record names (when the report says which); one result for each case and no other, with totals that agree; every
-// attempt of both arms finished without an error, with a score and without skipping a grader; and each score is the one its
-// parts give (a case's score is the mean of its attempts, its gap is its score minus the bare score, and the overall score and
-// gap are the means over the cases, as in every raw report the runner has written). Cases are named here by their number.
-// Both test and wrap call this; the problems it returns mean no record is written.
+// model the record names (when the report says which); one result for each case and no other, with totals that agree; each
+// arm holding exactly the runs its case declares, each run graded, as attemptStatus in comparison-results.mjs classifies runs
+// for every reader of these reports (an error or an abort, a grader that counts left unscored, graders that are not the case's,
+// a score that is not a fraction or skipped paid graders all make a run incomplete); and each score is the one its parts give
+// (a case's score is the mean of its runs, its gap is its score minus its bare score, and the overall score and gap are the
+// means over the cases, as in every raw report the runner has written). Cases are named here by their number. Both test and
+// wrap call this; the problems it returns mean no record is written.
 const finite = v => typeof v === 'number' && Number.isFinite(v);
 const meanOf = xs => xs.reduce((a, b) => a + b, 0) / xs.length;
 const agree = (a, b) => Math.abs(a - b) <= 1e-9;
@@ -398,6 +460,7 @@ function unpublishedRunProblems(raw, run) {
   if (suite.ablation !== undefined && suite.ablation !== 'with-without') problems.push(`the run did not compare the build with the bare runtime (ablation ${JSON.stringify(suite.ablation)})`);
   if (suite.modelOverride !== undefined && suite.modelOverride !== run.environment.model) problems.push(`the runner ran ${suite.modelOverride}, not ${run.environment.model}`);
   const numberOf = new Map(run.cases.map(c => c.name).sort(byteOrder).map((name, i) => [name, `unpublished-${i + 1}`]));
+  const gradersOf = new Map(run.cases.map(c => [c.name, c.graders]));
   const cases = Array.isArray(raw.cases) ? raw.cases : [];
   const seen = new Map();
   for (const c of cases) seen.set(c?.name, (seen.get(c?.name) || 0) + 1);
@@ -410,17 +473,22 @@ function unpublishedRunProblems(raw, run) {
   const totals = raw.aggregates || {};
   if (totals.casesTotal !== numberOf.size || cases.length !== numberOf.size) problems.push(`the report counts ${totals.casesTotal} cases and lists ${cases.length}, and the folder has ${numberOf.size}`);
   for (const c of cases) {
-    const where = numberOf.get(c?.name) || 'a case the folder does not list';
+    // A result for a case the folder does not list is reported above, once; its runs are not checked.
+    if (!numberOf.has(c?.name)) continue;
+    const where = numberOf.get(c.name);
+    const declared = Number.isInteger(c?.runsPerCase) && c.runsPerCase > 0 ? c.runsPerCase : null;
+    if (declared === null) problems.push(`${where}: the report does not say how many runs the case declares`);
     const scores = {};
     for (const [arm, label] of [['with', 'with the build'], ['without', 'of the bare runtime']]) {
       const attempts = c?.arms?.[arm];
       if (!Array.isArray(attempts) || !attempts.length) { problems.push(`${where}: the report holds no run ${label}`); continue; }
-      if (finite(c.runsPerCase) && attempts.length !== c.runsPerCase) problems.push(`${where}: ${attempts.length} runs ${label}, where the case asks for ${c.runsPerCase}`);
-      const errors = attempts.filter(a => a?.error);
-      if (errors.length) problems.push(`${where}: a run ${label} ended in an error (${String(errors[0].error)})`);
-      if (attempts.some(a => a?.skippedPaidGraders === true)) problems.push(`${where}: a run ${label} skipped some of its graders`);
-      if (attempts.some(a => !finite(a?.score))) problems.push(`${where}: a run ${label} has no score`);
-      else scores[arm] = meanOf(attempts.map(a => a.score));
+      if (declared !== null && attempts.length !== declared) problems.push(`${where}: ${attempts.length} runs ${label}, where the case declares ${declared}`);
+      const status = attempts.map(a => attemptStatus(a, gradersOf.get(c?.name) || [], { withOnlyExempt: true }));
+      const failed = attempts.find((a, i) => status[i] === 'error');
+      if (failed) problems.push(`${where}: a run ${label} ended in an error or was aborted${failed.error ? ` (${String(failed.error)})` : ''}`);
+      if (status.includes('ungraded')) problems.push(`${where}: a run ${label} was not fully graded (a grader that counts went unscored, its graders are not the case's, its score is not from 0 to 1, or paid graders were skipped)`);
+      if (status.includes('missing')) problems.push(`${where}: a run ${label} is missing from the report`);
+      if (status.every(s => s === 'accepted' || s === 'failed')) scores[arm] = meanOf(attempts.map(a => a.score));
     }
     const g = c?.aggregates || {};
     if (!finite(g.score) || !finite(g.scoreWithout) || !finite(g.delta)) { problems.push(`${where}: the case has no score for both arms and no gap between them`); continue; }
@@ -434,6 +502,7 @@ function unpublishedRunProblems(raw, run) {
   if (!Number.isInteger(totals.casesPassed) || totals.casesPassed < 0 || totals.casesPassed > numberOf.size) problems.push(`the report says ${totals.casesPassed} cases passed of ${numberOf.size}`);
   return problems;
 }
+
 // The record of a run on unpublished cases, from its raw report and marker alone: unpublished-1 to unpublished-n in the byte
 // order of the real names, scores and gaps kept, the dimensions the cases had at the run, and the bare runtime's overall score
 // (the mean of each case's aggregates.scoreWithout, as overallScore is the mean of each case's aggregates.score). Called only
@@ -456,39 +525,21 @@ function unpublishedRecord(raw, run) {
 }
 
 async function test(slug) {
-  if (!slug) die('usage: buildguild test <slug|path> --model <id> [--trial slug|path] [--unpublished trial-folder] [--max-cost-usd 5] [--runs n] [-j n] [--rep k] [--out evidence.json]');
+  if (flag('unpublished') !== undefined) return testUnpublished(slug);
+  if (!slug) die('usage: buildguild test <slug|path> --model <id> [--trial slug|path] [--max-cost-usd 5] [--runs n] [-j n] [--rep k] [--out evidence.json]');
   const model = modelId(); // first, so a run without a model downloads, resets and spends nothing
   // --rep k numbers one of several runs of the same build on the same trial: the evidence id ends in -rep<k>, and so does
   // the default file name. Without it every id and name is as it always was.
   const repFlag = flag('rep');
   if (repFlag !== undefined && !(typeof repFlag === 'string' && /^[1-9]\d*$/.test(repFlag))) die('--rep needs a whole number of at least 1; nothing was run');
   const repSuffix = repFlag === undefined ? '' : `-rep${repFlag}`;
-  // --unpublished <folder> runs that folder's cases as the unpublished part of the published trial --trial names. The
-  // refusals that run nothing come first, in this order: the role, the trial, the folder's structure and roster, the names it
-  // shares with the published trial, the work dir and Claude Code. Only then do the folder's fixtures run (below).
-  let hidden = null;
-  if (flag('unpublished') !== undefined) {
-    guildRoleOnly();
-    const publishedSlug = publishedSlugFor(flag('trial'));
-    const folder = unpublishedFolder(flag('unpublished'));
-    const published = await fetchJson(`/trials/${publishedSlug}.json`);
-    refuseSharedNames(folder, published);
-    hidden = { ...folder, published };
-  }
   // A trial folder is checked first, so a broken one is reported even where claude is missing, and before any download.
-  const local = hidden ? null : localTrial(flag('trial'));
-  const trialSlug = local || hidden ? null : trialSlugOf(flag('trial', 'guild-smoke-v1'));
+  const local = localTrial(flag('trial'));
+  const trialSlug = local ? null : trialSlugOf(flag('trial', 'guild-smoke-v1'));
   const buildDir = existsSync(slug) && statSync(slug).isDirectory() ? resolve(slug) : null;
   const workDir = flag('work-dir') && flag('work-dir') !== true ? resolve(String(flag('work-dir'))) : null;
-  if (workDir) guardWorkDir(workDir, { build: buildDir, trial: local?.root || hidden?.root });
+  if (workDir) guardWorkDir(workDir, { build: buildDir, trial: local?.root });
   const claude = which('claude'); if (!claude) die('claude is not installed; install Claude Code 2.1.269 or later');
-  // The unpublished folder gets every check `check` runs, its fixtures included, and its cases are read once: the checksum is
-  // taken from the very bytes the run is given.
-  if (hidden) {
-    checkFolder(hidden.root, 'trial');
-    hidden.files = filesIn(join(hidden.root, 'cases'));
-    Object.assign(hidden, casesDigest(hidden.files, hidden.record.cases.length));
-  }
   let meta = { version: 'local', sha256: null };
   // The run always happens in a fresh temporary copy, so a local bundle's own evals/ is never touched.
   const bundleDir = workDir ? (rmSync(workDir, { recursive: true, force: true }), mkdirSync(workDir, { recursive: true }), workDir) : mkdtempSync(join(tmpdir(), `buildguild-${existsSync(slug) ? 'local' : slug}-`));
@@ -504,17 +555,13 @@ async function test(slug) {
     meta = { version: b.version, sha256: sha };
   }
   const modules = await modulePins(bundleDir);
-  // Only the unpublished folder's cases run; the published trial's own cases are not downloaded.
-  const { root: trialDir, record: trialRecord } = hidden ? { root: hidden.root, record: hidden.published } : local || await trial(trialSlug);
+  const { root: trialDir, record: trialRecord } = local || await trial(trialSlug);
   if (local) out(`local trial ${trialRecord.name} v${trialRecord.version}: ${trialRecord.cases.length} cases from ${trialDir}; a run on it is for its author, not evidence`);
-  if (hidden) out(`unpublished cases of ${trialRecord.name} v${trialRecord.version}: ${hidden.count} from ${hidden.root}\n  sha256 ${hidden.sha256}`);
   const evalDir = join(bundleDir, 'evals');
   rmSync(evalDir, { recursive: true, force: true });
   // A published trial's archive is its cases/ folder, unpacked with modeFor. A local folder's cases/ is written the same way, so
-  // the run sees the layout and file modes (.sh 0755, the rest 0644) it would see once the trial is published. Unpublished
-  // cases are written from the same bytes their checksum was taken from.
-  if (hidden) writeTree(evalDir, hidden.files);
-  else if (local) writeTree(evalDir, filesIn(join(trialDir, 'cases')));
+  // the run sees the layout and file modes (.sh 0755, the rest 0644) it would see once the trial is published.
+  if (local) writeTree(evalDir, filesIn(join(trialDir, 'cases')));
   else cpSync(trialDir, evalDir, { recursive: true });
   const runner = flag('runner') || (version('gh', ['api', 'user', '--jq', '.login']) || process.env.USER || 'unknown').trim();
   const argv = ['plugin', 'eval', '.', '--scaffold', '--allow-tools', 'Bash', 'Write', 'Edit', '--json', 'buildguild-raw.json', '--no-publish', '--trust-plugin', '--ablation', 'with-without', '--max-cost-usd', String(flag('max-cost-usd', '5')), '--threshold', '0'];
@@ -523,45 +570,120 @@ async function test(slug) {
   argv.push('--model', model);
   if (flag('keep-temp')) argv.push('--keep-temp');
   out(`running: claude ${argv.join(' ')}\n  in ${bundleDir}\n  this runs the trial's fixture scripts and the build's hooks on your machine, as you.`);
-  const rawPath = join(bundleDir, 'buildguild-raw.json');
-  // The raw report and the run folder hold the unpublished cases' names and prompts, so they are named once, before the run.
-  if (hidden) console.error(`warning: private files. The run folder ${bundleDir}, its raw report ${rawPath}${flag('raw-out') ? `, the copy ${resolve(String(flag('raw-out')))}` : ''}${flag('keep-temp') ? ' and the runner folders --keep-temp keeps' : ''} hold the unpublished cases' names and prompts. Do not commit, upload or paste them anywhere. Only the record this command writes may be shared.`);
   const r = spawnSync(claude, argv, { cwd: bundleDir, stdio: 'inherit' });
+  const rawPath = join(bundleDir, 'buildguild-raw.json');
   if (!existsSync(rawPath)) die(`the runner wrote no result (exit ${r.status})`);
   const rawCheck = JSON.parse(readFileSync(rawPath, 'utf8'));
   // A local run's raw report carries the marker too, in the run folder and in --raw-out, so wrap cannot pass it off as a
-  // run on a published trial. A run on unpublished cases is marked "unpublished", with the marker unpublishedRun holding every
-  // fact of the run its record needs (see validMarker), so wrap rebuilds the same record from the report alone.
-  const buildSlug = () => !existsSync(slug) ? slug : JSON.parse(readFileSync(join(bundleDir, 'buildguild.json'), 'utf8')).slug;
+  // run on a published trial.
   if (local) { rawCheck.trialSource = 'local'; writeFileSync(rawPath, JSON.stringify(rawCheck, null, 2) + '\n'); }
-  if (hidden) {
-    rawCheck.trialSource = 'unpublished';
-    rawCheck.unpublishedRun = { trial: trialRecord.slug, trialVersion: trialRecord.version, count: hidden.count, sha256: hidden.sha256,
-      cases: hidden.record.cases.map(c => ({ name: c.name, dimension: c.dimension })),
-      build: buildSlug(), buildVersion: meta.version, archiveSha256: meta.sha256 || null, runner, date: new Date().toISOString().slice(0, 10), idSuffix: repSuffix,
-      environment: { ...fingerprint(), claudeCode: rawCheck.claudeVersion || fingerprint().claudeCode, modules } };
-    writeFileSync(rawPath, JSON.stringify(rawCheck, null, 2) + '\n');
-  }
   if (flag('raw-out')) writeFileSync(resolve(String(flag('raw-out'))), JSON.stringify(rawCheck, null, 2) + '\n');
   if (rawCheck.partialReason === 'auth_failed') die('the eval runner could not authenticate its agent runs ("Not logged in"). It runs `claude -p` in an isolated home, so run this from a terminal where `claude` is logged in, or set ANTHROPIC_API_KEY. No evidence file was written.', 2);
   // A run where every agent run ended in an error is not evidence of anything; refuse to write a record.
   const arms = (rawCheck.cases || []).flatMap(c => [...(c.arms?.with || []), ...(c.arms?.without || [])]);
   const errors = arms.map(a => a.error).filter(Boolean);
   if (arms.length && errors.length === arms.length) die(`every agent run ended in an error, so no evidence file was written. First error: ${errors[0]}${rawCheck.partialReason ? ` (partial: ${rawCheck.partialReason})` : ''}`, 2);
-  if (errors.length && !hidden) console.error(`note: ${errors.length} of ${arms.length} agent runs ended in an error; first: ${errors[0]}`);
-  // A run on unpublished cases is paid for once and read once, so a record of a run that is not complete is never written.
-  if (hidden) {
-    const problems = unpublishedRunProblems(rawCheck, rawCheck.unpublishedRun);
-    if (problems.length) die(`no record was written: the run on the unpublished cases is not complete.\n  - ${problems.join('\n  - ')}\nThe raw report ${rawPath}${flag('raw-out') ? ` and its copy ${resolve(String(flag('raw-out')))}` : ''} ${flag('raw-out') ? 'are' : 'is'} kept, marked, to work out what happened; ${flag('raw-out') ? 'they hold' : 'it holds'} the cases' names and prompts, so keep ${flag('raw-out') ? 'them' : 'it'} private.`, 2);
-  }
-  const ev = hidden ? unpublishedRecord(rawCheck, rawCheck.unpublishedRun) : wrap(rawPath, { build: buildSlug(), buildVersion: meta.version, trialRecord, local: !!local, sha256: meta.sha256, role: flag('role', 'author'), runner, modules, idSuffix: repSuffix });
-  const outPath = resolve(String(flag('out', `${local ? 'local-run' : hidden ? 'evidence-unpublished' : 'evidence'}${repSuffix}.json`)));
+  if (errors.length) console.error(`note: ${errors.length} of ${arms.length} agent runs ended in an error; first: ${errors[0]}`);
+  const ev = wrap(rawPath, { build: !existsSync(slug) ? slug : JSON.parse(readFileSync(join(bundleDir, 'buildguild.json'), 'utf8')).slug, buildVersion: meta.version, trialRecord, local: !!local, sha256: meta.sha256, role: flag('role', 'author'), runner, modules, idSuffix: repSuffix });
+  const outPath = resolve(String(flag('out', `${local ? 'local-run' : 'evidence'}${repSuffix}.json`)));
   writeFileSync(outPath, JSON.stringify(ev, null, 2) + '\n');
   const result = `  overall ${Math.round(ev.results.overallScore * 100)}%${typeof ev.results.meanDelta === 'number' ? `, ${vsBare(ev.results.meanDelta)}` : ''}, ${ev.results.casesPassed}/${ev.results.casesTotal} cases${ev.cost ? `, est. $${ev.cost.usd}` : ''}${ev.results.partial ? ' (PARTIAL: cost ceiling hit)' : ''}`;
   if (local) out(`\nlocal run: ${outPath}\n${result}\nnot evidence: a run on a local trial folder is for its author; only a run on a published trial can be submitted.`);
-  else if (hidden) out(`\nhidden-slice record: ${outPath}\n${result}${typeof ev.results.bareOverallScore === 'number' ? `; bare runtime ${Math.round(ev.results.bareOverallScore * 100)}%` : ''}\nIt names the cases only as unpublished-1 to unpublished-${hidden.count}. A maintainer adds it to Build by pull request; submit refuses it.`);
   else out(`\nevidence: ${outPath}\n${result}\nnext: node cli/buildguild.mjs submit ${relative(process.cwd(), outPath) || 'evidence.json'}`);
   process.exit(r.status === 2 ? 2 : 0);
+}
+
+
+// Every check of test --unpublished that needs nothing to run, in one place: the flags and their values, the role, the published
+// trial's slug, the build's slug, the folder (argument, roster, structure, file names, checksum), where the run writes, the
+// work-dir guard, the published trial and its case names, the published build and its archive, and Claude Code. Only when all
+// pass may anything be run, deleted, downloaded or written.
+async function unpublishedPreflight(slug) {
+  onlyFlags('test');
+  const model = flag('model') ?? process.env.ANTHROPIC_MODEL;
+  if (typeof model !== 'string' || !model) refuse('model', 'test needs --model <id>, the model the agent runs on (the hosted season trial runs claude-sonnet-5-5); ANTHROPIC_MODEL may stand in for the flag. Nothing was run.');
+  const rep = flag('rep');
+  if (rep !== undefined && !/^[1-9]\d*$/.test(rep)) refuse('rep', '--rep needs a whole number of at least 1; nothing was run');
+  const runner = flag('runner');
+  if (typeof runner !== 'string' || !/^[A-Za-z0-9-]+$/.test(runner)) refuse('runner', `with --unpublished, --runner names the GitHub login the record credits (letters, digits and hyphens)${runner === undefined ? '' : `, not ${JSON.stringify(runner)}`}; nothing was run`);
+  const ceiling = flag('max-cost-usd');
+  if (ceiling !== undefined && !(Number(ceiling) > 0 && Number.isFinite(Number(ceiling)))) refuse('flag-value', `--max-cost-usd needs a positive number of USD, not ${JSON.stringify(ceiling)}; nothing was run`);
+  const concurrency = flag('j');
+  if (concurrency !== undefined && !/^[1-8]$/.test(concurrency)) refuse('flag-value', `-j needs a whole number from 1 to 8, as the runner takes, not ${JSON.stringify(concurrency)}; nothing was run`);
+  guildRoleOnly();
+  const publishedSlug = publishedSlugFor(flag('trial'));
+  if (!slug) refuse('build-missing', 'usage: buildguild test <published-build> --trial <published-slug> --unpublished <trial-folder> --model <id> --runner <login>; nothing was run');
+  if (existsSync(slug)) refuse('build-folder', `${slug} is a path here; with --unpublished the build is a published build, named by its slug, so its record is about an archive whose SHA-256 is checked. Nothing was run.`);
+  if (!SLUG.test(slug)) refuse('build-slug', `build must be a kebab-case slug, got ${JSON.stringify(slug)}; nothing was run`);
+  const repSuffix = rep === undefined ? '' : `-rep${rep}`;
+  const folder = unpublishedFolder(flag('unpublished'));
+  const outputs = unpublishedOutputs(folder.root, repSuffix);
+  const published = await lookUp(`/trials/${publishedSlug}.json`, 'trial-lookup', `the published trial ${publishedSlug}`);
+  refuseSharedNames(folder, published);
+  const build = await lookUp(`/builds/${slug}.json`, 'build-lookup', `the published build ${slug}`);
+  if (typeof build?.archive?.url !== 'string' || !SHA256_HEX.test(String(build.archive.sha256)) || typeof build.version !== 'string') refuse('build-archive', `${slug} has no archive with a SHA-256 to run; nothing was run`);
+  const claude = which('claude');
+  if (!claude) refuse('claude', 'claude is not installed; install Claude Code 2.1.269 or later. Nothing was run.');
+  return { model, runner, repSuffix, published, build, folder, claude, ...outputs };
+}
+// A file this mode writes after the run, refused if a link has appeared at its path since the preflight.
+function writeOutput(path, text) {
+  let link = false;
+  try { link = lstatSync(path).isSymbolicLink(); } catch {}
+  if (link) die(`${path} became a link during the run, so nothing was written there`, 2);
+  writeFileSync(path, text);
+}
+// test --unpublished: the preflight, then the folder's fixtures, then the run in a fresh work dir on the build's verified archive,
+// then a record only for a complete run whose report this run wrote.
+async function testUnpublished(slug) {
+  const p = await unpublishedPreflight(slug);
+  // The folder gets every check `check` runs, its fixtures included. The cases' bytes were read in the preflight, and those
+  // bytes, the ones the checksum is taken from, are the ones the run is given, whatever a fixture leaves behind.
+  checkFolder(p.folder.root, 'trial');
+  const bundleDir = p.workDir ? (rmSync(p.workDir, { recursive: true, force: true }), mkdirSync(p.workDir, { recursive: true }), p.workDir) : mkdtempSync(join(tmpdir(), `buildguild-${slug}-`));
+  const zip = await fetchBytes(p.build.archive.url);
+  const archiveSha256 = createHash('sha256').update(zip).digest('hex');
+  if (archiveSha256 !== p.build.archive.sha256) die('SHA-256 mismatch');
+  for (const e of unzip(zip)) { const rel = stripTop(e.name); const target = safeJoin(bundleDir, rel); mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, e.data, { mode: modeFor(rel) }); }
+  const modules = await modulePins(bundleDir);
+  const t = p.published;
+  out(`unpublished cases of ${t.name} v${t.version}: ${p.folder.count} from ${p.folder.root}\n  sha256 ${p.folder.sha256}`);
+  const evalDir = join(bundleDir, 'evals');
+  rmSync(evalDir, { recursive: true, force: true });
+  writeTree(evalDir, p.folder.files);
+  // The report must be this run's: one the archive shipped is removed before the runner starts.
+  const rawPath = join(bundleDir, 'buildguild-raw.json');
+  rmSync(rawPath, { recursive: true, force: true });
+  // The runner arguments of any other run; --runs is refused in this mode, so each case runs as often as it declares.
+  const argv = ['plugin', 'eval', '.', '--scaffold', '--allow-tools', 'Bash', 'Write', 'Edit', '--json', 'buildguild-raw.json', '--no-publish', '--trust-plugin', '--ablation', 'with-without', '--max-cost-usd', String(flag('max-cost-usd', '5')), '--threshold', '0'];
+  if (flag('j')) argv.push('-j', String(flag('j')));
+  argv.push('--model', p.model);
+  if (flag('keep-temp')) argv.push('--keep-temp');
+  out(`running: claude ${argv.join(' ')}\n  in ${bundleDir}\n  this runs the trial's fixture scripts and the build's hooks on your machine, as you.`);
+  // The raw report and the run folder hold the unpublished cases' names and prompts, so they are named once, before the run.
+  console.error(`warning: private files. The run folder ${bundleDir}, its raw report ${rawPath}${p.rawOut ? `, the copy ${p.rawOut}` : ''}${flag('keep-temp') ? ' and the runner folders --keep-temp keeps' : ''} hold the unpublished cases' names and prompts. Do not commit, upload or paste them anywhere. Only the record this command writes may be shared.`);
+  const r = spawnSync(p.claude, argv, { cwd: bundleDir, stdio: 'inherit' });
+  if (!existsSync(rawPath)) die(`the runner wrote no report (exit ${r.status ?? r.signal}), so no record was written`, 2);
+  const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
+  const marker = { trial: t.slug, trialVersion: t.version, count: p.folder.count, sha256: p.folder.sha256,
+    cases: p.folder.record.cases.map(c => ({ name: c.name, dimension: c.dimension, graders: p.folder.graders[c.name] })),
+    build: slug, buildVersion: p.build.version, archiveSha256, runner: p.runner, date: new Date().toISOString().slice(0, 10), idSuffix: p.repSuffix,
+    environment: { ...fingerprint(), claudeCode: raw.claudeVersion || fingerprint().claudeCode, modules } };
+  // The report is kept, marked, whatever comes next: a plain wrap refuses it, and it shows what happened.
+  raw.trialSource = 'unpublished';
+  raw.unpublishedRun = marker;
+  writeFileSync(rawPath, JSON.stringify(raw, null, 2) + '\n');
+  if (p.rawOut) writeOutput(p.rawOut, JSON.stringify(raw, null, 2) + '\n');
+  if (raw.partialReason === 'auth_failed') die('the eval runner could not authenticate its agent runs ("Not logged in"). It runs `claude -p` in an isolated home, so run this from a terminal where `claude` is logged in, or set ANTHROPIC_API_KEY. No evidence file was written.', 2);
+  // The runner exits 0 when it finished, 1 when a case scored under --threshold (0 here, so no case can) and 2 when the cost
+  // ceiling stopped it, with a partial report. This mode takes 0 only.
+  const exit = r.status === 0 ? [] : [`the runner exited ${r.status === null ? `on ${r.signal}` : r.status}${r.status === 2 ? ' (the cost ceiling stopped it)' : ''}, not 0`];
+  const problems = [...exit, ...unpublishedRunProblems(raw, marker)];
+  if (problems.length) die(`no record was written: the run on the unpublished cases is not complete.\n  - ${problems.join('\n  - ')}\nThe raw report ${rawPath}${p.rawOut ? ` and its copy ${p.rawOut}` : ''} ${p.rawOut ? 'are' : 'is'} kept, marked, to work out what happened; ${p.rawOut ? 'they hold' : 'it holds'} the cases' names and prompts, so keep ${p.rawOut ? 'them' : 'it'} private.`, 2);
+  const ev = unpublishedRecord(raw, marker);
+  writeOutput(p.outPath, JSON.stringify(ev, null, 2) + '\n');
+  out(`\nhidden-slice record: ${p.outPath}\n  overall ${Math.round(ev.results.overallScore * 100)}%, ${vsBare(ev.results.meanDelta)}, ${ev.results.casesPassed}/${ev.results.casesTotal} cases${ev.cost ? `, est. $${ev.cost.usd}` : ''}; bare runtime ${Math.round(ev.results.bareOverallScore * 100)}%\nIt names the cases only as unpublished-1 to unpublished-${p.folder.count}. A maintainer adds it to Build by pull request; submit refuses it.`);
+  process.exit(0);
 }
 
 // wrap --unpublished: rebuilds the record `test --unpublished` wrote from its saved raw report, with no second run. Every fact
@@ -570,6 +692,7 @@ async function test(slug) {
 // must still hold the same cases (it gets the checks that run nothing; wrap runs no fixture); and the run must pass the same
 // completeness checks as in test. A dimension edited in the folder's trial.json since the run is reported and not used.
 async function wrapUnpublished(rawPath) {
+  onlyFlags('wrap');
   guildRoleOnly();
   const publishedSlug = publishedSlugFor(flag('trial'));
   const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
@@ -578,13 +701,12 @@ async function wrapUnpublished(rawPath) {
   if (run.trial !== publishedSlug) die(`${rawPath} is a run on unpublished cases of ${run.trial}, not of ${publishedSlug}`);
   const given = { build: flag('build'), 'build-version': flag('build-version'), sha256: flag('sha256'), runner: flag('runner'), model: modelId() };
   const ran = { build: run.build, 'build-version': run.buildVersion, sha256: run.archiveSha256, runner: run.runner, model: run.environment.model };
-  for (const [name, value] of Object.entries(given)) if (value !== undefined && value !== ran[name]) die(`--${name} ${value} is not the run's ${ran[name] ?? 'none'}; wrap --unpublished writes the record of the run in ${rawPath}, so no record was written`);
+  for (const [name, value] of Object.entries(given)) if (value !== undefined && value !== ran[name]) die(`--${name} ${value} is not the run's ${ran[name]}; wrap --unpublished writes the record of the run in ${rawPath}, so no record was written`);
   const folder = unpublishedFolder(flag('unpublished'));
-  const published = await fetchJson(`/trials/${publishedSlug}.json`);
+  const published = await lookUp(`/trials/${publishedSlug}.json`, 'trial-lookup', `the published trial ${publishedSlug}`);
   if (published.version !== run.trialVersion) die(`${rawPath} ran against ${publishedSlug} v${run.trialVersion}, and the published trial is now v${published.version}; its record would count on the wrong version, so none was written`);
   refuseSharedNames(folder, published);
-  const digest = casesDigest(filesIn(join(folder.root, 'cases')), folder.record.cases.length);
-  if (digest.count !== run.count || digest.sha256 !== run.sha256) die(`${folder.root} no longer holds the cases that run used (it has ${digest.count} with sha256 ${digest.sha256}; the run had ${run.count} with sha256 ${run.sha256}); no record was written`);
+  if (folder.count !== run.count || folder.sha256 !== run.sha256) die(`${folder.root} no longer holds the cases that run used (it has ${folder.count} with sha256 ${folder.sha256}; the run had ${run.count} with sha256 ${run.sha256}); no record was written`);
   const number = new Map(run.cases.map(c => c.name).sort(byteOrder).map((name, i) => [name, i + 1]));
   for (const c of run.cases) {
     const now = folder.record.cases.find(x => x.name === c.name)?.dimension;
@@ -793,13 +915,17 @@ function checkBuild(root, problems, options = {}) {
 
 // Every check `check` runs on a build or trial folder; any problem is listed and exits 1. A --trial folder gets it too.
 function checkFolder(root, kind, options = {}) {
+  const problems = folderProblems(root, kind, options);
+  if (problems.length) { console.error(`${kind} ${root}: ${problems.length} problem(s)\n  - ${problems.join('\n  - ')}`); process.exit(1); }
+}
+function folderProblems(root, kind, options = {}) {
   const problems = [];
   if (!existsSync(join(root, 'README.md'))) problems.push('README.md is missing');
   else if (words(readFileSync(join(root, 'README.md'), 'utf8')) < 40) problems.push('README.md needs at least forty words');
   if (!existsSync(join(root, 'LICENSE'))) problems.push('LICENSE is missing');
   for (const n of ['.env', '.env.local', 'id_rsa', 'credentials.json']) if (existsSync(join(root, n))) problems.push(`${n} must not ship in a submission`);
   if (kind === 'trial') checkTrial(root, problems, options); else checkBuild(root, problems, options);
-  if (problems.length) { console.error(`${kind} ${root}: ${problems.length} problem(s)\n  - ${problems.join('\n  - ')}`); process.exit(1); }
+  return problems;
 }
 
 function check(target) {
@@ -877,10 +1003,12 @@ Run from a checkout of https://github.com/Guild-Build/Build; the buildguild npm 
                                         --model names the model it runs on (the hosted season trial: claude-sonnet-5-5); ANTHROPIC_MODEL may stand in
                                         --work-dir is deleted first, so it may not be /, home, the current directory or above, or in or around the build or trial folder
                                         --rep k marks run k of several of the same build on the same trial: the evidence id and the default file name end in -rep<k>
-  node cli/buildguild.mjs test <slug|path> --trial <published-slug> --unpublished <trial-folder> --model <id> [the flags above]
+  node cli/buildguild.mjs test <published-build> --trial <published-slug> --unpublished <trial-folder> --model <id> --runner <login>
+                                        [--max-cost-usd 5] [-j n] [--rep k] [--out file] [--raw-out file] [--work-dir dir] [--keep-temp]
                                         a guild maintainer's run of a private folder of cases as the unpublished part (hidden slice) of a
-                                        published trial: the folder is checked first, only its cases run, a record is written only for a
-                                        complete run on exactly the folder's cases, and the record (default
+                                        published trial, with a published build only; any other flag (--runs among them) is refused. Every
+                                        check that runs nothing comes before anything runs; only the folder's cases run; a record is written
+                                        only for a complete run whose report this run wrote, and the record (default
                                         evidence-unpublished.json) is a guild record with hiddenSlice true, its cases named unpublished-1 to -n,
                                         unpublishedCases {count, sha256} and results.bareOverallScore. The run folder and raw report hold the
                                         cases' names and prompts: never commit, upload or paste them
