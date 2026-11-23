@@ -3,7 +3,7 @@
   "name": "Runbook First",
   "kind": "guild",
   "category": "delivery",
-  "summary": "One SessionStart hook: when a session starts in a repository, the agent is told which of the repository's operating documents exist, by conventional name or because the README names them, and to read the ones that govern the change, run the checks they name and say which it read.",
+  "summary": "One SessionStart hook: when a session starts in a repository, the agent is told which of the repository's operating documents exist and to read the ones that govern the change, run the checks they name and say which it read.",
   "modules": [
     "hook/operating-docs-notice"
   ],
@@ -23,18 +23,14 @@
     "context"
   ],
   "published": "2026-11-13",
-  "updated": "2026-11-18",
+  "updated": "2026-11-13",
   "changelog": [
-    {
-      "date": "2026-11-18",
-      "note": "0.2.0: the hook now also lists the documentation files the README names (ending in .md, .markdown, .rst, .txt or .adoc; not the license, notice, code of conduct, security or authors file, nor the README itself) and the folders it names that hold only such files and subfolders. These come after the documents found by conventional name and take neither their place nor their room in the text; the limits are unchanged. On the eight repositories of the Client Deployment Trial its text is byte for byte what 0.1.0 writes. The change was made after a free check, with no model, showed that 0.1.0 names none of the rule documents in the Client Operations Trial 2.0.0, so any result of 0.2.0 on that trial is a development result, not a held-out one. No model has run 0.2.0 yet, so it has no score."
-    },
     {
       "date": "2026-11-13",
       "note": "First release: one SessionStart hook that tells the agent which of the repository's operating documents exist and to read the ones that govern the change before changing anything. It adds nothing when it finds none, and at most 1,200 characters when it does."
     }
   ],
-  "version": "0.2.0",
+  "version": "0.1.0",
   "author": "GuildBuild",
   "license": "Apache-2.0",
   "branches": [

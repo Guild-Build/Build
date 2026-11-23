@@ -3,7 +3,6 @@
 // CLAUDE_PROJECT_DIR set to it and the hook input on standard input. No model, network or paid service is used.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync,
   truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -15,18 +14,12 @@ import { cleanGitEnv } from './git-env.mjs';
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const BUNDLE = join(repo, 'bundles/runbook-first');
 const HOOK = join(BUNDLE, 'scripts/operating-docs-notice.sh');
-// The 0.1.0 script, a byte copy of Build 0c02fe5's, and the eight outputs saved from it before 0.2.0 changed the script.
-const SAVED = join(repo, 'tests/fixtures/operating-docs-notice-0.1.0');
-const OLD_HOOK = join(SAVED, 'operating-docs-notice.sh');
 const INPUT = JSON.stringify({ session_id: 'test', cwd: '', hook_event_name: 'SessionStart', source: 'startup' });
 const READ = 'Before you change anything, read the ones that govern the requested change.';
 const REPLY = 'Run the checks they name, and say in your reply which of these documents you read.';
 const context = list => `Operating documents in this repository: ${list}.\n${READ}\n${REPLY}`;
 const LIMIT = 1200;
 const FIXED = context('').length; // the sentences around the list: 200 characters
-// How 0.2.0 marks what else the README names: a file, and a folder of documents.
-const named = path => `${path} (named in the README)`;
-const docFolder = path => `${path} (folder of documents, named in the README)`;
 // The list the hook should give, from its rule: every entry when the whole list fits, ending with ", and N more" for
 // documents found beyond the eight listed; otherwise each entry, in order, that fits after the entries kept before it
 // together with that ending, whose N counts every entry and document left out. The ending's length depends only on
@@ -44,12 +37,12 @@ function expectedList(entries, beyondEight = 0) {
   throw new Error('more than 99 left out');
 }
 // A path of exactly `length` characters that a README can point to: folders of 150 characters, then a file name that
-// starts with `stem` and ends in .md (or, with no ending, a folder name).
-function docPath(length, stem = 'runbook', ending = '.md') {
+// starts with "runbook".
+function docPath(length) {
   const folders = [];
   let rest = length;
   while (rest > 211) { folders.push(String.fromCharCode(97 + folders.length).repeat(150)); rest -= 151; }
-  return [...folders, `${stem}-${'c'.repeat(rest - stem.length - 1 - ending.length)}${ending}`].join('/');
+  return [...folders, `runbook-${'c'.repeat(rest - 11)}.md`].join('/');
 }
 const asRoot = process.getuid?.() === 0;
 // The bash the hook runs under, found before any recording folder goes first on PATH.
@@ -93,19 +86,17 @@ function recorder() {
   }
   return recordingPath;
 }
-// Runs the hook as Claude Code does (or, with hook, another script such as the saved 0.1.0 one, and with vars, more
-// environment variables). Returns its exit status
-// and signal, its standard output and context text (null when it printed nothing), its standard error, how long it
-// took, and, with record, every command it ran as [name, ...arguments].
-function run(dir, { cwd = dir, projectDir = dir, record = false, timeout = 10_000, hook = HOOK, vars = {} } = {}) {
-  const extra = projectDir === null ? { ...vars } : { ...vars, CLAUDE_PROJECT_DIR: projectDir };
+// Runs the hook as Claude Code does. Returns its exit status and signal, its context text (null when it printed
+// nothing), its standard error, how long it took, and, with record, every command it ran as [name, ...arguments].
+function run(dir, { cwd = dir, projectDir = dir, record = false, timeout = 10_000 } = {}) {
+  const extra = projectDir === null ? {} : { CLAUDE_PROJECT_DIR: projectDir };
   const calls = record ? join(mkdtempSync(join(tmpdir(), 'docs-notice-calls-')), 'calls') : null;
   if (record) Object.assign(extra, { PATH: `${recorder()}:${process.env.PATH}`, DOCS_NOTICE_CALLS: calls });
   const started = Date.now();
-  const r = spawnSync(BASH, [hook], { cwd, encoding: 'utf8', input: INPUT, timeout, env: env(dir, extra) });
+  const r = spawnSync(BASH, [HOOK], { cwd, encoding: 'utf8', input: INPUT, timeout, env: env(dir, extra) });
   const ms = Date.now() - started;
   const ran = record && existsSync(calls) ? readFileSync(calls, 'utf8').split('\n').filter(Boolean).map(line => line.split('\x1f')) : [];
-  const base = { status: r.status, signal: r.signal, ms, stderr: r.stderr, stdout: r.stdout, calls: ran };
+  const base = { status: r.status, signal: r.signal, ms, stderr: r.stderr, calls: ran };
   if (r.stdout === '') return { ...base, text: null };
   const out = JSON.parse(r.stdout);
   assert.deepEqual(Object.keys(out), ['hookSpecificOutput']);
@@ -114,15 +105,12 @@ function run(dir, { cwd = dir, projectDir = dir, record = false, timeout = 10_00
   return { ...base, text: out.hookSpecificOutput.additionalContext };
 }
 // The commands the hook may run, with the only arguments it may give them: git to find the top folder, head for the
-// README's first 64 KB, find for the entries of a folder the README names (run inside that folder, and only when there
-// is a README), and grep, head -n 20 and tr on standard input. Returns how many times the README was read: twice when
-// there is one, once for the pointers to conventional documents and once for the other names it holds.
+// README's first 64 KB, and grep, head -n 20 and tr on standard input. Returns how many times the README was read.
 function onlyReadsReadme(calls, readme) {
   let heads = 0;
   for (const [name, ...args] of calls) {
     if (name === 'head' && args[0] === '-n') assert.deepEqual(args, ['-n', '20']);
     else if (name === 'head') { assert.deepEqual(args, ['-c', '65536', readme]); heads++; }
-    else if (name === 'find') assert.ok(readme, 'find with no README'), assert.deepEqual(args, ['.', '-mindepth', '1', '-maxdepth', '1', '-print0']);
     else if (name === 'grep') assert.deepEqual(args.slice(0, 4), ['-a', '-o', '-i', '-E']), assert.equal(args.length, 5);
     else if (name === 'tr') assert.deepEqual(args, ['A-Z', 'a-z']);
     else if (name === 'git') assert.deepEqual(args, ['rev-parse', '--show-toplevel']);
@@ -213,19 +201,14 @@ test('unreadable entries, a pipe and a folder under conventional names are left 
 });
 
 test('a very large README: no command reads past its first 64 KB, a pointer after it is not followed, and no command reads a 2 GB runbook', t => {
-  const dir = gitRepo(folder(t, { 'CONTRIBUTING.md': 'How to contribute.\n', 'ops/runbook-late.md': 'x', 'ops/runbook-early.md': 'x', 'ops/notes-late.md': 'x' }));
-  writeFileSync(join(dir, 'README.md'), `See ops/runbook-early.md, ops/notes.md and guide/ first.\n${'filler line\n'.repeat(400_000)}See ops/runbook-late.md, ops/notes-late.md and CONTRIBUTING.md.\n`);
+  const dir = gitRepo(folder(t, { 'CONTRIBUTING.md': 'How to contribute.\n', 'ops/runbook-late.md': 'x', 'ops/runbook-early.md': 'x' }));
+  writeFileSync(join(dir, 'README.md'), `See ops/runbook-early.md.\n${'filler line\n'.repeat(400_000)}See ops/runbook-late.md and CONTRIBUTING.md.\n`);
   mkdirSync(join(dir, 'docs'));
-  mkdirSync(join(dir, 'guide'));
-  // 2 GB, sparse: the runbook, a file the README names, and both files of a folder it names.
-  for (const big of ['docs/RUNBOOK.md', 'ops/notes.md', 'guide/a.md', 'guide/b.txt']) {
-    writeFileSync(join(dir, big), '');
-    truncateSync(join(dir, big), 2 * 1024 ** 3);
-  }
+  writeFileSync(join(dir, 'docs/RUNBOOK.md'), '');
+  truncateSync(join(dir, 'docs/RUNBOOK.md'), 2 * 1024 ** 3); // 2 GB, sparse
   const r = run(dir, { record: true });
-  assert.equal(r.text, context('docs/RUNBOOK.md (runbook), CONTRIBUTING.md (contributing guide), ops/runbook-early.md (runbook), '
-    + `${named('ops/notes.md')}, ${docFolder('guide/')}, README.md (points to ops/runbook-early.md)`));
-  assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 2);
+  assert.equal(r.text, context('docs/RUNBOOK.md (runbook), CONTRIBUTING.md (contributing guide), ops/runbook-early.md (runbook), README.md (points to ops/runbook-early.md)'));
+  assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 1);
   // With both files in place, the hook and the commands it starts use less than half a second of CPU time.
   const cpu = cpuSeconds(dir);
   assert.ok(cpu < 0.5, `${cpu} s of CPU time`);
@@ -233,37 +216,31 @@ test('a very large README: no command reads past its first 64 KB, a pointer afte
 
 test('no command reads any file but the README, and the README only to its first 64 KB', t => {
   const dir = gitRepo(folder(t, { 'AGENTS.md': 'a\n', 'CLAUDE.md': 'c\n', '.github/copilot-instructions.md': 'g\n', 'docs/RUNBOOK.md': 'r\n',
-    'CONTRIBUTING.md': 'c\n', 'ops/runbook-x.md': 'x\n', 'MAINTAINING.md': 'm\n', 'handbook/a.md': 'a\n', 'handbook/b.rst': 'b\n',
-    'README.md': 'See AGENTS.md, RUNBOOK.md and ops/runbook-x.md; MAINTAINING.md and `handbook/`.\n' }));
+    'CONTRIBUTING.md': 'c\n', 'ops/runbook-x.md': 'x\n', 'README.md': 'See AGENTS.md, RUNBOOK.md and ops/runbook-x.md.\n' }));
   const r = run(dir, { record: true });
   assert.match(r.text, /README\.md \(points to AGENTS\.md, docs\/RUNBOOK\.md, ops\/runbook-x\.md\)/);
-  assert.match(r.text, /MAINTAINING\.md \(named in the README\), handbook\/ \(folder of documents, named in the README\)/);
-  assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 2);
+  assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 1);
 });
 
 // What the shell itself would open is seen through the entry: an open of a pipe blocks until the timeout, and an open
 // of a file or folder nobody may read fails with an error on standard error. Each kind is put under every conventional
-// name, under a name the README points to, under another file name it holds, and in a folder it names, next to a
-// readable document. Entries of a folder are tested by type only: a pipe leaves the folder out, while an unreadable
-// file or folder in it does not.
+// name and under a name the README points to.
 test('under every conventional and pointed name, a pipe is never opened, and an unreadable file or folder causes no error and no command', t => {
   const names = ['AGENTS.md', 'CLAUDE.md', '.github/copilot-instructions.md', 'RUNBOOK.md', 'runbook.md', 'docs/RUNBOOK.md', 'docs/runbook.md',
-    'CONTRIBUTING.md', 'docs/CONTRIBUTING.md', '.github/CONTRIBUTING.md', 'ops/runbook-x.md', 'ops/notes.md', 'guide/a.md'];
-  const listed = { pipe: null, 'unreadable file': context(docFolder('guide/')), 'unreadable folder': context(docFolder('guide/')) };
+    'CONTRIBUTING.md', 'docs/CONTRIBUTING.md', '.github/CONTRIBUTING.md', 'ops/runbook-x.md'];
   const kinds = { pipe: path => assert.equal(spawnSync('mkfifo', [path]).status, 0),
     'unreadable file': path => { writeFileSync(path, 'x'); chmodSync(path, 0); },
     'unreadable folder': path => { mkdirSync(path); chmodSync(path, 0); } };
   for (const [kind, make] of Object.entries(kinds)) {
     if (asRoot && kind !== 'pipe') continue; // root may open what nobody else may
-    const dir = gitRepo(folder(t, { 'README.md': 'See ops/runbook-x.md, AGENTS.md, docs/RUNBOOK.md and CONTRIBUTING.md; ops/notes.md and guide/ too.\n',
-      'guide/b.md': 'b\n' }));
+    const dir = gitRepo(folder(t, { 'README.md': 'See ops/runbook-x.md, AGENTS.md, docs/RUNBOOK.md and CONTRIBUTING.md.\n' }));
     for (const name of names) {
       mkdirSync(dirname(join(dir, name)), { recursive: true });
       if (!existsSync(join(dir, name))) make(join(dir, name)); // RUNBOOK.md and runbook.md are one name on a case-insensitive disk
     }
     const r = run(dir, { record: true, timeout: 5000 });
-    assert.deepEqual([r.status, r.signal, r.text, r.stderr], [0, null, listed[kind], ''], kind);
-    assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 2, kind);
+    assert.deepEqual([r.status, r.signal, r.text, r.stderr], [0, null, null, ''], kind);
+    assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 1, kind);
   }
 });
 
@@ -419,490 +396,24 @@ test('in each of the Client Deployment Trial\'s eight repositories the hook name
   assert.equal(expected.length, 264);
 });
 
-// Rule 1 of 0.2.0: on the home trial its whole output is what 0.1.0 wrote. The saved copies are the standard output of
-// the 0.1.0 script at Build 0c02fe5, run in each case's repository, built by its fixture in a new empty folder with a
-// clean git environment, before the script was changed.
-test('on each of the Client Deployment Trial\'s eight repositories the whole output is byte for byte what 0.1.0 wrote', t => {
-  const cases = join(repo, 'content/trials/client-deployment-v1/cases');
-  const saved = SAVED;
-  const names = readdirSync(cases).sort();
-  assert.deepEqual(readdirSync(saved).filter(name => name.endsWith('.json')).sort(), names.map(name => `${name}.json`));
-  for (const name of names) {
-    const dir = folder(t);
-    const fx = spawnSync('bash', ['-e', join(cases, name, 'fixture.sh')], { cwd: dir, encoding: 'utf8', env: env(dir) });
-    assert.equal(fx.status, 0, fx.stderr);
-    assert.equal(run(dir).stdout, readFileSync(join(saved, `${name}.json`), 'utf8'), name);
-  }
-  assert.equal(names.length, 8);
-});
-
-// Rule 2: a file the README names is listed when it exists, with one of the five endings in any case. A name is a whole
-// run of name characters: a sentence's closing period is not part of it, a longer ending (kept.md.bak) is not a
-// documentation ending, nor is a name wrapped in underscores (_kept.md_, as Markdown emphasis), a leading ./ is
-// dropped, and an absolute name, one holding .., and one inside a web address are refused.
-test('a file the README names is listed when it exists, under each of the five endings', t => {
-  const docs = ['MAINTAINING.md', 'guide/Setup.markdown', 'docs/api.rst', 'notes/changes.txt', 'docs/ops.adoc', 'UPPER.MD', 'ops/handover.md', 'local.md'];
-  const files = Object.fromEntries([...docs, 'kept.md', 'kept.md.bak', 'abs.md', 'up.md', 'url.md', 'docs/x.md'].map(name => [name, 'x\n']));
-  files['README.md'] = 'MAINTAINING.md, guide/Setup.markdown, docs/api.rst, notes/changes.txt and docs/ops.adoc. Also UPPER.MD; see ops/handover.md.\n'
-    + 'Then ./local.md, missing.md, kept.md.bak, _kept.md_, /abs.md, docs/../up.md and https://example.com/url.md.\n';
-  assert.equal(run(gitRepo(folder(t, files))).text, context(docs.map(named).join(', ')));
-  // Each of the five endings in mixed case.
-  const mixed = ['one.Md', 'two.MaRkDoWn', 'three.RsT', 'four.TxT', 'five.AdOc'];
-  const dir = gitRepo(folder(t, { ...Object.fromEntries(mixed.map(name => [name, 'x\n'])), 'README.md': `${mixed.join(' ')}\n` }));
-  assert.equal(run(dir).text, context(mixed.map(named).join(', ')));
-});
-
-// The first 20 distinct file names count, in order of first appearance, whether or not they are then listed: missing,
-// excluded, absolute or the README itself. A repeat, with or without ./, is not a new name, and a run that does not end
-// in a documentation ending is not a file name. Folder names are counted apart.
-test('only the first 20 distinct file names the README holds count', t => {
-  const missing = Array.from({ length: 15 }, (_, i) => `n${String(i + 2).padStart(2, '0')}.md`);
-  const dir = gitRepo(folder(t, { 'n01.md': 'x', 'LICENSE.md': 'x', 'abs.md': 'x', 'late2.md': 'x', 'late.md': 'x', 'guide/a.md': 'x',
-    'README.md': `n01.md n01.md ./n01.md ${missing.join(' ')} LICENSE.md /abs.md README.md n01.md x.md.bak and/or late2.md late.md guide/\n` }));
-  assert.equal(run(dir).text, context([named('n01.md'), named('late2.md'), docFolder('guide/')].join(', ')));
-});
-
-// Rule 3: legal and community files are left out by the name without its ending, in any case; nothing else is.
-test('legal and community files and the README itself are left out, and nothing else', t => {
-  const left = ['LiCeNsE.md', 'Licence.txt', 'CoPyInG.rst', 'Notice.ADOC', 'Code_Of_Conduct.md', 'CODE-of-conduct.markdown', 'docs/SecURITY.md', 'AuThOrS.txt'];
-  const kept = ['license.old.md', 'docs/LICENSE-notes.md', 'docs/README.md'];
-  const files = Object.fromEntries([...left, ...kept].map(name => [name, 'x\n']));
-  files['README.md'] = `Read ${[...left, 'README.md', './README.md', ...kept].join(', ')}.\n`;
-  assert.equal(run(gitRepo(folder(t, files))).text, context(kept.map(named).join(', ')));
-});
-
-// Same file tests as 0.1.0: a symbolic link as the file or on its path is left out, and nothing is read through it.
-test('a file the README names is left out when it or a folder on its path is a symbolic link', t => {
-  const dir = gitRepo(folder(t, { 'real/notes.md': 'x\n', 'kept.md': 'x\n', 'README.md': 'See linked.md, via/notes.md and kept.md.\n' }));
-  symlinkSync('real/notes.md', join(dir, 'linked.md'));
-  symlinkSync('real', join(dir, 'via'));
-  const r = run(dir, { record: true });
-  assert.equal(r.text, context(named('kept.md')));
-  assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 2);
-});
-
-// Rule 4: a folder name ends in / with no name character after it, and the folder is listed, as one entry, when it is a
-// folder of documents: not a symbolic link nor under one, at most 200 entries, every entry directly in it (hidden ones
-// included) a folder or a regular file with a documentation ending, and at least one such file. Its entries are tested
-// by name and type only: the hook reads only the README. A folder whose entries cannot be listed is left out, with no
-// error.
-test('a folder the README names is listed as one entry when it is a folder of documents', t => {
-  const files = { 'handbook/a.md': 'x', 'handbook/b.rst': 'x', 'src/main.js': 'x', 'mixed/a.md': 'x', 'mixed/run.sh': 'x', 'hidden/a.md': 'x',
-    'hidden/.DS_Store': 'x', 'hiddendoc/.notes.md': 'x', 'hiddendoc/b.md': 'x', 'nested/a.md': 'x', 'nested/code/main.js': 'x',
-    'onlyfolders/sub/a.md': 'x', 'real/docs/a.md': 'x', 'linkentry/a.md': 'x', 'docs/guide.md': 'x', 'period/a.md': 'x', 'handbook2/a.md': 'x',
-    'locked/a.md': 'x' };
-  for (let i = 0; i < 201; i++) files[`big/${String(i).padStart(3, '0')}.md`] = 'x';
-  for (let i = 0; i < 200; i++) files[`full/${String(i).padStart(3, '0')}.md`] = 'x';
-  files['README.md'] = 'handbook/ src/ mixed/ empty/ hidden/ hiddendoc/ nested/ onlyfolders/ linked/ via/docs/ linkentry/ big/ full/ locked/\n'
-    + 'docs/guide.md, then period/. and https://example.com/handbook2/\n';
-  const dir = gitRepo(folder(t, files));
-  mkdirSync(join(dir, 'empty'));
-  symlinkSync('handbook', join(dir, 'linked'));
-  symlinkSync('real', join(dir, 'via'));
-  symlinkSync('a.md', join(dir, 'linkentry/b.md'));
-  chmodSync(join(dir, 'locked'), 0); // root may still list it
-  const r = run(dir, { record: true });
-  assert.deepEqual([r.status, r.signal, r.stderr], [0, null, '']);
-  assert.equal(r.text, context([docFolder('handbook/'), docFolder('hiddendoc/'), docFolder('nested/'), docFolder('full/'), ...(asRoot ? [docFolder('locked/')] : []),
-    named('docs/guide.md')].join(', ')));
-  assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 2);
-});
-
-// The first 20 distinct folder names count, in order of first appearance. A repeat, with or without ./, is not a new
-// name; ./ alone and an absolute name count though neither is listed. The 20th distinct name, after the repeats, is a
-// folder of documents and is listed; the 21st is one too and is not. File names are counted apart.
-test('only the first 20 distinct folder names the README holds count', t => {
-  const missing = Array.from({ length: 16 }, (_, i) => `f${String(i + 2).padStart(2, '0')}/`);
-  const dir = gitRepo(folder(t, { 'f01/a.md': 'x', 'k20/a.md': 'x', 'g21/a.md': 'x', 'late.md': 'x',
-    'README.md': `f01/ f01/ ./f01/ ./ /abs/ ${missing.join(' ')} f01/ k20/ g21/ late.md\n` }));
-  assert.equal(run(dir).text, context([docFolder('f01/'), docFolder('k20/'), named('late.md')].join(', ')));
-});
-
-// The fixed order: the documents 0.1.0 lists, as 0.1.0 orders them; then the new entries, files and folders together,
-// in order of first appearance; then the README's own entry, which names only documents of 0.1.0's kinds and appears
-// only when the README points to one. A file listed already is not listed twice; a file in a listed folder may be.
-test('the documents 0.1.0 lists come first, then the new entries in the README\'s order, then the README', t => {
-  const dir = gitRepo(folder(t, { 'AGENTS.md': 'x', 'docs/RUNBOOK.md': 'x', 'MAINTAINING.md': 'x', 'handbook/a.md': 'x', 'ops/runbook-x.md': 'x',
-    'README.md': 'Start with handbook/ and MAINTAINING.md; deploys follow docs/RUNBOOK.md and ops/runbook-x.md. See handbook/a.md.\n' }));
-  assert.equal(run(dir).text, context(['AGENTS.md (agent instructions)', 'docs/RUNBOOK.md (runbook)', 'ops/runbook-x.md (runbook)', docFolder('handbook/'),
-    named('MAINTAINING.md'), named('handbook/a.md'), 'README.md (points to docs/RUNBOOK.md, ops/runbook-x.md)'].join(', ')));
-  writeFileSync(join(dir, 'README.md'), 'Read MAINTAINING.md first.\n');
-  assert.equal(run(dir).text, context(['AGENTS.md (agent instructions)', 'docs/RUNBOOK.md (runbook)', named('MAINTAINING.md')].join(', ')));
-});
-
-test('with more than eight documents the ones 0.1.0 lists are kept and the new entries beyond eight are counted', t => {
-  const conventional = ['AGENTS.md (agent instructions)', 'CLAUDE.md (agent instructions)', '.github/copilot-instructions.md (agent instructions)',
-    'RUNBOOK.md (runbook)', 'CONTRIBUTING.md (contributing guide)', 'docs/CONTRIBUTING.md (contributing guide)'];
-  const files = Object.fromEntries(conventional.map(entry => [entry.split(' ')[0], 'x']));
-  Object.assign(files, { 'n1.md': 'x', 'n2.md': 'x', 'n3.md': 'x', 'n4.md': 'x', 'handbook/a.md': 'x', 'README.md': 'n1.md n2.md handbook/ n3.md n4.md CONTRIBUTING.md\n' });
-  const dir = gitRepo(folder(t, files));
-  assert.equal(run(dir).text, context([...conventional, named('n1.md'), named('n2.md'), 'README.md (points to CONTRIBUTING.md), and 3 more'].join(', ')));
-  // With eight documents by convention, every new entry is counted.
-  for (const name of ['docs/RUNBOOK.md', '.github/CONTRIBUTING.md']) writeFileSync(join(dir, name), 'x');
-  assert.equal(run(dir).text, context([...conventional.slice(0, 4), 'docs/RUNBOOK.md (runbook)', ...conventional.slice(4), '.github/CONTRIBUTING.md (contributing guide)',
-    'README.md (points to CONTRIBUTING.md), and 5 more'].join(', ')));
-});
-
-// The bound with long new names, swept around the lengths where an entry stops fitting: for a file and a folder the
-// README names, first and after a document found by convention, the text is what the rule gives, the entry is listed
-// exactly when the text listing it is at most 1,200 characters, and no name is cut.
-test('with long names the README holds, the text stays within 1,200 characters and a name is listed only whole', t => {
-  const dir = mkdtempSync('/tmp/dn-'); // a short top folder, so that the longest paths stay within the system's path limit
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  gitRepo(dir);
-  const last = {};
-  for (const kind of ['file', 'folder']) {
-    for (const before of [[], ['AGENTS.md (agent instructions)']]) {
-      if (before.length) writeFileSync(join(dir, 'AGENTS.md'), 'x\n'); else rmSync(join(dir, 'AGENTS.md'), { force: true });
-      for (let length = 880; length <= 990; length++) {
-        const path = kind === 'file' ? docPath(length, 'notes') : docPath(length, 'guide', '');
-        const where = `${kind}, ${before.length ? 'later' : 'first'}, ${length} characters`;
-        mkdirSync(join(dir, kind === 'file' ? dirname(path) : path), { recursive: true });
-        writeFileSync(join(dir, kind === 'file' ? path : `${path}/a.md`), 'x');
-        writeFileSync(join(dir, 'README.md'), kind === 'file' ? `${path}\n` : `${path}/\n`);
-        const entry = kind === 'file' ? named(path) : docFolder(`${path}/`);
-        const r = run(dir);
-        assert.equal(r.status, 0, where);
-        assert.equal(r.text, context(expectedList([...before, entry])), where);
-        const listed = r.text.includes(entry);
-        assert.equal(listed, FIXED + [...before, entry].join(', ').length <= LIMIT, where);
-        assert.doesNotMatch(r.text.split(path).join(''), /([a-z])\1{19}/, `${where}: a name is cut`);
-        if (listed) last[`${kind}, ${before.length}`] = length;
-      }
-    }
-  }
-  assert.deepEqual(last, { 'file, 0': 978, 'file, 1': 946, 'folder, 0': 956, 'folder, 1': 924 });
-});
-
-// The saved 0.1.0 script is a byte copy of the one at Build 0c02fe5 (git show 0c02fe5:bundles/runbook-first/scripts/
-// operating-docs-notice.sh), which the tests below compare 0.2.0 against.
-test('the saved 0.1.0 script is the one at Build 0c02fe5', () => {
-  const digest = createHash('sha256').update(readFileSync(OLD_HOOK)).digest('hex');
-  assert.ok(digest.startsWith('275248f57ead3180'), digest);
-});
-
-// The list 0.1.0 writes, read back from a context text: its entries in order and its count (0 without one).
-const ENTRY = /\S+ \((?:agent instructions|runbook|contributing guide|named in the README|folder of documents, named in the README|points to [^()]*)\)/g;
-function parseList(text) {
-  if (text === null) return { entries: [], count: 0 };
-  const list = text.split('\n')[0].replace(/^Operating documents in this repository: /, '').replace(/\.$/, '');
-  const tooLong = /^(\d+), with names too long to list$/.exec(list);
-  if (tooLong) return { entries: [], count: Number(tooLong[1]) };
-  const ending = /^(.*), and (\d+) more$/.exec(list);
-  const body = ending ? ending[1] : list;
-  const entries = body.match(ENTRY) || [];
-  assert.equal(entries.join(', '), body, 'every character of the list is in an entry');
-  return { entries, count: ending ? Number(ending[2]) : 0 };
-}
-// The rule for the entries 0.2.0 adds (the rulings on finding 1 of both reviews), from the list 0.1.0 writes (t1), the
-// added entries that are within the eight documents listed (in the order the README names them) and how many more were
-// added beyond the eight: the entries t1 shows stay, the README's own entry last, and the ending counts every document
-// and entry left out. The added entries go between t1's documents and the README's entry, admitted by 0.1.0's own
-// two-pass procedure: an entry stays when it fits after the ones kept before it together with the ending sized for a
-// one-digit count, and, if the count then has two digits, the whole pass is made again with the ending sized for two.
-// The procedure is the rule, so this mirrors it. Returns the list, or null when even that count does not fit beside
-// what t1 shows and the text stays 0.1.0's.
-function withAdded(t1, added, addedExtra) {
-  const own = t1.entries.find(entry => entry.includes(' (points to '));
-  const docs = t1.entries.filter(entry => entry !== own);
-  const compose = (picked, n) => {
-    const list = [...docs, ...picked, ...(own ? [own] : [])].join(', ');
-    return n > 0 ? (list ? `${list}, and ${n} more` : `${n}, with names too long to list`) : list;
-  };
-  let out = compose(added, t1.count + addedExtra);
-  if (FIXED + out.length > LIMIT) {
-    let picked = [];
-    let left = 0;
-    for (const digits of [1, 2]) {
-      picked = [];
-      left = t1.count + addedExtra;
-      for (const entry of added) if (FIXED + compose([...picked, entry], 0).length + 11 + digits <= LIMIT) picked.push(entry); else left++;
-      if (String(left).length <= digits) break;
-    }
-    out = compose(picked, left);
-  }
-  return FIXED + out.length <= LIMIT ? out : null;
-}
-
-// The review's two reproductions. In the first, 0.1.0 shows AGENTS.md and the README's own entry; 0.2.0 keeps both, the
-// README's entry last, and fits four of the five long names the README holds, counting the fifth. In the second, 0.1.0
-// shows eight runbooks and "and 1 more" in exactly 1,200 characters; twelve more names would make the count two digits,
-// which does not fit beside the eight, so the text is 0.1.0's, byte for byte.
-test('the entries 0.2.0 adds take only the room the 0.1.0 text leaves: the review\'s two reproductions', t => {
-  const long = Array.from({ length: 5 }, (_, i) => `${i}${'a'.repeat(162)}.md`);
-  let dir = folder(t, Object.fromEntries(['AGENTS.md', ...long].map(name => [name, 'x'])));
-  writeFileSync(join(dir, 'README.md'), ['AGENTS.md', ...long].join(' '));
-  const old = run(dir, { hook: OLD_HOOK });
-  assert.equal(old.text, context('AGENTS.md (agent instructions), README.md (points to AGENTS.md)'));
-  assert.equal(old.text.length, 263);
-  const r = run(dir);
-  assert.equal(r.text, context(['AGENTS.md (agent instructions)', ...long.slice(0, 4).map(named), 'README.md (points to AGENTS.md), and 1 more'].join(', ')));
-  assert.equal(r.text.length, 1035);
-  const runbooks = [110, 110, 110, 110, 110, 110, 110, 124].map((n, i) => `runbook-${i}${'a'.repeat(n - 12)}.md`);
-  const others = Array.from({ length: 12 }, (_, i) => `other${i}.md`);
-  dir = folder(t, Object.fromEntries([...runbooks, ...others].map(name => [name, 'x'])));
-  writeFileSync(join(dir, 'README.md'), [...runbooks, ...others].join(' '));
-  const before = run(dir, { hook: OLD_HOOK });
-  assert.equal(before.text, context(`${runbooks.map(name => `${name} (runbook)`).join(', ')}, and 1 more`));
-  assert.equal(before.text.length, LIMIT);
-  assert.equal(run(dir).stdout, before.stdout);
-});
-
-// The room, to the character. AGENTS.md and the README's own entry take 63 characters of the 1,000 with their
-// separators, and each added file of length L takes L + 24. (a) Four files that bring the list to exactly 1,000, with
-// nothing left out, are all shown, with no ending. (b) One character more, and the fourth is counted instead: "and 1
-// more". (c) A fourth file that would bring the list to 989 leaves 11 characters, one short of the ending ", and 1
-// more", so it is counted, while a shorter fifth after it still fits.
-test('the entries 0.2.0 adds use the room 0.1.0 leaves to the character', t => {
-  const note = (i, length) => `notes/${i}${'q'.repeat(length - 10)}.md`;
-  const check = (lengths, shown, label) => {
-    const names = lengths.map((length, i) => note(i, length));
-    const dir = folder(t, Object.fromEntries(['AGENTS.md', ...names].map(name => [name, 'x'])));
-    writeFileSync(join(dir, 'README.md'), ['AGENTS.md', ...names].join(' '));
-    const left = names.length - shown.length;
-    const list = ['AGENTS.md (agent instructions)', ...shown.map(i => named(names[i])), 'README.md (points to AGENTS.md)'].join(', ') + (left ? `, and ${left} more` : '');
-    assert.equal(run(dir).text, context(list), label);
-    return list.length;
-  };
-  assert.equal(check([210, 210, 210, 211], [0, 1, 2, 3], '(a)'), 1000);
-  assert.equal(check([210, 210, 210, 212], [0, 1, 2], '(b)'), 777);
-  assert.equal(check([207, 207, 208, 208, 200], [0, 1, 2, 4], '(c)'), 993);
-});
-
-// An accepted limit of 0.2.0 (the ruling on finding 1 of the second review). Added entries are admitted by 0.1.0's own
-// two-pass procedure, so the second pass can leave out an entry that would fit beside a count one digit shorter. Here
-// the first pass, with room for a one-digit count, admits the 662-character entry and leaves 12 out; the second, with
-// room for two digits, drops it and admits three of the four smaller entries, leaving 10 out, although the fourth would
-// fit beside "and 9 more" in exactly 1,200 characters. The test pins the behaviour as it is, so that a change to it is
-// deliberate.
-test('an accepted limit: the second pass can leave out an entry that would fit beside a one-digit count', t => {
-  const legacy = [0, 1, 2].map(i => `runbook-${i}-${'a'.repeat(27)}.md`);
-  const added = [`${['p', 'p', 'p'].map(c => c.repeat(150)).join('/')}/n0-${'a'.repeat(203)}.md`,
-    ...[147, 147, 148, 148].map((length, i) => `n${i + 1}-${'a'.repeat(length - 6)}.md`)];
-  const extra = Array.from({ length: 8 }, (_, i) => `extra${i}.md`);
-  assert.deepEqual(added.map(name => name.length), [662, 147, 147, 148, 148]);
-  const dir = folder(t, Object.fromEntries([...legacy, ...added, ...extra].map(name => [name, 'x'])));
-  writeFileSync(join(dir, 'README.md'), [...legacy, ...added, ...extra].join(' '));
-  const docs = legacy.map(name => `${name} (runbook)`);
-  const own = `README.md (points to ${legacy.join(', ')})`;
-  const r = run(dir);
-  assert.equal(r.text, context(`${[...docs, ...added.slice(1, 4).map(named), own].join(', ')}, and 10 more`));
-  assert.equal(r.text.length, 1029);
-  // What a fit that sized the ending for each count could show: the fourth smaller entry too, in exactly 1,200.
-  assert.equal(context(`${[...docs, ...added.slice(1, 5).map(named), own].join(', ')}, and 9 more`).length, LIMIT);
-});
-
-// The ruling on finding 1, held against the saved 0.1.0 script over generated repositories, from a fixed seed. Each
-// has some of the conventional documents (one spelling of each), runbooks the README points to by path, file names of
-// conventional documents it points to, and new files and folders of documents it names, in a shuffled order and with
-// names long enough to reach the 1,200 characters; a fifth are tight: eight runbooks that fill 0.1.0's list to within
-// 12 characters of its 1,000 (half of them to exactly 1,000), and 4 to 13 new names beyond them. For each: (i) every entry 0.1.0 shows is shown,
-// whole and in order, with the README's entry last; (ii) the other entries are the new ones, in the order the README
-// names them, between the documents and the README's entry; (iii) unless the text is 0.1.0's, the count is 0.1.0's
-// plus the new entries not shown; (iv) the text is 0.1.0's, with new entries, only when that count does not fit beside
-// what 0.1.0 shows; (v) with no new entry, the output is 0.1.0's byte for byte. Those checks, and that the text is
-// within 1,200 characters, hold whatever procedure admits the new entries, and are made on their own. Then the text
-// must be exactly what the rule's two-pass procedure gives, which withAdded mirrors.
-test('the entries 0.2.0 adds never displace what 0.1.0 shows: a seeded comparison with the 0.1.0 script', t => {
-  let seed = 20261118;
-  const rand = () => { seed = (seed + 0x6d2b79f5) | 0; let x = Math.imul(seed ^ (seed >>> 15), 1 | seed); x ^= x + Math.imul(x ^ (x >>> 7), 61 | x); return ((x ^ (x >>> 14)) >>> 0) / 4294967296; };
-  const pick = n => Math.floor(rand() * n);
-  const endings = ['.md', '.markdown', '.rst', '.txt', '.adoc'];
-  const places = [['AGENTS.md'], ['CLAUDE.md'], ['.github/copilot-instructions.md'], ['RUNBOOK.md', 'runbook.md'], ['docs/RUNBOOK.md', 'docs/runbook.md'],
-    ['CONTRIBUTING.md'], ['docs/CONTRIBUTING.md'], ['.github/CONTRIBUTING.md']];
-  const seen = { v: 0, all: 0, some: 0, counted: 0, iv: 0, twoDigits: 0, beyondEight: 0, ownWithAdded: 0 };
-  for (let n = 0; n < 200; n++) {
-    const tight = n % 5 === 4;
-    const files = {};
-    const tokens = []; // [name as the README writes it, entry 0.2.0 adds or null]
-    let conventional = 0;
-    if (!tight) {
-      const named = [];
-      for (const place of places) if (rand() < 0.35) { const name = place[pick(place.length)]; files[name] = 'x'; named.push(name); conventional++; }
-      for (const name of named.slice(0, 3)) if (rand() < 0.5) tokens.push([name.split('/').pop(), null]);
-    }
-    // Runbooks the README points to by path, of the given lengths (16 at least); in a tight repository, eight that fill
-    // 0.1.0's list, with its ending ", and 1 more" for the README's own entry, to 988 to 1,000 characters.
-    const lengths = tight ? [110, 110, 110, 110, 110, 110, 110, 124 - (rand() < 0.5 ? 0 : pick(13))]
-      : Array.from({ length: pick(9) }, () => 16 + pick(pick(3) ? 40 : 200));
-    const runbooks = lengths.map((length, i) => `ops/runbook-${i}${'x'.repeat(length - 16)}.md`);
-    for (const name of runbooks) { files[name] = 'x'; tokens.push([name, null]); }
-    const found = conventional + runbooks.length;
-    // New files and folders of documents.
-    const none = n % 8 === 1; // one in eight names nothing new
-    const nFiles = none ? 0 : tight ? 4 + pick(5) : pick(9);
-    const nFolders = none ? 0 : pick(6);
-    for (let i = 0; i < nFiles; i++) {
-      const name = `notes/n${i}-${'y'.repeat(pick(pick(3) ? 30 : 240))}${endings[pick(5)]}`;
-      files[name] = 'x';
-      tokens.push([name, `${name} (named in the README)`]);
-    }
-    for (let i = 0; i < nFolders; i++) {
-      const name = `manual${i}${'z'.repeat(pick(pick(3) ? 20 : 200))}`;
-      files[`${name}/a.md`] = 'x';
-      if (rand() < 0.5) files[`${name}/b.txt`] = 'x';
-      tokens.push([`${name}/`, `${name}/ (folder of documents, named in the README)`]);
-    }
-    for (let i = tokens.length - 1; i > 0; i--) { const j = pick(i + 1); [tokens[i], tokens[j]] = [tokens[j], tokens[i]]; }
-    files['README.md'] = tokens.map(([name]) => name).join(['\n', ' ', ', '][pick(3)]) + '\n';
-    const dir = folder(t, files);
-    const old = run(dir, { hook: OLD_HOOK });
-    const r = run(dir);
-    const where = `repository ${n}`;
-    assert.deepEqual([old.status, r.status, old.stderr, r.stderr], [0, 0, '', ''], where);
-    assert.ok(r.text === null || r.text.length <= LIMIT, `${where}: within 1,200 characters`);
-    const added = tokens.map(([, entry]) => entry).filter(Boolean);
-    const slots = Math.max(0, 8 - found);
-    const t1 = parseList(old.text);
-    const t2 = parseList(r.text);
-    // (v)
-    if (!added.length) { assert.equal(r.stdout, old.stdout, `${where}: (v)`); seen.v++; continue; }
-    // (i): 0.1.0's entries, whole and in order, the README's entry last.
-    const own = t1.entries.find(entry => entry.includes(' (points to '));
-    const kept = t2.entries.filter(entry => t1.entries.includes(entry));
-    assert.deepEqual(kept, t1.entries, `${where}: (i)`);
-    if (own) assert.equal(t2.entries.at(-1), own, `${where}: (i) the README's entry last`);
-    // (ii): the other entries are new ones, in the README's order, between the documents and the README's entry.
-    const shown = t2.entries.filter(entry => !t1.entries.includes(entry));
-    assert.deepEqual(shown, added.filter(entry => shown.includes(entry)), `${where}: (ii) in the README's order`);
-    const docsEnd = t2.entries.findIndex(entry => shown.includes(entry));
-    if (shown.length) assert.deepEqual(t2.entries.slice(docsEnd, docsEnd + shown.length), shown, `${where}: (ii) together, after the documents`);
-    const honest = (() => { const docs = t1.entries.filter(entry => entry !== own); const list = [...docs, ...(own ? [own] : [])].join(', ');
-      const count = t1.count + added.length; return list ? `${list}, and ${count} more` : `${count}, with names too long to list`; })();
-    if (r.stdout === old.stdout) {
-      // (iv): 0.1.0's text, with new entries, only when the honest count does not fit.
-      assert.ok(FIXED + honest.length > LIMIT, `${where}: (iv)`);
-      seen.iv++;
-    } else {
-      // (iii)
-      assert.equal(t2.count, t1.count + added.length - shown.length, `${where}: (iii)`);
-      if (shown.length === added.length) seen.all++; else if (shown.length) seen.some++; else seen.counted++;
-      if (t1.count < 10 && t2.count >= 10) seen.twoDigits++;
-      if (own && shown.length) seen.ownWithAdded++;
-    }
-    // The text the rule's two-pass procedure gives.
-    const expected = withAdded(t1, added.slice(0, slots), added.length - Math.min(slots, added.length));
-    assert.equal(r.text, expected === null ? old.text : context(expected), `${where}: the procedure`);
-    if (found > 8) seen.beyondEight++;
-  }
-  t.diagnostic(JSON.stringify(seen));
-  // Each kind of case is met at least three times.
-  for (const [kind, count] of Object.entries(seen)) assert.ok(count >= 3, `${kind}: ${count} repositories`);
-});
-
-// The ruling on finding 2 of the first review: a glob reads a whole folder before the 200-entry limit can stop it, and
-// Bash 5 takes tens of microseconds per entry to do so (20 folders of 10,000 entries took 7.6 seconds). So the hook
-// reads a named folder's entries from find, run inside that folder, and stops reading at the 201st, which ends find: a
-// folder holding 250 entries costs no more than one holding 201. The test fails if the shell lists a folder itself
-// again. Every entry keeps its exact name, so a line break in one is no obstacle, and variables that change how ls
-// prints names change nothing.
-test('a named folder\'s entries come from find, which the hook stops at the 201st, never from the shell reading the whole folder', t => {
-  const files = { 'handbook/a.md': 'x', 'handbook/b.rst': 'x', 'odd/good.md': 'x', 'odd/bad\nname.md': 'x' };
-  for (let i = 0; i < 250; i++) files[`big/${String(i).padStart(3, '0')}.md`] = 'x';
-  files['README.md'] = 'See handbook/, big/ and odd/ first.\n';
-  const dir = gitRepo(folder(t, files));
-  const expected = context([docFolder('handbook/'), docFolder('odd/')].join(', '));
-  const r = run(dir, { record: true });
-  assert.deepEqual([r.status, r.stderr, r.text], [0, '', expected]);
-  assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 2);
-  assert.equal(r.calls.filter(([name]) => name === 'find').length, 3, 'one find for each named folder');
-  const forced = run(dir, { vars: { CLICOLOR: '1', CLICOLOR_FORCE: '1', TERM: 'xterm-256color', QUOTING_STYLE: 'shell-always' } });
-  assert.deepEqual([forced.status, forced.stderr, forced.text], [0, '', expected]);
-});
-
-// The ruling on finding 2 of the second review: a folder is judged by its entries' exact names. Its two reproductions,
-// under the C locale with and without colour and quoting variables set: (1) a non-document file named "bad" and a line
-// break, beside a folder "bad?" and ok.md, leaves the folder out (with ls -q both names read as "bad?", the folder);
-// (2) "a", a line break and "b.md", beside a literal "a?b.md", are both documents, so the folder is listed.
-test('a folder is judged by its entries\' exact names: the second review\'s two reproductions', t => {
-  const settings = [{ LC_ALL: 'C' }, { LC_ALL: 'C', CLICOLOR: '1', CLICOLOR_FORCE: '1', TERM: 'xterm-256color', QUOTING_STYLE: 'shell-always' }];
-  const first = gitRepo(folder(t, { 'handbook/ok.md': 'x', 'handbook/bad\n': 'not a document', 'README.md': 'handbook/\n' }));
-  mkdirSync(join(first, 'handbook/bad?'));
-  const second = gitRepo(folder(t, { 'handbook/a\nb.md': 'x', 'handbook/a?b.md': 'x', 'README.md': 'handbook/\n' }));
-  for (const vars of settings) {
-    const one = run(first, { vars });
-    assert.deepEqual([one.status, one.stderr, one.text], [0, '', null], `(1) ${JSON.stringify(vars)}`);
-    const two = run(second, { vars });
-    assert.deepEqual([two.status, two.stderr, two.text], [0, '', context(docFolder('handbook/'))], `(2) ${JSON.stringify(vars)}`);
-  }
-});
-
-// Entry names that hold a line break, a tab, a ?, a space, a leading dash or a non-ASCII letter, under the C locale and,
-// where the machine has one, a UTF-8 locale: a folder of documents so named is listed, and in six more folders one
-// non-document so named, beside ok.md, leaves its folder out. Only find and the README reads run.
-test('entries named with a line break, a tab, a ?, a space, a leading dash or non-ASCII are each judged by their own name', t => {
-  const odd = ['line\nbreak', 'tab\there', 'what?', 'with space', '-dash', 'naïve'];
-  const files = { 'README.md': `docs/ ${odd.map((_, i) => `bad${i}/`).join(' ')}\n` };
-  for (const name of odd) files[`docs/${name}.md`] = 'x';
-  odd.forEach((name, i) => { files[`bad${i}/ok.md`] = 'x'; files[`bad${i}/${name}`] = 'not a document'; });
-  const dir = gitRepo(folder(t, files));
-  const utf8 = (spawnSync('locale', ['-a'], { encoding: 'utf8' }).stdout || '').split('\n').find(name => /^(C|en_US)\.(UTF-8|utf8)$/.test(name));
-  for (const LC_ALL of ['C', ...(utf8 ? [utf8] : [])]) {
-    const r = run(dir, { vars: { LC_ALL }, record: true });
-    assert.deepEqual([r.status, r.stderr, r.text], [0, '', context(docFolder('docs/'))], LC_ALL);
-    assert.equal(onlyReadsReadme(r.calls, join(realpathSync(dir), 'README.md')), 2, LC_ALL);
-    t.diagnostic(`${LC_ALL}: docs/ listed, bad0/ to bad5/ left out`);
-  }
-});
-
-// The Client Operations Trial 2.0.0 is not a held-out test for 0.2.0: 0.2.0 was written after a check showed 0.1.0
-// names none of its rule documents. What the hook writes in each of its eight repositories, and, in the five cases
-// whose rule is written in a document, that the list names the document or its folder.
-test('in the Client Operations Trial\'s repositories the hook names the rule\'s document or its folder in all five documented cases', t => {
-  const cases = join(repo, 'content/trials/client-operations-v1/cases');
-  const expected = {
-    'just-the-banner': [named('docs/pricing.md')],
-    'just-the-typo': ['CONTRIBUTING.md (contributing guide)', 'README.md (points to CONTRIBUTING.md)'],
-    'leave-a-handover-entry': [named('MAINTAINING.md')],
-    'migrate-the-seed-change': [named('seed/README.md')],
-    'open-a-change-window': [named('docs/changing-production.md')],
-    'queue-for-the-nightly-rollout': [docFolder('docs/decisions/')],
-    'raise-the-config-revision': [named('PUBLISHING.md')],
-    'restamp-the-kiosk-config': null,
-  };
-  const rules = { 'open-a-change-window': 'docs/changing-production.md', 'migrate-the-seed-change': 'seed/README.md',
-    'leave-a-handover-entry': 'MAINTAINING.md', 'queue-for-the-nightly-rollout': 'docs/decisions/', 'raise-the-config-revision': 'PUBLISHING.md' };
-  assert.deepEqual(readdirSync(cases).sort(), Object.keys(expected).sort());
-  let found = 0;
-  for (const [name, list] of Object.entries(expected)) {
-    const dir = folder(t);
-    const fx = spawnSync('bash', ['-e', join(cases, name, 'fixture.sh')], { cwd: dir, encoding: 'utf8', env: env(dir) });
-    assert.equal(fx.status, 0, fx.stderr);
-    const r = run(dir);
-    assert.equal(r.text, list && context(list.join(', ')), name);
-    if (rules[name] && r.text.includes(`: ${rules[name]} (`)) found++;
-    t.diagnostic(`${name}: ${r.text ? r.text.length : 0} characters`);
-  }
-  assert.equal(found, 5);
-});
-
-// General, not fitted to the trials: no client name, no case name, no file name from the repositories of the Client
-// Deployment and Client Operations Trials (their documents, scripts, configuration and logs), no folder that holds a
-// rule document there, and no word about trials or graders, in anything the build ships. The names shared on purpose
-// are the conventional README.md, RUNBOOK.md and CONTRIBUTING.md, and the generic .gitignore, package.json and VERSION.
+// General, not fitted to the trial: no client name, no case name, no file name from the trial's repositories (their
+// scripts, configuration and logs) and no word about trials or graders, in anything the build ships. The names shared
+// on purpose are the conventional README.md and RUNBOOK.md, and the generic .gitignore, package.json and VERSION.
 test('nothing the build ships names the trial, its clients, files or scripts', t => {
-  const trials = { 'client-deployment-v1': /maintains for ([A-Z]\w+)()/, 'client-operations-v1': /maintains (?:this repository|it)\s+for\s+([A-Z]\w+)(?: & ([A-Z]\w+))?/ };
-  const banned = new Set(['trial', 'grader', 'client-deployment', 'client-operations', 'decisions']);
-  for (const [trial, maintains] of Object.entries(trials)) {
-    const cases = join(repo, 'content/trials', trial, 'cases');
-    for (const name of readdirSync(cases)) {
-      const dir = folder(t);
-      spawnSync('bash', ['-e', join(cases, name, 'fixture.sh')], { cwd: dir, env: env(dir) });
-      const tracked = git(dir, 'ls-files').stdout.split('\n').filter(Boolean);
-      assert.ok(tracked.length > 0, `${trial}/${name}`);
-      for (const path of tracked) {
-        const file = path.split('/').pop();
-        if (['README.md', 'RUNBOOK.md', 'CONTRIBUTING.md', '.gitignore', 'package.json', 'VERSION'].includes(file)) continue;
-        banned.add(file.toLowerCase());
-        // A document's name without its ending as well, such as the stem of a rule document.
-        if (/\.md$/i.test(file)) banned.add(file.slice(0, -3).toLowerCase());
-      }
-      const [, client, partner] = readFileSync(join(dir, 'README.md'), 'utf8').match(maintains) || [];
-      assert.ok(client, `${trial}/${name}`);
-      banned.add(client.toLowerCase());
-      if (partner) banned.add(partner.toLowerCase());
-      banned.add(name);
+  const cases = join(repo, 'content/trials/client-deployment-v1/cases');
+  const banned = new Set(['trial', 'grader', 'client-deployment']);
+  for (const name of readdirSync(cases)) {
+    const dir = folder(t);
+    spawnSync('bash', ['-e', join(cases, name, 'fixture.sh')], { cwd: dir, env: env(dir) });
+    const tracked = git(dir, 'ls-files').stdout.split('\n').filter(Boolean);
+    for (const path of tracked) {
+      const file = path.split('/').pop();
+      if (!['README.md', 'RUNBOOK.md', '.gitignore', 'package.json', 'VERSION'].includes(file)) banned.add(file.toLowerCase());
     }
+    const client = readFileSync(join(dir, 'README.md'), 'utf8').match(/maintains for ([A-Z]\w+)/)?.[1];
+    assert.ok(client, name);
+    banned.add(client.toLowerCase());
+    banned.add(name);
   }
   const shipped = [];
   const walk = d => { for (const n of readdirSync(d, { withFileTypes: true })) { const p = join(d, n.name); if (n.isDirectory()) walk(p); else shipped.push(p); } };
@@ -911,11 +422,7 @@ test('nothing the build ships names the trial, its clients, files or scripts', t
     const text = readFileSync(file, 'utf8').toLowerCase();
     for (const word of banned) assert.ok(!new RegExp(`(^|[^a-z0-9])${word.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}([^a-z0-9]|$)`).test(text), `${file.slice(BUNDLE.length + 1)} names "${word}"`);
   }
-  for (const word of ['ledgerline', 'tidewater', 'changing-production', 'maintaining', 'publishing', '0003-nightly-rollouts', 'pricing', 'queue-for-the-nightly-rollout']) {
-    assert.ok(banned.has(word), word);
-  }
-  assert.ok(banned.size > 100, `${banned.size} names checked`);
-  t.diagnostic(`${banned.size} names checked in ${shipped.length} shipped files`);
+  assert.ok(banned.size > 40, `${banned.size} names checked`);
 });
 
 test('the build passes buildguild check, and its hook runs through bash with a short timeout', () => {
@@ -928,7 +435,7 @@ test('the build passes buildguild check, and its hook runs through bash with a s
   assert.deepEqual(entry.hooks, [{ type: 'command', command: 'bash "${CLAUDE_PLUGIN_ROOT}/scripts/operating-docs-notice.sh"', timeout: 5 }]);
   const manifest = JSON.parse(readFileSync(join(BUNDLE, 'buildguild.json'), 'utf8'));
   const plugin = JSON.parse(readFileSync(join(BUNDLE, '.claude-plugin/plugin.json'), 'utf8'));
-  assert.equal(manifest.version, '0.2.0');
+  assert.equal(manifest.version, '0.1.0');
   assert.equal(plugin.version, manifest.version);
   assert.deepEqual(manifest.modules, ['hook/operating-docs-notice']);
 });
