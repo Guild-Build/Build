@@ -20,9 +20,10 @@
       "note": "Lets the guild serve builds as pinned zip archives from the site."
     }
   ],
-  "notes": "Season 0 is a free trial: every member has every membership perk free until it ends, and members who join during it are founding members. Season 0 opens one branch, Claude Code, because that is the only runtime with a trial runner the guild can verify. Two trials are ranked this season: the Guild Smoke Trial and the Calibration Shell Trial. Every other trial is a custom game with its own leaderboard that feeds a build's profile but not its season rank. Codex opens in Season 1 once the trial format is runner-neutral. Mid-season changes are patch notes; evidence carries into Season 1 with a re-verified-on flag.",
+  "notes": "Season 0 is a free trial: every member has every membership perk free until it ends, and members who join during it are founding members. Season 0 opens one branch, Claude Code, because that is the only runtime with a trial runner the guild can verify. Three trials are ranked this season: the Guild Smoke Trial, the Calibration Shell Trial and the Client Deployment Trial. The Client Deployment Trial was added on 22 November 2026 as a mid-season change, and records on it from before that date count. The guild wrote both this trial and Runbook First, the build that leads it. Every other trial is a custom game with its own leaderboard that feeds a build's profile but not its season rank. Codex opens in Season 1 once the trial format is runner-neutral. Mid-season changes are patch notes; evidence carries into Season 1 with a re-verified-on flag.",
   "rankedTrials": [
     "guild-smoke-v1",
-    "calibration-shell-v1"
+    "calibration-shell-v1",
+    "client-deployment-v1"
   ]
 }

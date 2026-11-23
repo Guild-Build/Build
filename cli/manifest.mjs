@@ -5,7 +5,7 @@ export const LICENSES = ['Apache-2.0', 'MIT', 'Proprietary'];
 // so every run command the site shows names one: this, or the model of the record being reproduced.
 export const SEASON_MODEL = 'claude-sonnet-5-5';
 export const MODULE_TYPES = ['skill', 'agent', 'hook', 'mcp', 'playbook', 'tool'];
-export const TRIALS = ['calibration-shell-v1', 'guild-smoke-v1'];
+export const TRIALS = ['calibration-shell-v1', 'client-deployment-v1', 'guild-smoke-v1'];
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'default'];
 const slug = s => typeof s === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(s);
 const length = (s, min, max = Infinity) => typeof s === 'string' && s.trim().length >= min && s.length <= max;
