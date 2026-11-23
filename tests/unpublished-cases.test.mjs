@@ -20,6 +20,13 @@ const PRIVATE = [
   { name: 'middle-secret-handoff', dimension: 'handoff', score: 0.5, without: 0.5, prompt: 'Hand off the middle task.' },
 ];
 
+// Two names whose byte order and locale order differ: 'B-…' before 'a-…' by bytes, after it in most locales.
+const MIXED = [
+  { name: 'c-lower-gauge', dimension: 'quality', score: 0.5, without: 0.5, prompt: 'Read the c gauge.' },
+  { name: 'a-lower-ledger', dimension: 'handoff', score: 1, without: 0.5, prompt: 'Close the a ledger.' },
+  { name: 'B-upper-switch', dimension: 'safety', score: 0.75, without: 0.25, prompt: 'Flip the B switch.' },
+];
+
 async function setup(t) {
   const root = mkdtempSync(join(tmpdir(), 'bg-unpublished-'));
   const write = (relative, contents, mode = 0o600) => {
@@ -58,7 +65,7 @@ async function setup(t) {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { await new Promise(resolve => server.close(resolve)); rmSync(root, { recursive: true, force: true }); });
   // The stub runner reports on whatever cases it finds in evals/, with each case's scores from PRIVATE (1 and 0 for others).
-  const scores = Object.fromEntries(PRIVATE.map(c => [c.name, [c.score, c.without]]));
+  const scores = Object.fromEntries([...PRIVATE, ...MIXED].map(c => [c.name, [c.score, c.without]]));
   write('bin/which', `#!${process.execPath}\nconst { accessSync, constants } = require('node:fs'); const p = require('node:path').join(process.env.PATH, process.argv[2]); try { accessSync(p, constants.X_OK); console.log(p); } catch { process.exit(1); }\n`, 0o700);
   // check runs a fixture with bash, the one real program the CLI may start besides the stubs.
   symlinkSync('/bin/bash', join(root, 'bin/bash'));
@@ -67,18 +74,31 @@ const { appendFileSync, readdirSync, writeFileSync } = require('node:fs');
 const args = process.argv.slice(2);
 if (args[0] === '--version') { console.log('2.1.322 (Claude Code)'); process.exit(0); }
 if (args[0] !== 'plugin' || args[1] !== 'eval') process.exit(90);
-const names = readdirSync('evals');
+const names = readdirSync('evals').sort();
 appendFileSync(${JSON.stringify(join(root, 'claude.log'))}, JSON.stringify({ args, cases: names }) + '\\n');
 const scores = ${JSON.stringify(scores)};
-const cases = names.map(name => { const [score, without] = scores[name] || [1, 0]; return { name, arms: { with: [{ score, error: null }], without: [{ score: without, error: null }] }, aggregates: { score, passRate: score === 1 ? 1 : 0, scoreWithout: without, passRateWithout: without === 1 ? 1 : 0, delta: score - without } }; });
-const mean = xs => xs.reduce((a, b) => a + b, 0) / xs.length;
-writeFileSync(args[args.indexOf('--json') + 1], JSON.stringify({ schemaVersion: 1, claudeVersion: '2.1.322', durationSeconds: 5, costUsd: 0.3, partial: false, cases,
-  aggregates: { casesTotal: cases.length, casesPassed: cases.filter(c => c.aggregates.score === 1).length, overallScore: mean(cases.map(c => c.aggregates.score)), meanDelta: mean(cases.map(c => c.aggregates.delta)) } }));
+const damage = (process.env.STUB_DAMAGE || '').split(',').filter(Boolean);
+let cases = names.map(name => { const [score, without] = scores[name] || [1, 0]; return { name, runsPerCase: 1, arms: { with: [{ score, error: null }], without: [{ score: without, error: null }] }, aggregates: { score, passRate: score === 1 ? 1 : 0, scoreWithout: without, passRateWithout: without === 1 ? 1 : 0, delta: score - without } }; });
+const failed = { score: null, error: 'synthetic runner error' };
+if (damage.includes('arm-error')) { cases[0].arms.without = [failed]; cases[0].aggregates.scoreWithout = null; }
+if (damage.includes('no-score')) cases[0].arms.with = [{ score: null, error: null }];
+if (damage.includes('extra-run')) cases[0].arms.without.push({ score: cases[0].aggregates.scoreWithout, error: null });
+if (damage.includes('all-error')) for (const c of cases) { c.arms = { with: [failed], without: [failed] }; c.aggregates = { score: null, passRate: 0, scoreWithout: null, passRateWithout: 0, delta: null }; }
+if (damage.includes('duplicate')) cases[1] = JSON.parse(JSON.stringify(cases[0]));
+if (damage.includes('drop')) cases = cases.slice(1);
+if (damage.includes('bad-delta')) cases[0].aggregates.delta += 0.125;
+const mean = xs => { const n = xs.filter(x => typeof x === 'number'); return n.length ? n.reduce((a, b) => a + b, 0) / n.length : null; };
+const aggregates = { casesTotal: cases.length, casesPassed: cases.filter(c => c.aggregates.score === 1).length, overallScore: mean(cases.map(c => c.aggregates.score)), meanDelta: mean(cases.map(c => c.aggregates.delta)) };
+if (damage.includes('bad-total')) aggregates.casesTotal += 1;
+if (damage.includes('bad-overall')) aggregates.overallScore += 0.125;
+if (damage.includes('skipped-graders')) cases[0].arms.with[0].skippedPaidGraders = true;
+const suite = { ablation: damage.includes('no-ablation') ? 'none' : args[args.indexOf('--ablation') + 1], modelOverride: damage.includes('other-model') ? 'claude-haiku-5-5' : args[args.indexOf('--model') + 1] };
+writeFileSync(args[args.indexOf('--json') + 1], JSON.stringify({ schemaVersion: 1, claudeVersion: '2.1.322', durationSeconds: 5, costUsd: 0.3, partial: damage.includes('partial'), suite, cases, aggregates }));
 `, 0o700);
   const env = { PATH: join(root, 'bin'), HOME: root, BUILDGUILD_ORIGIN: `http://127.0.0.1:${server.address().port}` };
   const run = (argv, extraEnv = {}) => new Promise(resolve => execFile(process.execPath, [cli, ...argv], { cwd: root, env: { ...env, ...extraEnv }, timeout: 25000 },
     (error, stdout, stderr) => resolve({ status: error?.code ?? 0, stdout, stderr })));
-  const testRun = args => run(['test', './build', '--model', MODEL, '--runner', 'tester', '--work-dir', './work', ...args]);
+  const testRun = (args, extraEnv) => run(['test', './build', '--model', MODEL, '--runner', 'tester', '--work-dir', './work', ...args], extraEnv);
   const json = name => JSON.parse(readFileSync(join(root, name), 'utf8'));
   const claudeCalls = () => existsSync(join(root, 'claude.log')) ? readFileSync(join(root, 'claude.log'), 'utf8').trim().split('\n').map(JSON.parse) : [];
   return { root, write, writeFolder, run, testRun, json, claudeCalls, requests };
@@ -169,7 +189,9 @@ test('only the folder\'s cases run, with the runner arguments of any other run, 
   assert.match(warnings[0], /^warning: private files\. The run folder .*work, its raw report .*buildguild-raw\.json, the copy .*raw-private\.json hold the unpublished cases' names and prompts\. Do not commit, upload or paste them anywhere\./);
   const raw = f.json('raw-private.json');
   assert.equal(raw.trialSource, 'unpublished');
-  assert.deepEqual(raw.unpublishedRun, { trial: 'sample-trial', trialVersion: '1.0.1', count: 3, sha256: digest.sha256, modules: [] });
+  assert.deepEqual(raw.unpublishedRun, { trial: 'sample-trial', trialVersion: '1.0.1', count: 3, sha256: digest.sha256,
+    cases: PRIVATE.map(c => ({ name: c.name, dimension: c.dimension })), build: 'local-build', buildVersion: 'local', archiveSha256: null, runner: 'tester',
+    date: record.date, idSuffix: '', environment: record.environment });
   assert.deepEqual(f.json('work/buildguild-raw.json'), raw);
   assert.match(r.stdout, /hidden-slice record: .*evidence-unpublished\.json\n  overall 75%, \+33 pts over bare, 1\/3 cases, est\. \$0\.3; bare runtime 42%\nIt names the cases only as unpublished-1 to unpublished-3\. A maintainer adds it to Build by pull request; submit refuses it\./);
 });
@@ -305,4 +327,220 @@ test('the unpublished command refuses a folder that is not one of cases', async 
     assert.match(r.stderr, message);
   }
   assert.deepEqual(readdirSync(f.root).filter(n => n === 'claude.log'), []);
+});
+
+// ---------- review 6030797971 ----------
+const wrapOf = (raw, extra = []) => ['wrap', raw, '--model', MODEL, '--trial', 'sample-trial', '--unpublished', './private-folder-q7', ...extra];
+const withoutId = record => JSON.stringify({ ...record, id: record.id.replace(/-[a-z0-9]{1,6}(-rep\d+)?$/, '$1') });
+
+// Finding 1: in this mode a record is written only for a complete run; the raw report is still saved, marked.
+// Cases sort as alpha (unpublished-1), middle (2), zeta (3); the stub damages the first, alpha.
+const DAMAGES = [
+  ['partial', 'the run is partial: it stopped before every case had run'],
+  ['arm-error', 'unpublished-1: a run of the bare runtime ended in an error (synthetic runner error)'],
+  ['no-score', 'unpublished-1: a run with the build has no score'],
+  ['extra-run', 'unpublished-1: 2 runs of the bare runtime, where the case asks for 1'],
+  ['duplicate', 'the report holds more than one result for unpublished-1'],
+  ['drop', 'the report holds no result for unpublished-1'],
+  ['bad-total', 'the report counts 4 cases and lists 3, and the folder has 3'],
+  ['bad-overall', 'the overall score 0.875 is not the mean of the case scores'],
+  ['bad-delta', 'unpublished-1: its gap 0.625 is not its score minus its bare score'],
+  // Found on a second look: the report also says which model ran, whether both arms ran, and whether a grader was skipped.
+  ['other-model', 'the runner ran claude-haiku-5-5, not claude-sonnet-5-5'],
+  ['no-ablation', 'the run did not compare the build with the bare runtime (ablation "none")'],
+  ['skipped-graders', 'unpublished-1: a run with the build skipped some of its graders'],
+];
+
+test('test --unpublished writes no record for a run that is not complete, and keeps the raw report, marked', async t => {
+  const f = await setup(t);
+  for (const [damage, problem] of DAMAGES) {
+    const r = await f.testRun(['--trial', 'sample-trial', '--unpublished', './private-folder-q7', '--raw-out', `raw-${damage}.json`], { STUB_DAMAGE: damage });
+    assert.equal(r.status, 2, `${damage}: ${r.stderr}`);
+    assert.ok(r.stderr.includes('buildguild: no record was written: the run on the unpublished cases is not complete.\n'), `${damage}: ${r.stderr}`);
+    assert.ok(r.stderr.includes(`\n  - ${problem}\n`), `${damage}: ${r.stderr}`);
+    assert.match(r.stderr, /The raw report .*buildguild-raw\.json and its copy .*raw-[a-z-]+\.json are kept, marked, to work out what happened; they hold the cases' names and prompts, so keep them private\./);
+    assert.ok(!existsSync(join(f.root, 'evidence-unpublished.json')), `${damage}: no record`);
+    const raw = f.json(`raw-${damage}.json`);
+    assert.equal(raw.trialSource, 'unpublished');
+    assert.equal(raw.unpublishedRun.count, 3);
+  }
+  // Every arm in error: the refusal every run has, before the completeness checks; the report is still kept, marked.
+  const all = await f.testRun(['--trial', 'sample-trial', '--unpublished', './private-folder-q7', '--raw-out', 'raw-all-error.json'], { STUB_DAMAGE: 'all-error' });
+  assert.equal(all.status, 2);
+  assert.match(all.stderr, /every agent run ended in an error, so no evidence file was written/);
+  assert.equal(f.json('raw-all-error.json').trialSource, 'unpublished');
+  assert.ok(!existsSync(join(f.root, 'evidence-unpublished.json')));
+});
+
+test('an ordinary run with the same damage behaves as it always has', async t => {
+  const f = await setup(t);
+  const partial = await f.testRun(['--trial', 'sample-trial'], { STUB_DAMAGE: 'partial' });
+  assert.equal(partial.status, 0, partial.stderr);
+  assert.equal(f.json('evidence.json').results.partial, true);
+  assert.match(partial.stdout, /\(PARTIAL: cost ceiling hit\)/);
+  const errored = await f.testRun(['--trial', 'sample-trial', '--out', 'errored.json'], { STUB_DAMAGE: 'arm-error' });
+  assert.equal(errored.status, 0, errored.stderr);
+  assert.match(errored.stderr, /note: 1 of 2 agent runs ended in an error; first: synthetic runner error/);
+  assert.equal(f.json('errored.json').results.cases[0].name, 'case-name');
+});
+
+// Finding 2: wrap --unpublished runs the same checks, from the same function.
+test('wrap --unpublished refuses a report that is not complete, by the same checks as test', async t => {
+  const f = await setup(t);
+  for (const [damage, problem] of DAMAGES) {
+    await f.testRun(['--trial', 'sample-trial', '--unpublished', './private-folder-q7', '--raw-out', `raw-${damage}.json`], { STUB_DAMAGE: damage });
+    const w = await f.run(wrapOf(`raw-${damage}.json`));
+    assert.equal(w.status, 1, `${damage}: ${w.stdout}`);
+    assert.ok(w.stderr.startsWith(`buildguild: no record was written: raw-${damage}.json is not the report of a complete run on the unpublished cases.\n`), `${damage}: ${w.stderr}`);
+    assert.ok(w.stderr.includes(`\n  - ${problem}`), `${damage}: ${w.stderr}`);
+    assert.equal(w.stdout, '');
+  }
+  // The reviewer's case: every arm in error. test writes no record; wrap of its saved report writes none either.
+  await f.testRun(['--trial', 'sample-trial', '--unpublished', './private-folder-q7', '--raw-out', 'raw-all-error.json'], { STUB_DAMAGE: 'all-error' });
+  const w = await f.run(wrapOf('raw-all-error.json'));
+  assert.equal(w.status, 1);
+  assert.match(w.stderr, /unpublished-1: a run with the build ended in an error \(synthetic runner error\)/);
+  assert.equal(w.stdout, '');
+});
+
+// Finding 3: trial.json lists each case once, its list is the folders under cases/, and the report has one result for each.
+test('a case listed twice in trial.json is refused by unpublished, test and wrap alike', async t => {
+  const f = await setup(t);
+  const good = await f.testRun(['--trial', 'sample-trial', '--unpublished', './private-folder-q7', '--raw-out', 'raw-good.json']);
+  assert.equal(good.status, 0, good.stderr);
+  const trialJson = join(f.root, 'private-folder-q7/trial.json');
+  const record = JSON.parse(readFileSync(trialJson, 'utf8'));
+  writeFileSync(trialJson, JSON.stringify({ ...record, cases: [...record.cases, record.cases[1]] }));
+  const message = /private-folder-q7\/trial\.json lists alpha-secret-ledger more than once; each case is listed once\. Nothing was run\./;
+  const calls = f.claudeCalls().length;
+  for (const args of [['unpublished', './private-folder-q7'], wrapOf('raw-good.json')]) {
+    const r = await f.run(args);
+    assert.equal(r.status, 1, args.join(' '));
+    assert.match(r.stderr, message);
+    assert.equal(r.stdout, '');
+  }
+  rmSync(join(f.root, 'fixture-ran'), { force: true });
+  const run = await f.testRun(['--trial', 'sample-trial', '--unpublished', './private-folder-q7']);
+  assert.equal(run.status, 1);
+  assert.match(run.stderr, message);
+  assert.equal(f.claudeCalls().length, calls, 'nothing ran');
+  assert.ok(!existsSync(join(f.root, 'fixture-ran')), 'no fixture ran');
+});
+
+// Finding 4: the marker keeps each case's dimension at the run; wrap uses it and says when trial.json now differs.
+test('wrap keeps the dimensions the cases had at the run, and says so when trial.json has changed', async t => {
+  const f = await setup(t);
+  const r = await f.testRun(['--trial', 'sample-trial', '--unpublished', './private-folder-q7', '--raw-out', 'raw-private.json']);
+  assert.equal(r.status, 0, r.stderr);
+  const fromTest = f.json('evidence-unpublished.json');
+  const trialJson = join(f.root, 'private-folder-q7/trial.json');
+  const record = JSON.parse(readFileSync(trialJson, 'utf8'));
+  writeFileSync(trialJson, JSON.stringify({ ...record, cases: record.cases.map(c => c.name === 'zeta-secret-rollout' ? { ...c, dimension: 'quality' } : c) }));
+  const w = await f.run(wrapOf('raw-private.json'));
+  assert.equal(w.status, 0, w.stderr);
+  assert.match(w.stderr, /note: .*private-folder-q7\/trial\.json now gives unpublished-3 the dimension quality; the record keeps safety, its dimension at the run\n/);
+  const fromWrap = JSON.parse(w.stdout);
+  assert.deepEqual(fromWrap.results.dimensions, { safety: 0.875, handoff: 0.5, cost: 0.85 });
+  assert.equal(withoutId(fromWrap), withoutId(fromTest));
+});
+
+// Finding 5: every refusal that needs no fixture comes before any fixture runs.
+test('a folder refused for its name, structure or roster, or a run refused for its work dir or a missing claude, runs no fixture', async t => {
+  const f = await setup(t);
+  const marker = join(f.root, 'refused-fixture-ran');
+  const withFixture = (dir, cases) => {
+    f.writeFolder(dir, cases);
+    f.write(`${dir}/cases/${cases[0].name}/case.yaml`, `schema_version: "1.1"\nname: ${cases[0].name}\ncontext:\n  scaffold_script: fixture.sh\n`);
+    f.write(`${dir}/cases/${cases[0].name}/fixture.sh`, `echo ran >> ${JSON.stringify(marker)}\n`, 0o755);
+  };
+  withFixture('shared', [{ name: 'case-name', dimension: 'quality', prompt: 'Same name as a published case.' }, PRIVATE[1]]);
+  withFixture('short-readme', [PRIVATE[1]]);
+  f.write('short-readme/README.md', 'Too short.');
+  withFixture('twice', [PRIVATE[1], PRIVATE[2]]);
+  f.write('twice/trial.json', JSON.stringify({ ...JSON.parse(readFileSync(join(f.root, 'twice/trial.json'), 'utf8')), cases: [PRIVATE[1], PRIVATE[2], PRIVATE[2]].map(c => ({ name: c.name, dimension: c.dimension, runs: 1 })) }));
+  withFixture('fine', [PRIVATE[1]]);
+  // A bin folder without claude, for the last refusal.
+  mkdirSync(join(f.root, 'bin-no-claude'));
+  cpSync(join(f.root, 'bin/which'), join(f.root, 'bin-no-claude/which'));
+  symlinkSync('/bin/bash', join(f.root, 'bin-no-claude/bash'));
+  const cases = [
+    [['--trial', 'sample-trial', '--unpublished', './shared'], /a case in .*shared has the name of a case of the published trial sample-trial \(case-name\)/],
+    [['--trial', 'sample-trial', '--unpublished', './short-readme'], /short-readme: 1 problem\(s\)\n  - README\.md needs at least forty words/],
+    [['--trial', 'sample-trial', '--unpublished', './twice'], /twice\/trial\.json lists middle-secret-handoff more than once/],
+    [['--trial', 'sample-trial', '--unpublished', './fine', '--work-dir', './fine/cases'], /--work-dir .*fine\/cases is deleted before the run, so it cannot be the trial folder/],
+  ];
+  for (const [args, message] of cases) {
+    const r = await f.run(['test', './build', '--model', MODEL, '--runner', 'tester', ...(args.includes('--work-dir') ? [] : ['--work-dir', './work']), ...args]);
+    assert.equal(r.status, 1, args.join(' '));
+    assert.match(r.stderr, message);
+    assert.ok(!existsSync(marker), `${args.join(' ')}: a fixture ran`);
+  }
+  const noClaude = await f.testRun(['--trial', 'sample-trial', '--unpublished', './fine'], { PATH: join(f.root, 'bin-no-claude') });
+  assert.equal(noClaude.status, 1);
+  assert.match(noClaude.stderr, /claude is not installed/);
+  assert.ok(!existsSync(marker), 'no fixture ran without claude');
+  assert.deepEqual(f.claudeCalls(), []);
+  // The same folder, with nothing to refuse, does run its fixture, then the cases.
+  const ok = await f.testRun(['--trial', 'sample-trial', '--unpublished', './fine']);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.ok(existsSync(marker));
+  assert.match(readFileSync(fileURLToPath(new URL('../cli/README.md', import.meta.url)), 'utf8'), /Only then do the folder's fixtures run/);
+});
+
+// Finding 6: names whose byte order and locale order differ; swapping in localeCompare fails both assertions.
+test('the cases are numbered, and the checksum ordered, by the bytes of the names, not by locale', async t => {
+  const f = await setup(t);
+  f.writeFolder('mixed', MIXED);
+  assert.ok('a-lower-ledger'.localeCompare('B-upper-switch') < 0, 'the locale here puts a before B');
+  const sum = await f.run(['unpublished', './mixed']);
+  assert.equal(sum.status, 0, sum.stderr);
+  assert.equal(digestOf(sum.stdout).sha256, shellChecksum(join(f.root, 'mixed')), 'the LC_ALL=C recipe and the CLI agree');
+  assert.equal(digestOf(sum.stdout).sha256, '706dff047c21677f4e609fa550e6e8a7589185371c4ed0287f9cdde7f1b2d2cb');
+  const r = await f.testRun(['--trial', 'sample-trial', '--unpublished', './mixed']);
+  assert.equal(r.status, 0, r.stderr);
+  // Byte order: B-upper-switch, a-lower-ledger, c-lower-gauge.
+  assert.deepEqual(f.json('evidence-unpublished.json').results.cases, [
+    { name: 'unpublished-1', score: 0.75, delta: 0.5 },
+    { name: 'unpublished-2', score: 1, delta: 0.5 },
+    { name: 'unpublished-3', score: 0.5, delta: 0 },
+  ]);
+});
+
+// The same kind of gap, looked for again: wrap writes nothing the run did not record.
+test('wrap takes every fact from the run\'s report and refuses a flag that says otherwise', async t => {
+  const f = await setup(t);
+  const r = await f.testRun(['--trial', 'sample-trial', '--unpublished', './private-folder-q7', '--raw-out', 'raw-private.json', '--rep', '2']);
+  assert.equal(r.status, 0, r.stderr);
+  const fromTest = f.json('evidence-unpublished-rep2.json');
+  // No --build or --runner: both come from the report, and so do the date, the --rep suffix and the environment.
+  const bare = await f.run(wrapOf('raw-private.json'));
+  assert.equal(bare.status, 0, bare.stderr);
+  assert.equal(withoutId(JSON.parse(bare.stdout)), withoutId(fromTest));
+  assert.match(JSON.parse(bare.stdout).id, /^\d{4}-\d{2}-\d{2}-tester-[a-z0-9]{1,6}-rep2$/);
+  for (const [extra, message] of [
+    [['--model', 'claude-opus-5-5'], /--model claude-opus-5-5 is not the run's claude-sonnet-5-5/],
+    [['--build', 'another-build'], /--build another-build is not the run's local-build/],
+    [['--build-version', '9.9.9'], /--build-version 9\.9\.9 is not the run's local/],
+    [['--runner', 'someone-else'], /--runner someone-else is not the run's tester/],
+    [['--sha256', 'a'.repeat(64)], /--sha256 a{64} is not the run's none/],
+  ]) {
+    const args = wrapOf('raw-private.json', extra);
+    if (extra[0] === '--model') args.splice(args.indexOf('--model'), 2);
+    const w = await f.run(args);
+    assert.equal(w.status, 1, extra.join(' '));
+    assert.match(w.stderr, message);
+    assert.equal(w.stdout, '');
+  }
+  // The record's date is the run's, from the marker, whatever day wrap runs on.
+  const raw = f.json('raw-private.json');
+  writeFileSync(join(f.root, 'raw-dated.json'), JSON.stringify({ ...raw, unpublishedRun: { ...raw.unpublishedRun, date: '2026-01-02' } }));
+  const dated = JSON.parse((await f.run(wrapOf('raw-dated.json'))).stdout);
+  assert.equal(dated.date, '2026-01-02');
+  assert.match(dated.id, /^2026-01-02-tester-/);
+  // A marker without the run's facts, as an earlier version of this mode wrote it, is refused.
+  const { trial, trialVersion, count, sha256 } = raw.unpublishedRun;
+  writeFileSync(join(f.root, 'raw-old-marker.json'), JSON.stringify({ ...raw, unpublishedRun: { trial, trialVersion, count, sha256, modules: [] } }));
+  const old = await f.run(wrapOf('raw-old-marker.json'));
+  assert.equal(old.status, 1);
+  assert.match(old.stderr, /raw-old-marker\.json is not the report of a run with --unpublished, so it cannot become a hidden-slice record/);
 });

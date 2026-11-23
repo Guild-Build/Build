@@ -283,9 +283,10 @@ function casesDigest(files, count) {
   const lines = paths.map(rel => `${modeFor(rel).toString(8)} ${createHash('sha256').update(files[rel]).digest('hex')} cases/${rel}\n`).join('');
   return { count, sha256: createHash('sha256').update(lines).digest('hex') };
 }
-// --unpublished <folder>: refused with a plain message when it is not a folder of cases, then every check `check` runs on a
-// trial folder (fixtures too, unless structuralOnly).
-function unpublishedFolder(value, options = {}) {
+// --unpublished <folder>: the checks that run nothing, in this order: the argument, the structure (every check `check` runs on a
+// trial folder except running its fixtures), then the roster (trial.json lists each case once, and its list is exactly the
+// folders under cases/). The fixtures run later, in test only, once every other refusal is behind it.
+function unpublishedFolder(value) {
   if (typeof value !== 'string') die('--unpublished needs the path of a trial folder holding the unpublished cases; nothing was run');
   const root = resolve(value);
   if (!existsSync(root) || !statSync(root).isDirectory()) die(`no trial folder at ${root}; nothing was run`);
@@ -295,7 +296,13 @@ function unpublishedFolder(value, options = {}) {
   const cases = join(root, 'cases');
   const dirs = existsSync(cases) && lstatSync(cases).isDirectory() ? readdirSync(cases).filter(n => lstatSync(join(cases, n)).isDirectory()) : [];
   if (!dirs.length || !Array.isArray(record.cases) || !record.cases.length) die(`${root} has no case: it needs at least one folder under cases/ and the same names in trial.json; nothing was run`);
-  checkFolder(root, 'trial', options);
+  checkFolder(root, 'trial', { structuralOnly: true });
+  const names = record.cases.map(c => c?.name);
+  if (names.some(n => typeof n !== 'string')) die(`${root}/trial.json lists a case without a name; nothing was run`);
+  const twice = [...new Set(names.filter((n, i) => names.indexOf(n) !== i))].sort(byteOrder);
+  if (twice.length) die(`${root}/trial.json lists ${twice.join(', ')} more than once; each case is listed once. Nothing was run.`);
+  const listed = [...names].sort(byteOrder), found = [...dirs].sort(byteOrder);
+  if (listed.join('\n') !== found.join('\n')) die(`${root}/trial.json lists ${listed.length} cases and cases/ holds ${found.length} folders, and the two do not match; nothing was run`);
   return { root, record };
 }
 // With --unpublished, --trial names the published trial the cases belong to, by slug; a folder is refused.
@@ -319,19 +326,14 @@ function refuseSharedNames(folder, published) {
 // Prints the count and checksum of a folder's unpublished cases without running anything, so both can be published first.
 function unpublished(target) {
   if (!target) die('usage: buildguild unpublished <trial-folder>');
-  const folder = unpublishedFolder(target, { structuralOnly: true });
+  const folder = unpublishedFolder(target);
   const digest = casesDigest(filesIn(join(folder.root, 'cases')), folder.record.cases.length);
   out(`${digest.count} unpublished case${digest.count === 1 ? '' : 's'}\nsha256 ${digest.sha256}\nunpublishedCases ${JSON.stringify(digest)}`);
 }
 
-// Each case's dimension comes from the trial record; the eval report itself carries no tags. Every record names the trial
-// version it ran, which the tier rules count by; a run on a local trial folder is also marked trialSource "local", so
-// submit can refuse it. A run on unpublished cases (unpublished: { record, count, sha256 }) takes its dimensions from the
-// folder's trial.json, names the published trial and its version, and is a hidden-slice guild record whose cases are numbered.
-function wrap(rawPath, { build, buildVersion, trialRecord, local = false, unpublished = null, sha256, role, runner, modules = [], reliabilityCase = 'fix-the-failing-test', idSuffix = '' }) {
-  const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
-  const caseRecord = unpublished ? unpublished.record : trialRecord;
-  const dimensionOf = name => caseRecord.cases.find(c => c.name === name)?.dimension || null;
+// The dimensions of a run, as the trial page publishes them: each dimension is the mean score of its cases, reliability is the
+// score of the reliability case, and cost is 1 minus (list-price USD per passed case) / 2, clamped to 0..1.
+function dimensionsOf(raw, dimensionOf, reliabilityCase = 'fix-the-failing-test') {
   const dims = {};
   const counts = {};
   for (const c of raw.cases || []) {
@@ -344,28 +346,110 @@ function wrap(rawPath, { build, buildVersion, trialRecord, local = false, unpubl
   const rel = (raw.cases || []).find(c => c.name === reliabilityCase);
   if (rel) dims.reliability = Number((rel.aggregates?.score ?? 0).toFixed(3));
   const passed = raw.aggregates?.casesPassed ?? 0;
-  // Cost dimension, as published on the trial page: 1 minus (list-price USD per passed case) / 2, clamped to 0..1.
   if (typeof raw.costUsd === 'number' && passed > 0) dims.cost = Number(Math.max(0, Math.min(1, 1 - (raw.costUsd / passed) / 2)).toFixed(3));
-  let cases = (raw.cases || []).map(c => ({ name: c.name, score: c.aggregates?.score ?? null, delta: c.aggregates?.delta ?? null }));
-  const results = { overallScore: raw.aggregates?.overallScore ?? 0, casesPassed: passed, casesTotal: raw.aggregates?.casesTotal ?? 0, meanDelta: raw.aggregates?.meanDelta ?? null, dimensions: dims, partial: !!raw.partial };
-  if (unpublished) {
-    // unpublished-1 to unpublished-n in the sorted order of the real names; no real name leaves this function.
-    const numberOf = new Map(unpublished.record.cases.map(c => c.name).sort(byteOrder).map((name, i) => [name, i + 1]));
-    if (cases.some(c => !numberOf.has(c.name))) die(`${rawPath} holds a case that the unpublished folder's trial.json does not list; no record was written`);
-    cases = cases.map(c => ({ ...c, name: `unpublished-${numberOf.get(c.name)}` })).sort((a, b) => Number(a.name.slice(12)) - Number(b.name.slice(12)));
-    // The bare runtime's overall score on the same cases: the mean of each case's without-arm score (aggregates.scoreWithout),
-    // as overallScore is the mean of each case's aggregates.score. null when any case lacks it.
-    const bare = (raw.cases || []).map(c => c.aggregates?.scoreWithout);
-    results.bareOverallScore = bare.length && bare.every(s => typeof s === 'number' && Number.isFinite(s)) ? bare.reduce((a, b) => a + b, 0) / bare.length : null;
-  }
-  results.cases = cases;
+  return dims;
+}
+
+// Each case's dimension comes from the trial record; the eval report itself carries no tags. Every record names the trial
+// version it ran, which the tier rules count by; a run on a local trial folder is also marked trialSource "local", so
+// submit can refuse it.
+function wrap(rawPath, { build, buildVersion, trialRecord, local = false, sha256, role, runner, modules = [], reliabilityCase = 'fix-the-failing-test', idSuffix = '' }) {
+  const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
+  const dims = dimensionsOf(raw, name => trialRecord.cases.find(c => c.name === name)?.dimension || null, reliabilityCase);
+  const passed = raw.aggregates?.casesPassed ?? 0;
   return {
     schema: 'buildguild.evidence.v1', id: `${new Date().toISOString().slice(0, 10)}-${runner}-${Math.random().toString(36).slice(2, 8)}${idSuffix}`,
-    build, buildVersion, archiveSha256: sha256 || null, trial: trialRecord.slug, trialVersion: trialRecord.version, ...(local ? { trialSource: 'local' } : {}), ...(unpublished ? { hiddenSlice: true } : {}),
-    date: new Date().toISOString().slice(0, 10), runner, role: unpublished ? 'guild' : role, gist: null,
+    build, buildVersion, archiveSha256: sha256 || null, trial: trialRecord.slug, trialVersion: trialRecord.version, ...(local ? { trialSource: 'local' } : {}), date: new Date().toISOString().slice(0, 10), runner, role, gist: null,
     environment: { ...fingerprint(), claudeCode: raw.claudeVersion || fingerprint().claudeCode, modules },
-    results,
-    ...(unpublished ? { unpublishedCases: { count: unpublished.count, sha256: unpublished.sha256 } } : {}),
+    results: { overallScore: raw.aggregates?.overallScore ?? 0, casesPassed: passed, casesTotal: raw.aggregates?.casesTotal ?? 0, meanDelta: raw.aggregates?.meanDelta ?? null, dimensions: dims, partial: !!raw.partial, cases: (raw.cases || []).map(c => ({ name: c.name, score: c.aggregates?.score ?? null, delta: c.aggregates?.delta ?? null })) },
+    cost: typeof raw.costUsd === 'number' ? { usd: Number(raw.costUsd.toFixed(4)) } : null,
+    durationSeconds: raw.durationSeconds ?? null,
+  };
+}
+
+// The raw report of a run with --unpublished carries a marker, unpublishedRun, with every fact its record needs from the run:
+// the published trial and version, the cases (their real names and their dimensions at the run: the report is private), their
+// count and checksum, the build, its version and archive checksum, the runner, the date, the --rep suffix and the environment.
+// test writes it; wrap rebuilds the record from it alone, so the two records are the same apart from the id's random part.
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+const isText = v => typeof v === 'string' && v.length > 0;
+function validMarker(run) {
+  if (!run || typeof run !== 'object' || Array.isArray(run)) return false;
+  const cases = Array.isArray(run.cases) ? run.cases : [];
+  return isText(run.trial) && isText(run.trialVersion) && Number.isInteger(run.count) && run.count > 0 && typeof run.sha256 === 'string' && SHA256_HEX.test(run.sha256)
+    && cases.length === run.count && cases.every(c => isText(c?.name) && isText(c?.dimension)) && new Set(cases.map(c => c.name)).size === cases.length
+    && isText(run.build) && isText(run.buildVersion) && (run.archiveSha256 === null || isText(run.archiveSha256)) && isText(run.runner)
+    && typeof run.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(run.date) && typeof run.idSuffix === 'string'
+    && typeof run.environment === 'object' && run.environment !== null && ['os', 'claudeCode', 'model'].every(k => isText(run.environment[k])) && Array.isArray(run.environment.modules);
+}
+// A record is written only for a complete run on exactly the folder's cases: not partial; run with and without the build, on the
+// model the record names (when the report says which); one result for each case and no other, with totals that agree; every
+// attempt of both arms finished without an error, with a score and without skipping a grader; and each score is the one its
+// parts give (a case's score is the mean of its attempts, its gap is its score minus the bare score, and the overall score and
+// gap are the means over the cases, as in every raw report the runner has written). Cases are named here by their number.
+// Both test and wrap call this; the problems it returns mean no record is written.
+const finite = v => typeof v === 'number' && Number.isFinite(v);
+const meanOf = xs => xs.reduce((a, b) => a + b, 0) / xs.length;
+const agree = (a, b) => Math.abs(a - b) <= 1e-9;
+function unpublishedRunProblems(raw, run) {
+  const problems = [];
+  if (raw.partial || raw.partialReason) problems.push(`the run is partial${raw.partialReason ? ` (${raw.partialReason})` : ''}: it stopped before every case had run`);
+  const suite = raw.suite && typeof raw.suite === 'object' ? raw.suite : {};
+  if (suite.ablation !== undefined && suite.ablation !== 'with-without') problems.push(`the run did not compare the build with the bare runtime (ablation ${JSON.stringify(suite.ablation)})`);
+  if (suite.modelOverride !== undefined && suite.modelOverride !== run.environment.model) problems.push(`the runner ran ${suite.modelOverride}, not ${run.environment.model}`);
+  const numberOf = new Map(run.cases.map(c => c.name).sort(byteOrder).map((name, i) => [name, `unpublished-${i + 1}`]));
+  const cases = Array.isArray(raw.cases) ? raw.cases : [];
+  const seen = new Map();
+  for (const c of cases) seen.set(c?.name, (seen.get(c?.name) || 0) + 1);
+  const twice = [...numberOf].filter(([name]) => seen.get(name) > 1).map(([, n]) => n);
+  const missing = [...numberOf].filter(([name]) => !seen.has(name)).map(([, n]) => n);
+  const unknown = cases.filter(c => !numberOf.has(c?.name)).length;
+  if (twice.length) problems.push(`the report holds more than one result for ${twice.join(', ')}`);
+  if (missing.length) problems.push(`the report holds no result for ${missing.join(', ')}`);
+  if (unknown) problems.push(`the report holds ${unknown} result${unknown === 1 ? '' : 's'} for a case the folder does not list`);
+  const totals = raw.aggregates || {};
+  if (totals.casesTotal !== numberOf.size || cases.length !== numberOf.size) problems.push(`the report counts ${totals.casesTotal} cases and lists ${cases.length}, and the folder has ${numberOf.size}`);
+  for (const c of cases) {
+    const where = numberOf.get(c?.name) || 'a case the folder does not list';
+    const scores = {};
+    for (const [arm, label] of [['with', 'with the build'], ['without', 'of the bare runtime']]) {
+      const attempts = c?.arms?.[arm];
+      if (!Array.isArray(attempts) || !attempts.length) { problems.push(`${where}: the report holds no run ${label}`); continue; }
+      if (finite(c.runsPerCase) && attempts.length !== c.runsPerCase) problems.push(`${where}: ${attempts.length} runs ${label}, where the case asks for ${c.runsPerCase}`);
+      const errors = attempts.filter(a => a?.error);
+      if (errors.length) problems.push(`${where}: a run ${label} ended in an error (${String(errors[0].error)})`);
+      if (attempts.some(a => a?.skippedPaidGraders === true)) problems.push(`${where}: a run ${label} skipped some of its graders`);
+      if (attempts.some(a => !finite(a?.score))) problems.push(`${where}: a run ${label} has no score`);
+      else scores[arm] = meanOf(attempts.map(a => a.score));
+    }
+    const g = c?.aggregates || {};
+    if (!finite(g.score) || !finite(g.scoreWithout) || !finite(g.delta)) { problems.push(`${where}: the case has no score for both arms and no gap between them`); continue; }
+    if (scores.with !== undefined && !agree(g.score, scores.with)) problems.push(`${where}: its score ${g.score} is not the mean of its runs with the build (${scores.with})`);
+    if (scores.without !== undefined && !agree(g.scoreWithout, scores.without)) problems.push(`${where}: its bare score ${g.scoreWithout} is not the mean of its bare runs (${scores.without})`);
+    if (!agree(g.delta, g.score - g.scoreWithout)) problems.push(`${where}: its gap ${g.delta} is not its score minus its bare score`);
+  }
+  const caseScores = cases.map(c => c?.aggregates?.score), caseGaps = cases.map(c => c?.aggregates?.delta);
+  if (!finite(totals.overallScore) || (cases.length && caseScores.every(finite) && !agree(totals.overallScore, meanOf(caseScores)))) problems.push(`the overall score ${totals.overallScore} is not the mean of the case scores`);
+  if (!finite(totals.meanDelta) || (cases.length && caseGaps.every(finite) && !agree(totals.meanDelta, meanOf(caseGaps)))) problems.push(`the mean gap ${totals.meanDelta} is not the mean of the case gaps`);
+  if (!Number.isInteger(totals.casesPassed) || totals.casesPassed < 0 || totals.casesPassed > numberOf.size) problems.push(`the report says ${totals.casesPassed} cases passed of ${numberOf.size}`);
+  return problems;
+}
+// The record of a run on unpublished cases, from its raw report and marker alone: unpublished-1 to unpublished-n in the byte
+// order of the real names, scores and gaps kept, the dimensions the cases had at the run, and the bare runtime's overall score
+// (the mean of each case's aggregates.scoreWithout, as overallScore is the mean of each case's aggregates.score). Called only
+// after unpublishedRunProblems found nothing, so every number it reads is there.
+function unpublishedRecord(raw, run) {
+  const dimension = new Map(run.cases.map(c => [c.name, c.dimension]));
+  const number = new Map(run.cases.map(c => c.name).sort(byteOrder).map((name, i) => [name, i + 1]));
+  const cases = raw.cases.map(c => ({ n: number.get(c.name), score: c.aggregates.score, delta: c.aggregates.delta })).sort((a, b) => a.n - b.n).map(c => ({ name: `unpublished-${c.n}`, score: c.score, delta: c.delta }));
+  return {
+    schema: 'buildguild.evidence.v1', id: `${run.date}-${run.runner}-${Math.random().toString(36).slice(2, 8)}${run.idSuffix}`,
+    build: run.build, buildVersion: run.buildVersion, archiveSha256: run.archiveSha256, trial: run.trial, trialVersion: run.trialVersion, hiddenSlice: true,
+    date: run.date, runner: run.runner, role: 'guild', gist: null,
+    environment: run.environment,
+    results: { overallScore: raw.aggregates.overallScore, casesPassed: raw.aggregates.casesPassed, casesTotal: raw.aggregates.casesTotal, meanDelta: raw.aggregates.meanDelta, dimensions: dimensionsOf(raw, name => dimension.get(name) || null), partial: false,
+      bareOverallScore: meanOf(raw.cases.map(c => c.aggregates.scoreWithout)), cases },
+    unpublishedCases: { count: run.count, sha256: run.sha256 },
     cost: typeof raw.costUsd === 'number' ? { usd: Number(raw.costUsd.toFixed(4)) } : null,
     durationSeconds: raw.durationSeconds ?? null,
   };
@@ -379,8 +463,9 @@ async function test(slug) {
   const repFlag = flag('rep');
   if (repFlag !== undefined && !(typeof repFlag === 'string' && /^[1-9]\d*$/.test(repFlag))) die('--rep needs a whole number of at least 1; nothing was run');
   const repSuffix = repFlag === undefined ? '' : `-rep${repFlag}`;
-  // --unpublished <folder> runs that folder's cases as the unpublished part of the published trial --trial names. Every
-  // refusal comes before the work dir is touched, the build is downloaded or anything runs.
+  // --unpublished <folder> runs that folder's cases as the unpublished part of the published trial --trial names. The
+  // refusals that run nothing come first, in this order: the role, the trial, the folder's structure and roster, the names it
+  // shares with the published trial, the work dir and Claude Code. Only then do the folder's fixtures run (below).
   let hidden = null;
   if (flag('unpublished') !== undefined) {
     guildRoleOnly();
@@ -388,8 +473,7 @@ async function test(slug) {
     const folder = unpublishedFolder(flag('unpublished'));
     const published = await fetchJson(`/trials/${publishedSlug}.json`);
     refuseSharedNames(folder, published);
-    const files = filesIn(join(folder.root, 'cases'));
-    hidden = { ...folder, published, files, ...casesDigest(files, folder.record.cases.length) };
+    hidden = { ...folder, published };
   }
   // A trial folder is checked first, so a broken one is reported even where claude is missing, and before any download.
   const local = hidden ? null : localTrial(flag('trial'));
@@ -398,6 +482,13 @@ async function test(slug) {
   const workDir = flag('work-dir') && flag('work-dir') !== true ? resolve(String(flag('work-dir'))) : null;
   if (workDir) guardWorkDir(workDir, { build: buildDir, trial: local?.root || hidden?.root });
   const claude = which('claude'); if (!claude) die('claude is not installed; install Claude Code 2.1.269 or later');
+  // The unpublished folder gets every check `check` runs, its fixtures included, and its cases are read once: the checksum is
+  // taken from the very bytes the run is given.
+  if (hidden) {
+    checkFolder(hidden.root, 'trial');
+    hidden.files = filesIn(join(hidden.root, 'cases'));
+    Object.assign(hidden, casesDigest(hidden.files, hidden.record.cases.length));
+  }
   let meta = { version: 'local', sha256: null };
   // The run always happens in a fresh temporary copy, so a local bundle's own evals/ is never touched.
   const bundleDir = workDir ? (rmSync(workDir, { recursive: true, force: true }), mkdirSync(workDir, { recursive: true }), workDir) : mkdtempSync(join(tmpdir(), `buildguild-${existsSync(slug) ? 'local' : slug}-`));
@@ -439,12 +530,16 @@ async function test(slug) {
   if (!existsSync(rawPath)) die(`the runner wrote no result (exit ${r.status})`);
   const rawCheck = JSON.parse(readFileSync(rawPath, 'utf8'));
   // A local run's raw report carries the marker too, in the run folder and in --raw-out, so wrap cannot pass it off as a
-  // run on a published trial. A run on unpublished cases is marked "unpublished", with what wrap needs to rebuild the same
-  // record: the published trial and version, the cases' count and checksum, and the module pins.
+  // run on a published trial. A run on unpublished cases is marked "unpublished", with the marker unpublishedRun holding every
+  // fact of the run its record needs (see validMarker), so wrap rebuilds the same record from the report alone.
+  const buildSlug = () => !existsSync(slug) ? slug : JSON.parse(readFileSync(join(bundleDir, 'buildguild.json'), 'utf8')).slug;
   if (local) { rawCheck.trialSource = 'local'; writeFileSync(rawPath, JSON.stringify(rawCheck, null, 2) + '\n'); }
   if (hidden) {
     rawCheck.trialSource = 'unpublished';
-    rawCheck.unpublishedRun = { trial: trialRecord.slug, trialVersion: trialRecord.version, count: hidden.count, sha256: hidden.sha256, modules };
+    rawCheck.unpublishedRun = { trial: trialRecord.slug, trialVersion: trialRecord.version, count: hidden.count, sha256: hidden.sha256,
+      cases: hidden.record.cases.map(c => ({ name: c.name, dimension: c.dimension })),
+      build: buildSlug(), buildVersion: meta.version, archiveSha256: meta.sha256 || null, runner, date: new Date().toISOString().slice(0, 10), idSuffix: repSuffix,
+      environment: { ...fingerprint(), claudeCode: rawCheck.claudeVersion || fingerprint().claudeCode, modules } };
     writeFileSync(rawPath, JSON.stringify(rawCheck, null, 2) + '\n');
   }
   if (flag('raw-out')) writeFileSync(resolve(String(flag('raw-out'))), JSON.stringify(rawCheck, null, 2) + '\n');
@@ -453,8 +548,13 @@ async function test(slug) {
   const arms = (rawCheck.cases || []).flatMap(c => [...(c.arms?.with || []), ...(c.arms?.without || [])]);
   const errors = arms.map(a => a.error).filter(Boolean);
   if (arms.length && errors.length === arms.length) die(`every agent run ended in an error, so no evidence file was written. First error: ${errors[0]}${rawCheck.partialReason ? ` (partial: ${rawCheck.partialReason})` : ''}`, 2);
-  if (errors.length) console.error(`note: ${errors.length} of ${arms.length} agent runs ended in an error; first: ${errors[0]}`);
-  const ev = wrap(rawPath, { build: !existsSync(slug) ? slug : JSON.parse(readFileSync(join(bundleDir, 'buildguild.json'), 'utf8')).slug, buildVersion: meta.version, trialRecord, local: !!local, unpublished: hidden, sha256: meta.sha256, role: flag('role', hidden ? 'guild' : 'author'), runner, modules, idSuffix: repSuffix });
+  if (errors.length && !hidden) console.error(`note: ${errors.length} of ${arms.length} agent runs ended in an error; first: ${errors[0]}`);
+  // A run on unpublished cases is paid for once and read once, so a record of a run that is not complete is never written.
+  if (hidden) {
+    const problems = unpublishedRunProblems(rawCheck, rawCheck.unpublishedRun);
+    if (problems.length) die(`no record was written: the run on the unpublished cases is not complete.\n  - ${problems.join('\n  - ')}\nThe raw report ${rawPath}${flag('raw-out') ? ` and its copy ${resolve(String(flag('raw-out')))}` : ''} ${flag('raw-out') ? 'are' : 'is'} kept, marked, to work out what happened; ${flag('raw-out') ? 'they hold' : 'it holds'} the cases' names and prompts, so keep ${flag('raw-out') ? 'them' : 'it'} private.`, 2);
+  }
+  const ev = hidden ? unpublishedRecord(rawCheck, rawCheck.unpublishedRun) : wrap(rawPath, { build: buildSlug(), buildVersion: meta.version, trialRecord, local: !!local, sha256: meta.sha256, role: flag('role', 'author'), runner, modules, idSuffix: repSuffix });
   const outPath = resolve(String(flag('out', `${local ? 'local-run' : hidden ? 'evidence-unpublished' : 'evidence'}${repSuffix}.json`)));
   writeFileSync(outPath, JSON.stringify(ev, null, 2) + '\n');
   const result = `  overall ${Math.round(ev.results.overallScore * 100)}%${typeof ev.results.meanDelta === 'number' ? `, ${vsBare(ev.results.meanDelta)}` : ''}, ${ev.results.casesPassed}/${ev.results.casesTotal} cases${ev.cost ? `, est. $${ev.cost.usd}` : ''}${ev.results.partial ? ' (PARTIAL: cost ceiling hit)' : ''}`;
@@ -464,23 +564,35 @@ async function test(slug) {
   process.exit(r.status === 2 ? 2 : 0);
 }
 
-// wrap --unpublished: rebuilds the record `test --unpublished` wrote from its saved raw report, with no second run. The report
-// must be one such a run marked, on the same published trial and version, and the folder must still hold the same cases.
+// wrap --unpublished: rebuilds the record `test --unpublished` wrote from its saved raw report, with no second run. Every fact
+// of the record comes from the report and its marker; a flag that names a different build, version, archive, runner or model is
+// refused, never written in. The report must be one such a run marked, on the published trial's current version; the folder
+// must still hold the same cases (it gets the checks that run nothing; wrap runs no fixture); and the run must pass the same
+// completeness checks as in test. A dimension edited in the folder's trial.json since the run is reported and not used.
 async function wrapUnpublished(rawPath) {
   guildRoleOnly();
   const publishedSlug = publishedSlugFor(flag('trial'));
   const raw = JSON.parse(readFileSync(rawPath, 'utf8'));
   const run = raw.unpublishedRun;
-  if (raw.trialSource !== 'unpublished' || !run || typeof run !== 'object') die(`${rawPath} is not the report of a run with --unpublished, so it cannot become a hidden-slice record`);
+  if (raw.trialSource !== 'unpublished' || !validMarker(run)) die(`${rawPath} is not the report of a run with --unpublished, so it cannot become a hidden-slice record`);
   if (run.trial !== publishedSlug) die(`${rawPath} is a run on unpublished cases of ${run.trial}, not of ${publishedSlug}`);
+  const given = { build: flag('build'), 'build-version': flag('build-version'), sha256: flag('sha256'), runner: flag('runner'), model: modelId() };
+  const ran = { build: run.build, 'build-version': run.buildVersion, sha256: run.archiveSha256, runner: run.runner, model: run.environment.model };
+  for (const [name, value] of Object.entries(given)) if (value !== undefined && value !== ran[name]) die(`--${name} ${value} is not the run's ${ran[name] ?? 'none'}; wrap --unpublished writes the record of the run in ${rawPath}, so no record was written`);
   const folder = unpublishedFolder(flag('unpublished'));
   const published = await fetchJson(`/trials/${publishedSlug}.json`);
   if (published.version !== run.trialVersion) die(`${rawPath} ran against ${publishedSlug} v${run.trialVersion}, and the published trial is now v${published.version}; its record would count on the wrong version, so none was written`);
   refuseSharedNames(folder, published);
   const digest = casesDigest(filesIn(join(folder.root, 'cases')), folder.record.cases.length);
   if (digest.count !== run.count || digest.sha256 !== run.sha256) die(`${folder.root} no longer holds the cases that run used (it has ${digest.count} with sha256 ${digest.sha256}; the run had ${run.count} with sha256 ${run.sha256}); no record was written`);
-  const ev = wrap(rawPath, { build: slugOf(flag('build'), 'build'), buildVersion: flag('build-version', 'local'), trialRecord: published, unpublished: { ...folder, ...digest }, sha256: flag('sha256', null), role: 'guild', runner: flag('runner', 'unknown'), modules: Array.isArray(run.modules) ? run.modules : [] });
-  out(JSON.stringify(ev, null, 2));
+  const number = new Map(run.cases.map(c => c.name).sort(byteOrder).map((name, i) => [name, i + 1]));
+  for (const c of run.cases) {
+    const now = folder.record.cases.find(x => x.name === c.name)?.dimension;
+    if (now !== c.dimension) console.error(`note: ${folder.root}/trial.json now gives unpublished-${number.get(c.name)} the dimension ${now}; the record keeps ${c.dimension}, its dimension at the run`);
+  }
+  const problems = unpublishedRunProblems(raw, run);
+  if (problems.length) die(`no record was written: ${rawPath} is not the report of a complete run on the unpublished cases.\n  - ${problems.join('\n  - ')}`);
+  out(JSON.stringify(unpublishedRecord(raw, run), null, 2));
 }
 
 async function submit(path) {
@@ -767,7 +879,8 @@ Run from a checkout of https://github.com/Guild-Build/Build; the buildguild npm 
                                         --rep k marks run k of several of the same build on the same trial: the evidence id and the default file name end in -rep<k>
   node cli/buildguild.mjs test <slug|path> --trial <published-slug> --unpublished <trial-folder> --model <id> [the flags above]
                                         a guild maintainer's run of a private folder of cases as the unpublished part (hidden slice) of a
-                                        published trial: the folder is checked first, only its cases run, and the record (default
+                                        published trial: the folder is checked first, only its cases run, a record is written only for a
+                                        complete run on exactly the folder's cases, and the record (default
                                         evidence-unpublished.json) is a guild record with hiddenSlice true, its cases named unpublished-1 to -n,
                                         unpublishedCases {count, sha256} and results.bareOverallScore. The run folder and raw report hold the
                                         cases' names and prompts: never commit, upload or paste them
@@ -775,7 +888,7 @@ Run from a checkout of https://github.com/Guild-Build/Build; the buildguild npm 
                                         print the count and checksum of a folder's unpublished cases, running nothing, so both can be published first
   node cli/buildguild.mjs wrap <aggregate.json> --build <slug> --trial <slug|path> --model <id> [--build-version v] [--runner login]
                                         convert a raw eval report into buildguild.evidence.v1 naming the model it ran on (from a trial folder: a local record)
-                                        with --unpublished <folder> --trial <published-slug>: rebuild the record test --unpublished wrote from its raw report
+                                        with --unpublished <folder> --trial <published-slug>: rebuild the record test --unpublished wrote, every fact from its raw report
   node cli/buildguild.mjs submit <evidence.json> [--yes]
                                         publish as a public Gist from your GitHub account and send the summary; refuses a local run and a hidden-slice record
 `;

@@ -48,17 +48,27 @@ node cli/buildguild.mjs unpublished ./hidden-cases
 node cli/buildguild.mjs test <build> --trial <published-slug> --unpublished ./hidden-cases --model claude-sonnet-5-5 --max-cost-usd 5
 ```
 
-`unpublished <trial-folder>` runs the structural trial checks (no fixture, no model) and prints the number of cases and their checksum, so both can be published before the run.
+`unpublished <trial-folder>` runs the checks that run nothing (the structural trial checks and the roster check below; no fixture, no model) and prints the number of cases and their checksum, so both can be published before the run.
 
-`test --unpublished <trial-folder>` takes `--trial` as the published trial's slug; the other flags (`--max-cost-usd`, `--out`, `--raw-out`, `--work-dir`, `--keep-temp`, `--runner`, `-j`, `--rep`) work as in any run. Before the work directory is touched or anything is downloaded or run, it refuses, each with a plain message: a `--trial` that is a folder or is missing; a folder with no case; a case whose name is the name of a case of the published trial; and a `--role` other than `guild`. The folder then gets every check `check` runs on a trial folder, fixtures included. Only the folder's cases run, both arms, with the runner arguments of any other run; the published trial's own cases are not downloaded.
+`test --unpublished <trial-folder>` takes `--trial` as the published trial's slug; the other flags (`--max-cost-usd`, `--out`, `--raw-out`, `--work-dir`, `--keep-temp`, `--runner`, `-j`, `--rep`) work as in any run. Every refusal that needs no fixture comes first, each with a plain message, in this order:
+
+1. the arguments: a `--role` other than `guild`, a `--trial` that is a folder or is missing, a folder that is not a trial folder or has no case;
+2. the folder's structure: every check `check` runs on a trial folder, except running its fixtures;
+3. the roster: `trial.json` lists each case once, and its list is exactly the folders under `cases/`;
+4. a case whose name is the name of a case of the published trial (read from the site);
+5. the work directory (as in any run) and Claude Code being installed.
+
+Only then do the folder's fixtures run, as `check` runs them, and only after that is the work directory reset or the build downloaded. Only the folder's cases run, both arms, with the runner arguments of any other run; the published trial's own cases are not downloaded.
+
+A record is written only for a complete run on exactly the folder's cases. The run must not be partial; it must have run with and without the build, on the model the record names (where the raw report says which); the raw report must hold exactly one result for each of the folder's cases and no other, with a case total that agrees; every run of both arms must have finished without an error, with a score and without skipping a grader, as many runs as the case asks for; and every score must be the one its parts give (a case's score is the mean of its runs, its gap is its score minus its bare score, and the overall score and the mean gap are the means over the cases). Otherwise `test` writes no record, says what was wrong (naming cases only as `unpublished-<n>`) and exits 2; the raw report is still saved, marked, to work out what happened. An ordinary run is not affected.
 
 The record (default `evidence-unpublished.json`) is a `buildguild.evidence.v1` record that differs from an ordinary one in these ways:
 
 - `trial` is the published slug and `trialVersion` the published trial's current version;
 - `hiddenSlice: true`, `role: "guild"`, `gist: null`, and no `trialSource`;
 - in `results.cases`, the cases are `unpublished-1` to `unpublished-n`, numbered in the sorted order of their real names (byte order), with their scores and gaps over the bare runtime kept;
-- `results.dimensions` are computed from the folder's `trial.json`, as for any record;
-- `results.bareOverallScore` is the bare runtime's overall score on the same cases: the mean of each case's `aggregates.scoreWithout` in the raw report (the score of the arm without the build), just as `overallScore` is the mean of each case's `aggregates.score`; `null` if any case lacks it;
+- `results.dimensions` are computed as for any record, from the cases' dimensions in the folder's `trial.json` at the run;
+- `results.bareOverallScore` is the bare runtime's overall score on the same cases: the mean of each case's `aggregates.scoreWithout` in the raw report (the score of the arm without the build), just as `overallScore` is the mean of each case's `aggregates.score`;
 - `unpublishedCases: { count, sha256 }` holds the number of cases and the checksum of the folder's `cases/`.
 
 The checksum is the SHA-256 of a text with one line per regular file under `cases/`, sorted by the bytes of its path: the mode the run writes the file with (`755` for a `.sh` file, `644` for any other), a space, the SHA-256 of the file's bytes, a space, and the path relative to the folder (`cases/<name>/...`), then a line feed. File times, modes on disk, the folder's own path and the order the disk lists files do not enter it. A reader recomputes it by hand from the folder:
@@ -69,9 +79,9 @@ cd hidden-cases && find cases -type f | LC_ALL=C sort | while IFS= read -r f; do
 
 (`sha256sum` in place of `shasum -a 256` on Linux.)
 
-The record names no case, prompt, fixture or folder path. The run folder and the raw report do: they hold the cases' names and prompts. Before the run, `test` prints one warning naming the run folder, its raw report and the `--raw-out` copy, and saying they must not be committed, uploaded or pasted anywhere. The raw report is marked `"trialSource": "unpublished"`, with the published trial, its version, the count, the checksum and the module pins, so a plain `wrap` refuses it.
+The record names no case, prompt, fixture or folder path. The run folder and the raw report do: they hold the cases' names and prompts. Before the run, `test` prints one warning naming the run folder, its raw report and the `--raw-out` copy, and saying they must not be committed, uploaded or pasted anywhere. The raw report is marked `"trialSource": "unpublished"`, so a plain `wrap` refuses it, and carries `unpublishedRun`, every fact of the run its record needs: the published trial and version, the cases' real names and their dimensions at the run, the count and checksum, the build, its version and archive checksum, the runner, the date, the `--rep` suffix and the environment (module pins included).
 
-`wrap <raw.json> --unpublished <trial-folder> --trial <published-slug> --build <slug> --model <id> [--build-version v] [--sha256 s] [--runner login]` rebuilds the record from that raw report without a second paid run. Given the same build, version and runner, its record equals the one `test` wrote apart from its random id. It refuses a report without the marker, another published trial, a published trial that has moved to another version since the run, and a folder whose cases no longer match the run's count and checksum.
+`wrap <raw.json> --unpublished <trial-folder> --trial <published-slug> --model <id> [--build <slug>] [--build-version v] [--sha256 s] [--runner login]` rebuilds the record from that raw report without a second paid run. Every fact comes from the report and its marker, so its record equals the one `test` wrote apart from the random part of its id; a `--model`, `--build`, `--build-version`, `--sha256` or `--runner` that differs from the run's is refused rather than written in. It refuses a report without a complete marker, another published trial, a published trial that has moved to another version since the run, a folder that fails the checks that run nothing (`wrap` runs no fixture), a folder whose cases no longer match the run's count and checksum, and a run that is not complete, by the same checks as `test`. If the folder's `trial.json` now gives a case another dimension, `wrap` says so and keeps the dimension the case had at the run.
 
 `submit` refuses a hidden-slice record: a maintainer adds it to Build by pull request, never as a Gist.
 
