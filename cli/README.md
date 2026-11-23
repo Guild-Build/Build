@@ -16,6 +16,7 @@ node cli/buildguild.mjs add measured-delivery --scope project
 node cli/buildguild.mjs test measured-delivery --model claude-sonnet-5-5 --max-cost-usd 5
 node cli/buildguild.mjs test my-desk --trial ./my-tasks --model claude-sonnet-5-5   # your own trial folder: a local run, not evidence
 node cli/buildguild.mjs submit evidence.json
+node cli/buildguild.mjs test runbook-first --trial client-deployment-v1 --unpublished ./hidden-cases --model claude-sonnet-5-5   # a guild maintainer's hidden-slice run
 ```
 
 `new` scaffolds a build or a trial that already passes `check`. `check` runs the manifest, skill, hook, grader front-matter and fixture checks (and `claude plugin validate --strict` when Claude Code is installed); it catches the authoring mistakes the eval runner skips silently. For a trial it also refuses symlinks under `cases/`, which a published archive cannot carry, and it reports a fixture that names a network tool without running it. `publish` runs `check`, shows exactly what will be sent, asks for the rights and naming consents, and posts the submission.
@@ -36,7 +37,43 @@ After guarding `--work-dir`, `test` checks that Claude Code is installed before 
 
 The hosted Season trial workflow (`.github/workflows/trial.yml`) passes `--rep` when the owner asks for repeated runs. A request in `.github/trial-queue.json`, or the Actions tab's inputs, may add `repeat`, a whole number from 1 to 5 (default 1; a `repeat` of `null`, like an empty input, also means 1, as `null` means the default for the queue's other optional fields). The workflow then runs the build on the trial that many times, one run after another, each waiting for the owner's approval, so a gap between two builds can be compared with how much one build's score moves from run to run. Run `k` passes `--rep k`, and its evidence file, raw report and uploaded artifact are named `evidence-<build>-<trial>-rep<k>.json`, `raw-<build>-<trial>-rep<k>.json` and `evidence-<build>-<trial>-rep<k>`. A request without `repeat`, or with `repeat` 1, runs once with the names it always had. Before anyone is asked to approve, the plan refuses a `repeat` outside 1 to 5 or not a whole number, a field it does not know, and a second request for a build and trial the queue already names (ask for more runs with `repeat` instead). It also refuses two runs that would upload under one artifact name, which different requests can reach because hyphens join the parts of a name: build `a-b` on trial `c` against build `a` on trial `b-c`, or a trial whose slug ends in `-rep1` against run 1 of a repeated request. Queue one of them separately. The run summary then shows each request's repeats, and its total is each cost ceiling times its repeats.
 
-`submit` publishes that file as a public Gist from your own GitHub account (`gh gist create`) after showing you exactly what will be sent, then posts the summary and the Gist link to the guild. It refuses a record marked local before it calls `gh`, so no Gist is made.
+`submit` publishes that file as a public Gist from your own GitHub account (`gh gist create`) after showing you exactly what will be sent, then posts the summary and the Gist link to the guild. It refuses a record marked local, and a hidden-slice record (below), before it calls `gh`, so no Gist is made.
+
+## Run unpublished cases as a hidden slice
+
+A published trial can have an unpublished part, its hidden slice: cases no build author has seen, run by a guild maintainer so a build cannot be tuned to them. The cases sit in a private trial folder of the usual shape (`trial.json`, `README.md`, `LICENSE`, `cases/<name>/`), and a maintainer runs them on the maintainer's own machine, because a hosted run would publish its traces and so the cases:
+
+```
+node cli/buildguild.mjs unpublished ./hidden-cases
+node cli/buildguild.mjs test <build> --trial <published-slug> --unpublished ./hidden-cases --model claude-sonnet-5-5 --max-cost-usd 5
+```
+
+`unpublished <trial-folder>` runs the structural trial checks (no fixture, no model) and prints the number of cases and their checksum, so both can be published before the run.
+
+`test --unpublished <trial-folder>` takes `--trial` as the published trial's slug; the other flags (`--max-cost-usd`, `--out`, `--raw-out`, `--work-dir`, `--keep-temp`, `--runner`, `-j`, `--rep`) work as in any run. Before the work directory is touched or anything is downloaded or run, it refuses, each with a plain message: a `--trial` that is a folder or is missing; a folder with no case; a case whose name is the name of a case of the published trial; and a `--role` other than `guild`. The folder then gets every check `check` runs on a trial folder, fixtures included. Only the folder's cases run, both arms, with the runner arguments of any other run; the published trial's own cases are not downloaded.
+
+The record (default `evidence-unpublished.json`) is a `buildguild.evidence.v1` record that differs from an ordinary one in these ways:
+
+- `trial` is the published slug and `trialVersion` the published trial's current version;
+- `hiddenSlice: true`, `role: "guild"`, `gist: null`, and no `trialSource`;
+- in `results.cases`, the cases are `unpublished-1` to `unpublished-n`, numbered in the sorted order of their real names (byte order), with their scores and gaps over the bare runtime kept;
+- `results.dimensions` are computed from the folder's `trial.json`, as for any record;
+- `results.bareOverallScore` is the bare runtime's overall score on the same cases: the mean of each case's `aggregates.scoreWithout` in the raw report (the score of the arm without the build), just as `overallScore` is the mean of each case's `aggregates.score`; `null` if any case lacks it;
+- `unpublishedCases: { count, sha256 }` holds the number of cases and the checksum of the folder's `cases/`.
+
+The checksum is the SHA-256 of a text with one line per regular file under `cases/`, sorted by the bytes of its path: the mode the run writes the file with (`755` for a `.sh` file, `644` for any other), a space, the SHA-256 of the file's bytes, a space, and the path relative to the folder (`cases/<name>/...`), then a line feed. File times, modes on disk, the folder's own path and the order the disk lists files do not enter it. A reader recomputes it by hand from the folder:
+
+```
+cd hidden-cases && find cases -type f | LC_ALL=C sort | while IFS= read -r f; do case "$f" in *.sh) m=755;; *) m=644;; esac; printf '%s %s %s\n' "$m" "$(shasum -a 256 "$f" | cut -d' ' -f1)" "$f"; done | shasum -a 256
+```
+
+(`sha256sum` in place of `shasum -a 256` on Linux.)
+
+The record names no case, prompt, fixture or folder path. The run folder and the raw report do: they hold the cases' names and prompts. Before the run, `test` prints one warning naming the run folder, its raw report and the `--raw-out` copy, and saying they must not be committed, uploaded or pasted anywhere. The raw report is marked `"trialSource": "unpublished"`, with the published trial, its version, the count, the checksum and the module pins, so a plain `wrap` refuses it.
+
+`wrap <raw.json> --unpublished <trial-folder> --trial <published-slug> --build <slug> --model <id> [--build-version v] [--sha256 s] [--runner login]` rebuilds the record from that raw report without a second paid run. Given the same build, version and runner, its record equals the one `test` wrote apart from its random id. It refuses a report without the marker, another published trial, a published trial that has moved to another version since the run, and a folder whose cases no longer match the run's count and checksum.
+
+`submit` refuses a hidden-slice record: a maintainer adds it to Build by pull request, never as a Gist.
 
 `check` uses the same build manifest rules as the planner and draft API. Build manifests include name, summary and licence as well as profiles and modules; each profile has a one-line limits statement of at least ten characters. Private checks and exports do not require listing consent. The internal `bundles/bare-runtime` trial control intentionally has no modules and uses the baseline category; it is not an authorable build and does not pass these checks.
 
