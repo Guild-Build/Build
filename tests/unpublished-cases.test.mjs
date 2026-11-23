@@ -219,6 +219,19 @@ test('the checksum ignores the folder\'s path, file times, file modes and creati
   assert.notEqual((await sumOf('./moved')).sha256, base.sha256);
 });
 
+test('a folder with the same bytes has the same checksum on every platform', async t => {
+  const f = await setup(t);
+  // Nothing in this folder depends on where the test runs, so CI on Linux and a run on macOS must print the same value.
+  f.writeFolder('fixed', PRIVATE);
+  f.write('fixed/cases/middle-secret-handoff/setup.sh', 'true\n', 0o644);
+  const r = await f.run(['unpublished', './fixed']);
+  assert.equal(r.status, 0, r.stderr);
+  const FIXED = '9690185489a9997719ce2a6d208062a056363c1da5ba8b87e57155e1321c75c9';
+  assert.deepEqual(digestOf(r.stdout), { count: 3, sha256: FIXED });
+  assert.equal(shellChecksum(join(f.root, 'fixed')), FIXED);
+  assert.equal(r.stdout, `3 unpublished cases\nsha256 ${FIXED}\nunpublishedCases {"count":3,"sha256":"${FIXED}"}\n`);
+});
+
 test('wrap --unpublished rebuilds the same record from the saved raw report, and wrap refuses it any other way', async t => {
   const f = await setup(t);
   const r = await f.testRun(['--trial', 'sample-trial', '--unpublished', './private-folder-q7', '--raw-out', 'raw-private.json']);
