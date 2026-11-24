@@ -10,6 +10,7 @@ import { crc32 } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { GRADER_KEYS, PROMPT_KEYS, caseYamlKeys } from '../cli/unpublished-form.mjs';
 import test from 'node:test';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -118,7 +119,8 @@ if (damage.includes('no-report')) process.exit(90);
 // The cases, found as the loader of Claude Code 2.1.321 finds them (Od and Aa). The eval folder is --eval-dir, else the
 // manifest's experimental.evals, else evals. The one value "evals" is a search of the whole tree: it opens every folder of that
 // name, and the start is already inside the suite when its own path holds one. Any other value opens exactly
-// <plugin root>/<value> and walks only the folders on the way to it. Inside the suite, a folder holding case.yaml or prompt.md
+// <plugin root>/<value> and walks only the folders on the way to it (for a start with an ordinary name: the loader takes a
+// start named case.yaml or prompt.md for a case's file, which this stub does not model). Inside the suite, a folder holding case.yaml or prompt.md
 // is a case; discovery skips node_modules, .claude, results, mocks and .git.
 const manifest = existsSync('.claude-plugin/plugin.json') ? JSON.parse(readFileSync('.claude-plugin/plugin.json', 'utf8')) : {};
 const evalValue = args.includes('--eval-dir') ? args[args.indexOf('--eval-dir') + 1] : manifest.experimental?.evals ?? 'evals';
@@ -895,72 +897,161 @@ test('wrap takes every fact from the run\'s report and refuses a flag that says 
   assert.match(unloaded.stderr, /raw-no-plugin\.json is not the report of a run with --unpublished, so it cannot become a hidden-slice record/);
 });
 
-// The fifth review, finding 4: each value rule of the exact form takes its form and refuses one just outside it, so a test fails
-// when a rule is loosened. Each example is one file of a one-case folder, checked by `unpublished`, which runs nothing.
+// The fifth and sixth reviews: each value rule of the case form takes its form and refuses one just outside it. The rules are
+// read from the code's own specification (cli/unpublished-form.mjs), every key's rule with every nested key's, so a rule with
+// no accepted or no refused example here, or a range without its four edges, fails the test, and so does a rule loosened to
+// take a refused example. A refused example counts only when the form's own rule refuses it, at its file and at its key's
+// line: a value the structure check `check` shares refuses first (an unknown grader type) tests nothing here. Each example is
+// one file of a one-case folder, checked by `unpublished`, which runs nothing.
 const NUL = String.fromCharCode(0);
+const P = (line, extra = '') => `tags: [safety]\n${line}\nallowed_tools: [Write]${extra}`;
+const R = line => `type: regex\npattern: 'done'\n${line}`;
+const U = line => `type: tool_used\ntool: Read\n${line}`;
+const C = lines => `schema_version: "1.1"\nname: alpha-secret-ledger\n${lines}`;
 const VALUE_RULES = [
-  // [rule, file, lines, accepted, other files of the case]
-  ['quoted', 'grader', "type: regex\npattern: 'done'", true],
-  ['quoted', 'grader', "type: regex\npattern: ''", true],
-  ['quoted', 'grader', `type: regex\npattern: 'done${NUL}'`, false],
-  ['quoted', 'grader', "type: regex\npattern: 'do\tne'", false],
-  ['quoted', 'grader', `type: regex\npattern: 'done${String.fromCharCode(0xfeff)}'`, false],
-  ['quoted', 'grader', 'type: regex\npattern: done', false],
-  ['quoted', 'grader', 'type: regex\npattern: "done"', false],
-  ['quoted', 'grader', "type: regex\npattern: '(unclosed'", false],
-  ['word', 'prompt', 'tags: [safety, deployment]\nallowed_tools: [Write]', true],
-  ['word', 'prompt', 'tags: [safety, yes]\nallowed_tools: [Write]', false],
-  ['word', 'prompt', 'tags: [safety, 1e3]\nallowed_tools: [Write]', false],
-  ['word', 'prompt', 'tags: [safety, -x]\nallowed_tools: [Write]', false],
-  ['list', 'prompt', 'tags: [safety]\nallowed_tools: [Read, Write]', true],
-  ['list', 'prompt', 'tags: [safety]\nallowed_tools: [Read,Write]', false],
-  ['list', 'prompt', 'tags: [safety]\nallowed_tools: Read', false],
-  ['list', 'prompt', 'tags: [safety]\nallowed_tools: []', false],
-  ['tool', 'prompt', 'tags: [safety]\nallowed_tools: [Write, mcp__notes__read]', true],
-  ['tool', 'prompt', 'tags: [safety]\nallowed_tools: [True]', false],
-  ['tool', 'prompt', 'tags: [safety]\nallowed_tools: [Bash(git:*)]', false],
-  ['whole', 'prompt', 'tags: [safety]\nruns: 50\nallowed_tools: [Write]', true],
-  ['whole', 'prompt', 'tags: [safety]\nruns: 51\nallowed_tools: [Write]', false],
-  ['whole', 'prompt', 'tags: [safety]\nruns: 01\nallowed_tools: [Write]', false],
-  ['whole', 'prompt', 'tags: [safety]\nruns: 1.0\nallowed_tools: [Write]', false],
-  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 0.01", true],
-  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 2.5", true],
-  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 1000", true],
-  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 0", false],
-  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 0.001", false],
-  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 1000.5", false],
-  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 2.12345", false],
-  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 1e3", false],
-  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: config/app.json", true],
-  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: .env", true],
-  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: -", false],
-  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: -x", false],
-  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: ../x", false],
-  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: /etc/hosts", false],
-  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: ...", false],
-  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: null", false],
-  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: ~", false],
-  ['flags', 'grader', "type: regex\npattern: 'done'\nflags: mi", true],
-  ['flags', 'grader', "type: regex\npattern: 'done'\nflags: y", false],
-  ['flags', 'grader', "type: regex\npattern: 'done'\nflags: x", false],
-  ['match', 'grader', "type: regex\npattern: 'done'\nmatch: not_contains", true],
-  ['match', 'grader', "type: regex\npattern: 'done'\nmatch: count:2", false],
-  ['target', 'grader', "type: regex\npattern: 'done'\ntarget: last_message", true],
-  ['target', 'grader', "type: regex\npattern: 'done'\ntarget: trace", false],
-  ['schema', 'case.yaml', 'schema_version: "1.1"\nname: alpha-secret-ledger\ncontext:\n  scaffold_script: fixture.sh', true],
-  ['schema', 'case.yaml', 'schema_version: 1.1\nname: alpha-secret-ledger\ncontext:\n  scaffold_script: fixture.sh', false],
-  ['name', 'case.yaml', 'schema_version: "1.1"\nname: alpha-secret-ledger', true],
-  ['name', 'case.yaml', 'schema_version: "1.1"\nname: "alpha-secret-ledger"\ncontext:\n  scaffold_script: fixture.sh', false],
-  ['file', 'case.yaml', 'schema_version: "1.1"\nname: alpha-secret-ledger\ncontext:\n  scaffold_script: setup.sh', true, { 'setup.sh': 'true\n' }],
-  ['file', 'case.yaml', 'schema_version: "1.1"\nname: alpha-secret-ledger\ncontext:\n  scaffold_script: -x.sh', false, { '-x.sh': 'true\n' }],
-  ['file', 'case.yaml', 'schema_version: "1.1"\nname: alpha-secret-ledger\ncontext:\n  scaffold_script: null', false, { null: 'true\n' }],
+  // [file, key, lines, accepted, other files of the case]
+  ['prompt', 'tags', 'tags: [safety, deployment]\nallowed_tools: [Write]', true],
+  ['prompt', 'tags', 'tags: [safety, yes]\nallowed_tools: [Write]', false],
+  ['prompt', 'tags', 'tags: [safety, 1e3]\nallowed_tools: [Write]', false],
+  ['prompt', 'tags', 'tags: [safety, -x]\nallowed_tools: [Write]', false],
+  ['prompt', 'runs', P('runs: 1'), true],
+  ['prompt', 'runs', P('runs: 50'), true],
+  ['prompt', 'runs', P('runs: 0'), false],
+  ['prompt', 'runs', P('runs: 51'), false],
+  ['prompt', 'runs', P('runs: 01'), false],
+  ['prompt', 'runs', P('runs: 1.0'), false],
+  ['prompt', 'max_turns', P('max_turns: 1'), true],
+  ['prompt', 'max_turns', P('max_turns: 200'), true],
+  ['prompt', 'max_turns', P('max_turns: 0'), false],
+  ['prompt', 'max_turns', P('max_turns: 201'), false],
+  ['prompt', 'timeout_seconds', P('timeout_seconds: 1'), true],
+  ['prompt', 'timeout_seconds', P('timeout_seconds: 3600'), true],
+  ['prompt', 'timeout_seconds', P('timeout_seconds: 0'), false],
+  ['prompt', 'timeout_seconds', P('timeout_seconds: 3601'), false],
+  ['prompt', 'allowed_tools', 'tags: [safety]\nallowed_tools: [Read, Write]', true],
+  ['prompt', 'allowed_tools', 'tags: [safety]\nallowed_tools: [Write, mcp__notes__read]', true],
+  ['prompt', 'allowed_tools', 'tags: [safety]\nallowed_tools: [Read,Write]', false],
+  ['prompt', 'allowed_tools', 'tags: [safety]\nallowed_tools: Read', false],
+  ['prompt', 'allowed_tools', 'tags: [safety]\nallowed_tools: []', false],
+  ['prompt', 'allowed_tools', 'tags: [safety]\nallowed_tools: [True]', false],
+  ['prompt', 'allowed_tools', 'tags: [safety]\nallowed_tools: [Bash(git:*)]', false],
+  ['grader', 'type', "type: regex\npattern: 'done'", true],
+  ['grader', 'type', 'type: tool_used\ntool: Read', true],
+  ['grader', 'type', 'type: tool_order', false],
+  ['grader', 'type', 'type: baseline', false],
+  ['grader', 'type', 'type: file_exists\npath: out.txt', false],
+  ['grader', 'pattern', "type: regex\npattern: 'done'", true],
+  ['grader', 'pattern', "type: regex\npattern: ''", true],
+  ['grader', 'pattern', `type: regex\npattern: 'done${NUL}'`, false],
+  ['grader', 'pattern', "type: regex\npattern: 'do\tne'", false],
+  ['grader', 'pattern', `type: regex\npattern: 'done${String.fromCharCode(0xfeff)}'`, false],
+  ['grader', 'pattern', 'type: regex\npattern: done', false],
+  ['grader', 'pattern', 'type: regex\npattern: "done"', false],
+  ['grader', 'pattern', "type: regex\npattern: '(unclosed'", false],
+  ['grader', 'flags', R('flags: mi'), true],
+  ['grader', 'flags', R('flags: y'), false],
+  ['grader', 'flags', R('flags: x'), false],
+  ['grader', 'match', R('match: not_contains'), true],
+  ['grader', 'match', R('match: contains'), true],
+  ['grader', 'match', R('match: count:2'), false],
+  ['grader', 'target', R('target: last_message'), true],
+  ['grader', 'target', R('target: trace'), false],
+  ['grader', 'target.source', R('target:\n  source: file\n  path: file.txt'), true],
+  ['grader', 'target.source', R('target:\n  source: anything\n  path: file.txt'), false],
+  ['grader', 'target.path', R('target:\n  source: file\n  path: config/app.json'), true],
+  ['grader', 'target.path', R('target:\n  source: file\n  path: .env'), true],
+  ['grader', 'target.path', R('target:\n  source: file\n  path: -'), false],
+  ['grader', 'target.path', R('target:\n  source: file\n  path: -x'), false],
+  ['grader', 'target.path', R('target:\n  source: file\n  path: ../x'), false],
+  ['grader', 'target.path', R('target:\n  source: file\n  path: /etc/hosts'), false],
+  ['grader', 'target.path', R('target:\n  source: file\n  path: ...'), false],
+  ['grader', 'target.path', R('target:\n  source: file\n  path: null'), false],
+  ['grader', 'target.path', R('target:\n  source: file\n  path: ~'), false],
+  ['grader', 'weight', R('weight: 0.01'), true],
+  ['grader', 'weight', R('weight: 1000'), true],
+  ['grader', 'weight', R('weight: 2.5'), true],
+  ['grader', 'weight', R('weight: 0.0099'), false],
+  ['grader', 'weight', R('weight: 1000.0001'), false],
+  ['grader', 'weight', R('weight: 0.001'), false],
+  ['grader', 'weight', R('weight: 1000.5'), false],
+  ['grader', 'weight', R('weight: 0'), false],
+  ['grader', 'weight', R('weight: 2.12345'), false],
+  ['grader', 'weight', R('weight: 1e3'), false],
+  ['grader', 'tool', 'type: tool_used\ntool: Read', true],
+  ['grader', 'tool', 'type: tool_used\ntool: Skill', false],
+  ['grader', 'tool', 'type: tool_used\ntool: Write', false],
+  ['grader', 'input_match', U("input_match: 'file_path'"), true],
+  ['grader', 'input_match', U(`input_match: 'done${NUL}'`), false],
+  ['grader', 'input_match', U('input_match: done'), false],
+  ['grader', 'min', U('min: 0'), true],
+  ['grader', 'min', U('min: 9007199254740991'), true],
+  ['grader', 'min', U('min: -1'), false],
+  ['grader', 'min', U('min: 9007199254740992'), false],
+  ['grader', 'min', U('min: 1.5'), false],
+  ['grader', 'max', U('max: 0'), true],
+  ['grader', 'max', U('max: 9007199254740991'), true],
+  ['grader', 'max', U('max: -1'), false],
+  ['grader', 'max', U('max: 9007199254740992'), false],
+  ['grader', 'max', U('max: 1.5'), false],
+  ['case.yaml', 'schema_version', C('context:\n  scaffold_script: fixture.sh'), true],
+  ['case.yaml', 'schema_version', 'schema_version: 1.1\nname: alpha-secret-ledger', false],
+  ['case.yaml', 'schema_version', 'schema_version: 1.1\nname: alpha-secret-ledger\ncontext:\n  scaffold_script: fixture.sh', false],
+  ['case.yaml', 'schema_version', 'schema_version: "2.0"\nname: alpha-secret-ledger', false],
+  ['case.yaml', 'name', 'schema_version: "1.1"\nname: alpha-secret-ledger', true],
+  ['case.yaml', 'name', 'schema_version: "1.1"\nname: "alpha-secret-ledger"', false],
+  ['case.yaml', 'name', 'schema_version: "1.1"\nname: "alpha-secret-ledger"\ncontext:\n  scaffold_script: fixture.sh', false],
+  ['case.yaml', 'name', 'schema_version: "1.1"\nname: other-name', false],
+  ['case.yaml', 'context.scaffold_script', C('context:\n  scaffold_script: setup.sh'), true, { 'setup.sh': 'true\n' }],
+  ['case.yaml', 'context.scaffold_script', C('context:\n  scaffold_script: -x.sh'), false, { '-x.sh': 'true\n' }],
+  ['case.yaml', 'context.scaffold_script', C('context:\n  scaffold_script: null'), false, { null: 'true\n' }],
 ];
+// Every rule of the specification, with its key ("target.source" for a nested one) and the file it belongs to.
+const SPEC = { prompt: PROMPT_KEYS, grader: GRADER_KEYS, 'case.yaml': caseYamlKeys('alpha-secret-ledger', () => true) };
+const RULES = Object.entries(SPEC).flatMap(([file, keys]) => Object.entries(keys).flatMap(([key, form]) => [
+  ...(form.value ? [{ file, key, rule: form.value }] : []),
+  ...(form.nested ?? []).map(([sub, rule]) => ({ file, key: `${key}.${sub}`, rule })),
+]));
+// The value an example gives its key: on the key's own line, or on its nested line two spaces in.
+const lineOf = (key, lines) => {
+  const [top, sub] = key.split('.');
+  return lines.split('\n').findIndex(l => sub ? l.startsWith(`  ${sub}: `) : l.startsWith(`${top}: `));
+};
+const valueOf = (key, lines) => {
+  const line = lines.split('\n')[lineOf(key, lines)];
+  return line === undefined ? undefined : line.slice(line.indexOf(': ') + 2);
+};
+// A range's edges as the form writes them: a whole number, or a decimal with as many places as its step.
+const edges = ({ low, high, step }) => {
+  const places = Math.max(0, Math.round(-Math.log10(step))), scale = 10 ** places;
+  const text = units => (units / scale).toFixed(places).replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '');
+  const [lo, hi] = [Math.round(low * scale), Math.round(high * scale)];
+  return { accepted: [text(lo), text(hi)], refused: [text(lo - 1), text(hi + 1)] };
+};
 test('each value rule of the case form takes its form and refuses one just outside it', async t => {
   const f = await setup(t);
   const A = PRIVATE[1];
   const files = { prompt: `${A.name}/prompt.md`, grader: `${A.name}/graders/done.md`, 'case.yaml': `${A.name}/case.yaml` };
+  // The test's own data covers every rule the code has: an accepted and a refused example each, and a range's both edges.
+  const missing = [];
+  for (const { file, key, rule } of RULES) {
+    const examples = VALUE_RULES.filter(e => e[0] === file && e[1] === key);
+    const values = accepted => examples.filter(e => e[3] === accepted).map(e => valueOf(key, e[2]));
+    if (!values(true).length) missing.push(`${file} ${key}: no accepted example`);
+    if (!values(false).length) missing.push(`${file} ${key}: no refused example`);
+    if (rule.range) {
+      const { accepted, refused } = edges(rule.range);
+      for (const v of accepted) if (!values(true).includes(v)) missing.push(`${file} ${key}: no accepted example at ${v}`);
+      for (const v of refused) if (!values(false).includes(v)) missing.push(`${file} ${key}: no refused example at ${v}`);
+    }
+  }
+  assert.deepEqual(missing, [], 'every rule of the specification has its examples');
+  for (const [file, key, lines] of VALUE_RULES) {
+    assert.ok(RULES.some(r => r.file === file && r.key === key), `${file} ${key} is not a rule of the specification`);
+    assert.notEqual(valueOf(key, lines), undefined, `the example for ${file} ${key} gives no ${key}`);
+  }
+  // Each example through `unpublished`: an accepted one passes; a refused one is refused at its file, at its key.
   const wrong = [];
-  for (const [i, [rule, file, lines, accepted, others = {}]] of VALUE_RULES.entries()) {
+  for (const [i, [file, key, lines, accepted, others = {}]] of VALUE_RULES.entries()) {
     const dir = `rule-${i}`;
     f.writeFolder(dir, [A]);
     f.write(`${dir}/cases/${A.name}/case.yaml`, `schema_version: "1.1"\nname: ${A.name}\ncontext:\n  scaffold_script: fixture.sh\n`);
@@ -969,17 +1060,22 @@ test('each value rule of the case form takes its form and refuses one just outsi
     const text = file === 'case.yaml' ? `${lines}\n` : file === 'prompt' ? `---\n${lines}\n---\n${A.prompt}\n` : `---\n${lines}\n---\n`;
     f.write(`${dir}/cases/${files[file]}`, text);
     const r = await f.run(['unpublished', `./${dir}`]);
-    const refusedAtFile = r.status === 1 && r.stderr.includes(`${dir}/cases/${files[file]}`);
-    if (accepted ? r.status !== 0 : !refusedAtFile) wrong.push(`${rule} ${JSON.stringify(lines.split('\n').pop())}: ${accepted ? 'refused' : 'accepted'}; ${r.stderr.trim().split('\n').pop()}`);
+    // Refused at its key: the message is about this file and names the key, and a line it names is the key's own line (the
+    // front matter starts on line 2; a case.yaml on line 1).
+    const top = key.split('.')[0], path = `/${dir}/cases/${files[file]}`;
+    const line = r.stderr.match(new RegExp(`${path.replace(/[.]/g, '[.]')}, line (\\d+)`));
+    const refusedThere = r.status === 1 && r.stderr.includes(path)
+      && [`the value of ${top} is not`, `: ${top} takes `, `: ${top} is not a valid regular expression`].some(said => r.stderr.includes(said))
+      && (line === null || Number(line[1]) === lineOf(key, lines) + (file === 'case.yaml' ? 1 : 2));
+    if (accepted ? r.status !== 0 : !refusedThere) wrong.push(`${file} ${key} ${JSON.stringify(valueOf(key, lines))}: ${accepted ? 'refused' : 'not refused at its key'}; ${r.stderr.trim().split('\n').pop()}`);
   }
   assert.deepEqual(wrong, []);
-  assert.deepEqual([...new Set(VALUE_RULES.filter(r => r[3]).map(r => r[0]))].sort(), [...new Set(VALUE_RULES.map(r => r[0]))].sort(), 'each rule has an accepted example');
-  assert.deepEqual([...new Set(VALUE_RULES.filter(r => !r[3]).map(r => r[0]))].sort(), [...new Set(VALUE_RULES.map(r => r[0]))].sort(), 'each rule has a refused example');
 });
 
 // The fifth review, finding 5: with --eval-dir evals the runner's loader searched the whole run folder, so an archive's own
 // evals folder, or a run folder named evals holding case files at its top, could run in place of or beside the folder's cases.
-// With --eval-dir unpublished-cases it opens exactly that folder of the run folder (Claude Code 2.1.321, Od and Aa).
+// With --eval-dir unpublished-cases it opens exactly that folder of a run folder with an ordinary name (Claude Code 2.1.321,
+// Od and Aa).
 test('the runner is pointed at the folder\'s cases only: another evals folder in the archive, or a run folder named evals, is not read', async t => {
   const f = await setup(t);
   const serve = (slug, files) => { const zip = zipOf(files); f.routes[`/builds/${slug}.json`] = build => JSON.stringify(build(slug, zip)); f.routes[`/dl/${slug}.zip`] = zip; };

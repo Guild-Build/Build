@@ -13,6 +13,7 @@ import { prepareComparison } from './comparison-preparation.mjs';
 import { trialTemplateFiles } from './trial-templates.mjs';
 import { checkExamples } from './grader-examples.mjs';
 import { attemptStatus, pluginLoaded } from './comparison-results.mjs';
+import { CASE_PATH_NAME, DEFINITION_BYTES, GRADER_FILES, GRADER_KEYS, GRADER_TEMPLATE, GRADER_TYPES, PROMPT_KEYS, PROMPT_TEMPLATE, WORD, caseYamlKeys, frontMatter } from './unpublished-form.mjs';
 
 const ORIGIN = process.env.BUILDGUILD_ORIGIN || 'https://buildguild.gg';
 const args = process.argv.slice(2);
@@ -288,75 +289,7 @@ function casesDigest(files, count) {
   const lines = paths.map(rel => `${modeFor(rel).toString(8)} ${createHash('sha256').update(files[rel]).digest('hex')} cases/${rel}\n`).join('');
   return { count, sha256: createHash('sha256').update(lines).digest('hex') };
 }
-// The files that define a case, in the public trial's form only (as content/trials/client-deployment-v1/cases/ writes them),
-// checked line by line in the preflight. This is the mode's own rule, not a copy of the runner's loader: whether the runner
-// loads a case is the runner's to decide (a run it could not load gives no record). The runner (Claude Code 2.1.321) reads case.yaml, and the front matter of
-// prompt.md and of each grader, with Bun.YAML.parse. It takes a case's name from case.yaml, or from a `name` in prompt.md's
-// front matter, which overrides it, else from the folder; names a grader after its file unless its front matter sets `name`;
-// skips a grader file with no front matter; closes front matter at the first "---" it meets, even inside a line; loads a
-// case's `plugins` and a plugin manifest it finds in a case folder; and leaves a with-only grader (an `arm` of with-only, a
-// tool_used grader of the Skill tool, a grader of mock_calls) out of the bare arm. So this mode takes a small exact subset of
-// that form, meant to be read as the check reads it: named after its folder, each grader after its file, every grader scoring
-// both arms, the build the only plugin. Anything outside it is refused, never interpreted.
-// A plain value a YAML reader takes as text: not a boolean, a null, a number or a date in either YAML 1.1 or 1.2.
-const YAML_WORDS = new Set(['true', 'false', 'null', 'yes', 'no', 'on', 'off', 'y', 'n']);
-const yamlText = v => !YAML_WORDS.has(v.toLowerCase())
-  && !/^[-+]?(\d[\d_]*|0x[\da-f]+|0o[0-7]+|0b[01]+|(\d+\.?\d*|\.\d+)(e[-+]?\d+)?|\.inf|\.nan)$/i.test(v) && !/^\d{4}-\d\d?-\d\d?$/.test(v);
-// A plain value YAML reads as text: it starts with a letter, a digit, "." or "_", never with an indicator ("-", "?", ":", ",",
-// "[", "]", "{", "}", "#", "&", "*", "!", "|", ">", "'", quote, "%", "@", backtick) or "~"; it is not dots only; and it is not
-// one of the words or numbers above.
-const plainText = v => /^[A-Za-z0-9._]/.test(v) && !/^\.+$/.test(v) && yamlText(v);
-const WORD = v => /^[a-z0-9][a-z0-9-]*$/.test(v) && yamlText(v);
-const TOOL = v => /^[A-Za-z][A-Za-z0-9_]*$/.test(v) && yamlText(v);
-const LIST = item => v => { const m = v.match(/^\[(.+)\]$/); return m !== null && m[1].split(', ').every(item); };
-const WHOLE = (low, high) => v => /^(0|[1-9]\d*)$/.test(v) && Number(v) >= low && Number(v) <= high;
-// A weight is a decimal from 0.01 to 1000 with at most four digits after the point: wider than any real case, and no sum of
-// 256 of them can overflow the runner's weighted score.
-const WEIGHT = v => /^(0|[1-9]\d{0,3})(\.\d{1,4})?$/.test(v) && Number(v) >= 0.01 && Number(v) <= 1000;
-// One single-quoted line with no quote and no control or line-separator character inside: YAML reads its text exactly.
-const UNQUOTED_BREAKS = [0x2028, 0x2029, 0xfeff, 0xfffe, 0xffff].map(code => String.fromCharCode(code));
-const QUOTED = v => /^'[^']*'$/.test(v) && !/[\x00-\x1f\x7f-\x9f]/.test(v) && !UNQUOTED_BREAKS.some(c => v.includes(c));
-const RELATIVE_PATH = v => plainText(v) && v.split('/').every(s => CASE_PATH_NAME.test(s) && !/^\.+$/.test(s));
-// The keys of each file, each value's one form, and what that form is, for the refusal. They are the keys the public trial's
-// eight cases use; a tool_used grader only as the one public grader of that type writes it (of the Read tool).
-const PROMPT_KEYS = {
-  tags: { value: LIST(WORD), says: 'a list of lower-case words, as [safety, deployment]' },
-  runs: { value: WHOLE(1, 50), says: 'a whole number from 1 to 50' },
-  max_turns: { value: WHOLE(1, 200), says: 'a whole number from 1 to 200' },
-  timeout_seconds: { value: WHOLE(1, 3600), says: 'a whole number from 1 to 3600' },
-  allowed_tools: { value: LIST(TOOL), says: 'a list of tool names, as [Read, Write]' },
-};
-const GRADER_KEYS = {
-  type: { value: v => v === 'regex' || v === 'tool_used', says: 'regex, or tool_used as the public trial writes it' },
-  pattern: { value: QUOTED, says: 'one single-quoted line with no quote inside' },
-  flags: { value: v => /^[dgimsuvy]+$/.test(v) && yamlText(v), says: 'regular expression flags (d, g, i, m, s, u, v, y), not y alone' },
-  match: { value: v => v === 'contains' || v === 'not_contains', says: 'contains or not_contains' },
-  target: { value: v => v === 'last_message', nested: [['source', v => v === 'file'], ['path', RELATIVE_PATH]], says: 'last_message, or no value and then "  source: file" and "  path: <a relative path>"' },
-  weight: { value: WEIGHT, says: 'a decimal from 0.01 to 1000 with at most four digits after the point' },
-  tool: { value: v => v === 'Read', says: 'Read, the one tool a tool_used grader names in the public trial' },
-  input_match: { value: QUOTED, says: 'one single-quoted line with no quote inside' },
-  min: { value: WHOLE(0, Number.MAX_SAFE_INTEGER), says: 'a whole number' },
-  max: { value: WHOLE(0, Number.MAX_SAFE_INTEGER), says: 'a whole number' },
-};
-const GRADER_TYPES = {
-  regex: { keys: ['type', 'pattern', 'flags', 'match', 'target', 'weight'], needs: ['pattern'] },
-  tool_used: { keys: ['type', 'tool', 'input_match', 'min', 'max', 'weight'], needs: ['tool'] },
-};
-// The loader's fixed limits, read from Claude Code 2.1.321: 1,048,576 bytes for case.yaml, prompt.md and each grader file, and
-// 256 .md files in graders/. They are the last facts of the loader this check copies.
-const DEFINITION_BYTES = 1048576, GRADER_FILES = 256;
-// The runner's blank `init` templates, which it refuses to run (Claude Code 2.1.321).
-const PROMPT_TEMPLATE = 'TODO: describe what the agent should do';
-const GRADER_TEMPLATE = 'TODO: describe what a successful response looks like';
-// The lines of prompt.md's or a grader's front matter, and its body: the file opens with a line that is exactly "---" and the
-// front matter runs to the next line that is exactly "---", with no "---" anywhere in between. null otherwise.
-function frontMatter(text) {
-  const lines = text.split('\n');
-  if (lines[0] !== '---') return null;
-  const close = lines.indexOf('---', 1);
-  if (close < 0 || lines.slice(1, close).some(line => line.includes('---'))) return null;
-  return { lines: lines.slice(1, close), body: lines.slice(close + 1).join('\n') };
-}
+// The case form's specification is in unpublished-form.mjs; readExact and refuseOutsideForm apply it, refusing by name.
 // Reads lines in the exact form, or refuses at the first line outside it: each is "key: value", the key a bare lower-case word
 // from spec given once, the value one its form takes. A key with `nested` may instead have no value, and is then followed by
 // exactly its nested keys' lines, in that order, each indented by two spaces. first is the file's line number of lines[0].
@@ -395,8 +328,8 @@ function refuseOutsideForm(root, names, files, entries) {
     if (text === null || text.includes('\r')) refuse('form-text', `${at(rel)} is not UTF-8 text without carriage returns, the form this mode takes; nothing was run`);
     return text;
   };
-  // cases/ holds the case folders and nothing else; no case folder holds a plugin manifest, which the runner would load for that
-  // case in place of the build; and graders/ holds grader files, <name>.md, only.
+  // cases/ holds the case folders and nothing else; no case folder has a plugin manifest at its top, which the runner would
+  // load for that case in place of the build; and graders/ holds grader files, <name>.md, only.
   for (const rel of entries) {
     const parts = rel.split('/');
     if (parts.length === 1 && files[rel] !== undefined) refuse('form-file', `${at(rel)} is a file at the top of cases/, which holds only the case folders; nothing was run`);
@@ -408,11 +341,7 @@ function refuseOutsideForm(root, names, files, entries) {
     if (graderFiles > GRADER_FILES) refuse('form-size', `${at(`${n}/graders`)} holds ${graderFiles} grader files; the runner reads at most ${GRADER_FILES}. Nothing was run.`);
     if (files[`${n}/case.yaml`] !== undefined) {
       const rel = `${n}/case.yaml`;
-      const keys = readExact(textOf(rel).replace(/\n$/, '').split('\n'), {
-        schema_version: { value: v => v === '"1.1"', says: '"1.1"' },
-        name: { value: v => v === n, says: `the folder's name, ${n}` },
-        context: { nested: [['scaffold_script', v => CASE_PATH_NAME.test(v) && plainText(v) && files[`${n}/${v}`] !== undefined]], says: '"  scaffold_script: <a file of this case>" on the next line' },
-      }, at(rel), 1);
+      const keys = readExact(textOf(rel).replace(/\n$/, '').split('\n'), caseYamlKeys(n, name => files[`${n}/${name}`] !== undefined), at(rel), 1);
       for (const key of ['schema_version', 'name']) if (!(key in keys)) refuse('form-missing', `${at(rel)} has no ${key}; nothing was run`);
     }
     const promptRel = `${n}/prompt.md`;
@@ -425,8 +354,9 @@ function refuseOutsideForm(root, names, files, entries) {
       const grader = frontMatter(textOf(rel));
       if (grader === null) refuse('form-front-matter', `${at(rel)} does not open with a line that is exactly "---" and close its front matter with the next such line, with no other "---" between (the runner skips a grader file without front matter); nothing was run`);
       const keys = readExact(grader.lines, GRADER_KEYS, at(rel), 2);
+      // The type's own rule takes only a type GRADER_TYPES lists.
+      if (!('type' in keys)) refuse('form-missing', `${at(rel)} has no type; nothing was run`);
       const kind = GRADER_TYPES[keys.type];
-      if (kind === undefined) refuse('form-missing', `${at(rel)} has no type; nothing was run`);
       for (const key of Object.keys(keys)) if (!kind.keys.includes(key)) refuse('form-line', `${at(rel)}: ${key} is not a key of a ${keys.type} grader here (it takes ${kind.keys.join(', ')}); nothing was run`);
       for (const key of kind.needs) if (!(key in keys)) refuse('form-missing', `${at(rel)}: a ${keys.type} grader needs ${key}; nothing was run`);
       for (const key of ['pattern', 'input_match']) {
@@ -441,14 +371,13 @@ function refuseOutsideForm(root, names, files, entries) {
 // The folder of the run folder the cases are written to, and the --eval-dir value the runner is given. In Claude Code 2.1.321
 // the loader treats the one value "evals" as a search: it opens every folder of that name below the plugin root, and takes the
 // plugin root itself for the suite when that root's path holds a folder of that name. Any other relative value opens exactly
-// <frame root>/<value> and walks only the folders on the way to it. For `plugin eval .` the frame root is the plugin root the
-// runner resolves for the target (Ng), the run folder, or none when it does not trust that folder yet; with none, the value
-// is taken from the target, the run folder again, and a target whose path ends with the value is taken for the suite, so a
-// run folder named like this one is refused.
+// <frame root>/<value> and walks only the folders on the way to it, for a target with an ordinary name: a target named
+// case.yaml or prompt.md is taken for a case's file and its folder for the case, so a run folder of either name loads no case
+// and gives no record (cli/README.md, "Left to the runner, and the rehearsal"). For `plugin eval .` the frame root is the
+// plugin root the runner resolves for the target (Ng), the run folder, or none when it does not trust that folder yet; with
+// none, the value is taken from the target, the run folder again, and a target whose path ends with the value is taken for the
+// suite, so a run folder named like this one is refused.
 const EVAL_FOLDER = 'unpublished-cases';
-// The names allowed anywhere under cases/: letters, digits, ".", "_" and "-", and neither "." nor "..". Every later step (the
-// checksum's lines, the paths the run writes) can take such a name.
-const CASE_PATH_NAME = /^[A-Za-z0-9._-]+$/;
 // A case folder's name: lower-case letters, digits and hyphens, starting with a letter or digit, text to YAML, and none of the
 // names the runner's case discovery skips (Claude Code 2.1.321 skips node_modules, .claude, results and mocks, and .git in any
 // case; the pattern already leaves out all but results and mocks).
@@ -876,8 +805,9 @@ async function testUnpublished(slug) {
   out(`unpublished cases of ${t.name} v${t.version}: ${p.folder.count} from ${p.folder.root}\n  sha256 ${p.folder.sha256}`);
   writeTree(join(p.workDir, EVAL_FOLDER), p.folder.files);
   const rawPath = join(p.workDir, 'buildguild-raw.json');
-  // The runner arguments of any other run, and --eval-dir unpublished-cases, a target the loader opens exactly (see EVAL_FOLDER),
-  // not a folder the build's manifest names; --runs is refused in this mode, so each case runs as often as it declares.
+  // The runner arguments of any other run, and --eval-dir unpublished-cases, a folder the loader opens exactly for a run folder
+  // with an ordinary name (see EVAL_FOLDER), not a folder the build's manifest names; --runs is refused in this mode, so each
+  // case runs as often as it declares.
   const argv = ['plugin', 'eval', '.', '--eval-dir', EVAL_FOLDER, '--scaffold', '--allow-tools', 'Bash', 'Write', 'Edit', '--json', 'buildguild-raw.json', '--no-publish', '--trust-plugin', '--ablation', 'with-without', '--max-cost-usd', String(flag('max-cost-usd', '5')), '--threshold', '0'];
   if (flag('j')) argv.push('-j', String(flag('j')));
   argv.push('--model', p.model);
