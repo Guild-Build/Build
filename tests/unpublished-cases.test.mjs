@@ -107,7 +107,7 @@ async function setup(t) {
   symlinkSync('/bin/bash', join(root, 'bin/bash'));
   write('bin/claude', `#!${process.execPath}
 const { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } = require('node:fs');
-const { join } = require('node:path');
+const { basename, join, relative, sep } = require('node:path');
 const args = process.argv.slice(2);
 if (args[0] === '--version') { console.log('2.1.322 (Claude Code)'); process.exit(0); }
 if (args[0] !== 'plugin' || args[1] !== 'eval') process.exit(90);
@@ -115,17 +115,39 @@ const damage = (process.env.STUB_DAMAGE || '').split(',').filter(Boolean);
 // A file that appears at an output path while the run goes on.
 if (process.env.STUB_RACE) writeFileSync(process.env.STUB_RACE, 'PRESERVE');
 if (damage.includes('no-report')) process.exit(90);
-// The cases, chosen as the runner chooses them (Claude Code 2.1.321): from --eval-dir, else from the folder the plugin's
-// manifest names in experimental.evals, else from evals/.
+// The cases, found as the loader of Claude Code 2.1.321 finds them (Od and Aa). The eval folder is --eval-dir, else the
+// manifest's experimental.evals, else evals. The one value "evals" is a search of the whole tree: it opens every folder of that
+// name, and the start is already inside the suite when its own path holds one. Any other value opens exactly
+// <plugin root>/<value> and walks only the folders on the way to it. Inside the suite, a folder holding case.yaml or prompt.md
+// is a case; discovery skips node_modules, .claude, results, mocks and .git.
 const manifest = existsSync('.claude-plugin/plugin.json') ? JSON.parse(readFileSync('.claude-plugin/plugin.json', 'utf8')) : {};
-const evalDir = args.includes('--eval-dir') ? args[args.indexOf('--eval-dir') + 1] : manifest.experimental?.evals ?? 'evals';
-const names = readdirSync(evalDir).sort();
-appendFileSync(${JSON.stringify(join(root, 'claude.log'))}, JSON.stringify({ args, cases: names, prompts: names.map(n => readFileSync(join(evalDir, n, 'prompt.md'), 'utf8')) }) + '\\n');
+const evalValue = args.includes('--eval-dir') ? args[args.indexOf('--eval-dir') + 1] : manifest.experimental?.evals ?? 'evals';
+const segments = String(evalValue).split('/').filter(s => s !== '' && s !== '.');
+const search = segments.length === 1 && segments[0] === 'evals';
+const SKIPPED = new Set(['node_modules', '.claude', 'results', 'mocks']);
+const below = dir => relative(process.cwd(), dir).split(sep).filter(Boolean);
+const opens = dir => search ? basename(dir) === 'evals' : below(dir).length === segments.length && below(dir).every((s, i) => s === segments[i]);
+const leads = dir => search || (below(dir).length <= segments.length && below(dir).every((s, i) => s === segments[i]));
+const caseDirs = [];
+const walk = (dir, inSuite) => {
+  const entries = readdirSync(dir, { withFileTypes: true });
+  if (inSuite && entries.some(e => !e.isDirectory() && (e.name === 'case.yaml' || e.name === 'prompt.md'))) { caseDirs.push(dir); return; }
+  for (const e of entries) {
+    if (!e.isDirectory() || SKIPPED.has(e.name) || e.name.toLowerCase() === '.git') continue;
+    const child = join(dir, e.name), childIn = inSuite || opens(child);
+    if (childIn || leads(child)) walk(child, childIn);
+  }
+};
+walk(process.cwd(), search && process.cwd().split(sep).includes('evals'));
+caseDirs.sort();
+const names = caseDirs.map(dir => basename(dir));
+const dirOf = Object.fromEntries(caseDirs.map(dir => [basename(dir), dir]));
+appendFileSync(${JSON.stringify(join(root, 'claude.log'))}, JSON.stringify({ args, cases: names, prompts: caseDirs.map(dir => existsSync(join(dir, 'prompt.md')) ? readFileSync(join(dir, 'prompt.md'), 'utf8') : '') }) + '\\n');
 // A runner that finishes without writing its report.
 if (damage.includes('silent')) process.exit(0);
 const scores = ${JSON.stringify(scores)};
 // An attempt as the runner reports it: every grader of the case, scored, and no paid grader skipped.
-const graderNames = name => (existsSync(join(evalDir, name, 'graders')) ? readdirSync(join(evalDir, name, 'graders')) : []).filter(n => n.endsWith('.md')).sort().map(n => n.slice(0, -3));
+const graderNames = name => (existsSync(join(dirOf[name], 'graders')) ? readdirSync(join(dirOf[name], 'graders')) : []).filter(n => n.endsWith('.md')).sort().map(n => n.slice(0, -3));
 const graded = (name, score) => ({ score, passed: score >= 1, error: null, skippedPaidGraders: false,
   graders: graderNames(name).map(n => ({ name: n, passed: score >= 1, weight: 1, explanation: '', withOnly: false, scored: true })) });
 let cases = names.map((name, i) => {
@@ -133,7 +155,7 @@ let cases = names.map((name, i) => {
   // Runs that score zero are graded like any other: both arms at zero, or the arm with the build at zero and the bare one at one.
   if (i === 0 && damage.includes('zero-both')) [score, without] = [0, 0];
   if (i === 0 && damage.includes('zero-with')) [score, without] = [0, 1];
-  return { name, dir: damage.includes('other-dir') ? 'alternate/' + name : evalDir + '/' + name, source: 'mixed', runsPerCase: 1, arms: { with: [graded(name, score)], without: [graded(name, without)] }, aggregates: { score, passRate: score === 1 ? 1 : 0, scoreWithout: without, passRateWithout: without === 1 ? 1 : 0, delta: score - without } };
+  return { name, dir: damage.includes('other-dir') ? 'alternate/' + name : relative(process.cwd(), dirOf[name]).split(sep).join('/') || '.', source: 'mixed', runsPerCase: 1, arms: { with: [graded(name, score)], without: [graded(name, without)] }, aggregates: { score, passRate: score === 1 ? 1 : 0, scoreWithout: without, passRateWithout: without === 1 ? 1 : 0, delta: score - without } };
 });
 const failed = { score: null, error: 'synthetic runner error' };
 if (damage.includes('aborted')) cases[0].arms.with[0].aborted = true;
@@ -192,7 +214,7 @@ const digestOf = stdout => JSON.parse(stdout.match(/^unpublishedCases (.*)$/m)[1
 const withoutId = record => JSON.stringify({ ...record, id: record.id.replace(/-[a-z0-9]{1,6}(-rep\d+)?$/, '$1') });
 const wrapOf = (raw, out, extra = [], folder = './private-folder-q7') => ['wrap', raw, '--model', MODEL, '--trial', 'sample-trial', '--unpublished', folder, '--out', out, ...extra];
 
-test('only the folder\'s cases run, with the runner arguments of any other run and --eval-dir evals, and the record names them only by number', async t => {
+test('the folder\'s cases run, with the runner arguments of any other run and --eval-dir unpublished-cases, and the record names them only by number', async t => {
   const f = await setup(t);
   const normal = await f.testRun(['--trial', 'sample-trial']);
   assert.equal(normal.status, 0, normal.stderr + normal.stdout);
@@ -202,8 +224,8 @@ test('only the folder\'s cases run, with the runner arguments of any other run a
   assert.deepEqual(first.cases, ['case-name']);
   assert.deepEqual(second.cases, PRIVATE.map(c => c.name).sort(), 'the published case does not run, every folder case does');
   assert.deepEqual(second.prompts, PRIVATE.map(c => c.name).sort().map(name => readFileSync(join(f.root, 'private-folder-q7/cases', name, 'prompt.md'), 'utf8')), 'the runner reads the folder\'s own prompts');
-  assert.deepEqual(second.args.slice(2, 5), ['.', '--eval-dir', 'evals'], 'the runner is told which folder holds the cases');
-  const sameButFlags = second.args.join(' ').replace(' --eval-dir evals', '').replace('--max-cost-usd 2', '--max-cost-usd 5').replace(' -j 2', '');
+  assert.deepEqual(second.args.slice(2, 5), ['.', '--eval-dir', 'unpublished-cases'], 'the runner is told which folder holds the cases');
+  const sameButFlags = second.args.join(' ').replace(' --eval-dir unpublished-cases', '').replace('--max-cost-usd 2', '--max-cost-usd 5').replace(' -j 2', '');
   assert.equal(sameButFlags, first.args.join(' '), 'the runner gets the arguments of any other run');
   assert.ok(existsSync(join(f.root, 'fixture-ran')), 'test runs every check, fixtures included, as for a local trial folder');
 
@@ -369,12 +391,15 @@ test('the help text and the README name the mode, the flags it accepts and the c
   const r = spawnSync(process.execPath, [cli, 'help'], { encoding: 'utf8' });
   assert.equal(r.status, 0);
   assert.match(r.stdout, /test <published-build> --trial <published-slug> --unpublished <trial-folder> --model <id> --runner <login>\n +--raw-out <new-file> --work-dir <new-folder> \[--out <new-file>\] \[--role guild\] \[--max-cost-usd 5\] \[-j n\] \[--rep k\] \[--keep-temp\]/);
-  assert.match(r.stdout, /only the folder's cases run \(the runner is told --eval-dir evals\)/);
+  assert.match(r.stdout, /The preflight refuses everything it checks \(listed in cli\/README\.md\) before anything is\n +downloaded, run or written; what the runner's loader accepts is the runner's to decide/);
+  assert.match(r.stdout, /the runner is told --eval-dir unpublished-cases/);
   assert.match(r.stdout, /node cli\/buildguild\.mjs unpublished <trial-folder>/);
   assert.match(r.stdout, /refuses a local run and a hidden-slice record/);
   const readme = readFileSync(fileURLToPath(new URL('../cli/README.md', import.meta.url)), 'utf8');
   assert.match(readme, /## Run unpublished cases as a hidden slice/);
   assert.match(readme, /Only after the preflight do the folder's fixtures run/);
+  assert.match(readme, /\*\*What the preflight checks\*\*/);
+  assert.match(readme, /\*\*Left to the runner, and the rehearsal\.\*\*/);
 });
 
 test('the unpublished command refuses a folder that is not one of cases, and any flag', async t => {
@@ -415,7 +440,7 @@ const DAMAGES = [
   ['exit-2', 'the runner exited 2 (a partial report: the cost ceiling, an interruption or a failed sign-in), not 0'],
   ['disabled-plugin', 'the report does not show the build loaded in the run with it: it must name one plugin, local-build 0.1.0, loaded from the run folder with no problem reported for it (it names local-build 0.1.0 with the problem disabled_by_default)'],
   ['no-plugin', 'the report does not show the build loaded in the run with it: it must name one plugin, local-build 0.1.0, loaded from the run folder with no problem reported for it (it names none)'],
-  ['other-dir', "unpublished-1: the report says the case was read from another folder than the run folder's evals/"],
+  ['other-dir', "unpublished-1: the report says the case was read from another folder than the run folder's unpublished-cases/"],
 ];
 
 test('test --unpublished writes no record for a run that is not complete, and keeps the raw report, marked', async t => {
@@ -575,6 +600,12 @@ test('every refusal of the preflight runs, creates and writes nothing and fetche
   withFixture('top-file', [A]); f.write('top-file/cases/notes.md', 'a file beside the case folders');
   withFixture('case-manifest', [A]); f.write(`case-manifest/cases/${A.name}/plugin.json`, '{"name":"case-plugin"}');
   // Case folders the runner's discovery skips, or whose name YAML reads as other than text.
+  // The fifth review's shapes: a bare "-" as a path, a prompt over the loader's size limit, 257 grader files, and a weight
+  // whose sum would overflow.
+  withFixture('dash-path', [A]); grader('dash-path', 'done.md', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: -");
+  withFixture('big-prompt', [A]); f.write(`big-prompt/cases/${A.name}/prompt.md`, `---\ntags: [${A.dimension}]\nallowed_tools: [Write]\n---\n${'a'.repeat(1048576)}`);
+  withFixture('many-graders', [A]); for (let i = 0; i < 256; i++) grader('many-graders', `g${i}.md`, "type: regex\npattern: 'done'");
+  withFixture('huge-weight', [A]); grader('huge-weight', 'heavy.md', `type: regex\npattern: ''\nweight: 1${'0'.repeat(308)}`);
   const caseNamed = (dir, name) => withFixture(dir, [{ ...A, name }]);
   caseNamed('results-case', 'results'); caseNamed('mocks-case', 'mocks'); caseNamed('modules-case', 'node_modules'); caseNamed('claude-case', '.claude'); caseNamed('git-case', '.git');
   caseNamed('yaml-word', 'true'); caseNamed('number-name', '1e3');
@@ -637,6 +668,10 @@ test('every refusal of the preflight runs, creates and writes nothing and fetche
     row('form-line', () => run('local-build', './skill-grader'), /skill-grader\/cases\/alpha-secret-ledger\/graders\/indicator\.md, line 3: the value of tool is not Read, the one tool a tool_used grader names in the public trial/),
     row('form-line', () => run('local-build', './mock-grader'), /mock-grader\/cases\/alpha-secret-ledger\/graders\/indicator\.md, line 3: the value of target is not last_message/),
     row('form-line', () => run('local-build', './escaped-skill'), /escaped-skill\/cases\/alpha-secret-ledger\/graders\/indicator\.md, line 3: the value of tool is not Read/),
+    row('form-line', () => run('local-build', './dash-path'), /dash-path\/cases\/alpha-secret-ledger\/graders\/done\.md, line 6: target takes last_message, or no value and then/),
+    row('form-line', () => run('local-build', './huge-weight'), /huge-weight\/cases\/alpha-secret-ledger\/graders\/heavy\.md, line 4: the value of weight is not a decimal from 0\.01 to 1000 with at most four digits after the point/),
+    row('form-size', () => run('local-build', './big-prompt'), /big-prompt\/cases\/alpha-secret-ledger\/prompt\.md is 1048622 bytes; the runner reads at most 1048576/),
+    row('form-size', () => run('local-build', './many-graders'), /many-graders\/cases\/alpha-secret-ledger\/graders holds 257 grader files; the runner reads at most 256/),
     row('form-front-matter', () => run('local-build', './spaced-open'), /spaced-open\/cases\/alpha-secret-ledger\/prompt\.md does not open with a line that is exactly "---"/),
     row('form-text', () => run('local-build', './carriage-return'), /carriage-return\/cases\/alpha-secret-ledger\/prompt\.md is not UTF-8 text without carriage returns/),
     row('form-missing', () => run('local-build', './no-prompt'), /no-prompt\/cases\/alpha-secret-ledger has no prompt\.md/),
@@ -655,6 +690,8 @@ test('every refusal of the preflight runs, creates and writes nothing and fetche
     row('output-unwritable', () => run('local-build', './good', ['--out', 'locked/record.json']), /--out .*locked\/record\.json is in a folder this user cannot create files in/),
     row('output-unwritable', () => f.run(['test', 'local-build', '--trial', 'sample-trial', '--unpublished', './good', '--model', MODEL, '--runner', 'tester', '--work-dir', 'new-run', '--raw-out', 'locked/raw.json']), /--raw-out .*locked\/raw\.json is in a folder this user cannot create files in/),
     row('output-unwritable', () => f.run(['test', 'local-build', '--trial', 'sample-trial', '--unpublished', './good', '--model', MODEL, '--runner', 'tester', '--work-dir', 'locked/run', '--raw-out', 'new-raw.json']), /--work-dir .*locked\/run is in a folder this user cannot create files in/),
+    row('work-dir-name', () => f.run(['test', 'local-build', '--trial', 'sample-trial', '--unpublished', './good', '--model', MODEL, '--runner', 'tester', '--work-dir', 'unpublished-cases', '--raw-out', 'new-raw.json']), /--work-dir .*unpublished-cases is named like the folder the cases go to, unpublished-cases/),
+    row('work-dir-name', () => f.run(['test', 'local-build', '--trial', 'sample-trial', '--unpublished', './good', '--model', MODEL, '--runner', 'tester', '--work-dir', 'Unpublished-Cases', '--raw-out', 'new-raw.json']), /--work-dir .*Unpublished-Cases is named like the folder the cases go to/),
     row('output-same', () => run('local-build', './good', ['--out', 'new-raw.json']), /--out and --raw-out are the same path/),
     row('output-same', () => run('local-build', './good', ['--out', 'NEW-RAW.json']), /--out and --raw-out are the same path where case is ignored \(.*NEW-RAW\.json and .*new-raw\.json\)/),
     row('trial-lookup', () => f.run(['test', 'local-build', '--trial', 'no-such-trial', '--unpublished', './good', ...base]), /the published trial no-such-trial could not be read from .* \(\/trials\/no-such-trial\.json returned 404\); nothing was run/),
@@ -683,7 +720,7 @@ test('every refusal of the preflight runs, creates and writes nothing and fetche
     const result = await r.go();
     check({ row: r, r: result, before, after: snapshot(f.root), requests: f.requests.slice(requests) });
     // Put things back for the next row, so a row that wrote something cannot spoil the rows after it.
-    for (const p of ['evidence-unpublished.json', 'raw-hard.json', 'empty-evidence.json', 'new-raw.json', 'NEW-RAW.json', 'record-new.json', 'new-run']) rmSync(join(f.root, p), { recursive: true, force: true });
+    for (const p of ['evidence-unpublished.json', 'raw-hard.json', 'empty-evidence.json', 'new-raw.json', 'NEW-RAW.json', 'record-new.json', 'new-run', 'unpublished-cases', 'Unpublished-Cases']) rmSync(join(f.root, p), { recursive: true, force: true });
     rmSync(marker, { force: true });
     rmSync(join(f.root, 'good'), { recursive: true, force: true });
     cpSync(pristine, join(f.root, 'good'), { recursive: true });
@@ -707,7 +744,7 @@ test('the report read after the run is the one this run wrote', async t => {
   const f = await setup(t);
   const good = await f.hidden();
   assert.equal(good.status, 0, good.stderr);
-  const staleZip = zipOf({ ...buildFiles('stale-build'), 'stale-build/buildguild-raw.json': readFileSync(join(f.root, good.raw)), 'stale-build/evals/old-case/prompt.md': 'an evals/ the cases replace' });
+  const staleZip = zipOf({ ...buildFiles('stale-build'), 'stale-build/buildguild-raw.json': readFileSync(join(f.root, good.raw)), 'stale-build/evals/old-case/prompt.md': 'an evals/ of its own', 'stale-build/unpublished-cases/old-case/prompt.md': 'the cases\' folder, of its own' });
   f.routes['/builds/stale-build.json'] = build => JSON.stringify(build('stale-build', staleZip));
   f.routes['/dl/stale-build.zip'] = staleZip;
   const stale = await f.run(['test', 'stale-build', '--trial', 'sample-trial', '--unpublished', './private-folder-q7', '--model', MODEL, '--runner', 'tester', '--work-dir', 'stale-run', '--raw-out', 'stale-raw.json', '--out', 'stale-record.json'], { STUB_DAMAGE: 'no-report' });
@@ -716,9 +753,10 @@ test('the report read after the run is the one this run wrote', async t => {
   assert.ok(!existsSync(join(f.root, 'stale-record.json')));
   assert.ok(!existsSync(join(f.root, 'stale-run/buildguild-raw.json')), 'the shipped report was never written');
   assert.ok(!existsSync(join(f.root, 'stale-run/evals/old-case')), 'the shipped evals/ was never written');
+  assert.ok(!existsSync(join(f.root, 'stale-run/unpublished-cases/old-case')), 'the shipped unpublished-cases/ was never written');
   // An entry named otherwise that lands on the report's path or in evals/ (here through a "." in its path) stops the run before
   // the runner starts: a report the archive ships and a runner that writes none, or cases the archive adds to evals/.
-  const shipped = { 'buildguild-raw.json': { './buildguild-raw.json': readFileSync(join(f.root, good.raw)) }, evals: { './evals/old-case/prompt.md': 'cases the archive adds' } };
+  const shipped = { 'buildguild-raw.json': { './buildguild-raw.json': readFileSync(join(f.root, good.raw)) }, evals: { './evals/old-case/prompt.md': 'cases the archive adds' }, 'unpublished-cases': { './unpublished-cases/old-case/prompt.md': 'cases the archive adds' } };
   for (const [name, entries] of Object.entries(shipped)) {
     const slug = `dot-${name.replace(/[^a-z]+/g, '-')}`;
     const zip = zipOf({ ...buildFiles(slug), ...Object.fromEntries(Object.entries(entries).map(([k, v]) => [`${slug}/${k}`, v])) });
@@ -748,7 +786,7 @@ test('the runner reads only the cases this run writes: an archive that names its
   delete bare['bare-build/.claude-plugin/plugin.json'];
   serve('bare-build', bare);
   for (const [slug, message] of [
-    ['alternate-build', /the build's plugin manifest \.claude-plugin\/plugin\.json names an eval folder of its own; in this mode the runner reads only the cases this run writes to evals\/; the runner was not started, and no record was written/],
+    ['alternate-build', /the build's plugin manifest \.claude-plugin\/plugin\.json names an eval folder of its own; in this mode the runner is pointed at the cases this run writes to unpublished-cases\/; the runner was not started, and no record was written/],
     ['top-evals-build', /the build's plugin manifest \.claude-plugin\/plugin\.json names an eval folder of its own/],
     ['renamed-build', /the build's plugin manifest names "another-build" version "0\.1\.0", not the build renamed-build with a version/],
     ['bare-build', /the build's archive has no \.claude-plugin\/plugin\.json that is a JSON object/],
@@ -854,4 +892,108 @@ test('wrap takes every fact from the run\'s report and refuses a flag that says 
   const unloaded = await f.run(wrapOf('raw-no-plugin.json', 'w-no-plugin.json'));
   assert.equal(unloaded.status, 1);
   assert.match(unloaded.stderr, /raw-no-plugin\.json is not the report of a run with --unpublished, so it cannot become a hidden-slice record/);
+});
+
+// The fifth review, finding 4: each value rule of the exact form takes its form and refuses one just outside it, so a test fails
+// when a rule is loosened. Each example is one file of a one-case folder, checked by `unpublished`, which runs nothing.
+const NUL = String.fromCharCode(0);
+const VALUE_RULES = [
+  // [rule, file, lines, accepted, other files of the case]
+  ['quoted', 'grader', "type: regex\npattern: 'done'", true],
+  ['quoted', 'grader', "type: regex\npattern: ''", true],
+  ['quoted', 'grader', `type: regex\npattern: 'done${NUL}'`, false],
+  ['quoted', 'grader', "type: regex\npattern: 'do\tne'", false],
+  ['quoted', 'grader', `type: regex\npattern: 'done${String.fromCharCode(0xfeff)}'`, false],
+  ['quoted', 'grader', 'type: regex\npattern: done', false],
+  ['quoted', 'grader', 'type: regex\npattern: "done"', false],
+  ['quoted', 'grader', "type: regex\npattern: '(unclosed'", false],
+  ['word', 'prompt', 'tags: [safety, deployment]\nallowed_tools: [Write]', true],
+  ['word', 'prompt', 'tags: [safety, yes]\nallowed_tools: [Write]', false],
+  ['word', 'prompt', 'tags: [safety, 1e3]\nallowed_tools: [Write]', false],
+  ['word', 'prompt', 'tags: [safety, -x]\nallowed_tools: [Write]', false],
+  ['list', 'prompt', 'tags: [safety]\nallowed_tools: [Read, Write]', true],
+  ['list', 'prompt', 'tags: [safety]\nallowed_tools: [Read,Write]', false],
+  ['list', 'prompt', 'tags: [safety]\nallowed_tools: Read', false],
+  ['list', 'prompt', 'tags: [safety]\nallowed_tools: []', false],
+  ['tool', 'prompt', 'tags: [safety]\nallowed_tools: [Write, mcp__notes__read]', true],
+  ['tool', 'prompt', 'tags: [safety]\nallowed_tools: [True]', false],
+  ['tool', 'prompt', 'tags: [safety]\nallowed_tools: [Bash(git:*)]', false],
+  ['whole', 'prompt', 'tags: [safety]\nruns: 50\nallowed_tools: [Write]', true],
+  ['whole', 'prompt', 'tags: [safety]\nruns: 51\nallowed_tools: [Write]', false],
+  ['whole', 'prompt', 'tags: [safety]\nruns: 01\nallowed_tools: [Write]', false],
+  ['whole', 'prompt', 'tags: [safety]\nruns: 1.0\nallowed_tools: [Write]', false],
+  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 0.01", true],
+  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 2.5", true],
+  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 1000", true],
+  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 0", false],
+  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 0.001", false],
+  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 1000.5", false],
+  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 2.12345", false],
+  ['weight', 'grader', "type: regex\npattern: 'done'\nweight: 1e3", false],
+  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: config/app.json", true],
+  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: .env", true],
+  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: -", false],
+  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: -x", false],
+  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: ../x", false],
+  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: /etc/hosts", false],
+  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: ...", false],
+  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: null", false],
+  ['path', 'grader', "type: regex\npattern: 'done'\ntarget:\n  source: file\n  path: ~", false],
+  ['flags', 'grader', "type: regex\npattern: 'done'\nflags: mi", true],
+  ['flags', 'grader', "type: regex\npattern: 'done'\nflags: y", false],
+  ['flags', 'grader', "type: regex\npattern: 'done'\nflags: x", false],
+  ['match', 'grader', "type: regex\npattern: 'done'\nmatch: not_contains", true],
+  ['match', 'grader', "type: regex\npattern: 'done'\nmatch: count:2", false],
+  ['target', 'grader', "type: regex\npattern: 'done'\ntarget: last_message", true],
+  ['target', 'grader', "type: regex\npattern: 'done'\ntarget: trace", false],
+  ['schema', 'case.yaml', 'schema_version: "1.1"\nname: alpha-secret-ledger\ncontext:\n  scaffold_script: fixture.sh', true],
+  ['schema', 'case.yaml', 'schema_version: 1.1\nname: alpha-secret-ledger\ncontext:\n  scaffold_script: fixture.sh', false],
+  ['name', 'case.yaml', 'schema_version: "1.1"\nname: alpha-secret-ledger', true],
+  ['name', 'case.yaml', 'schema_version: "1.1"\nname: "alpha-secret-ledger"\ncontext:\n  scaffold_script: fixture.sh', false],
+  ['file', 'case.yaml', 'schema_version: "1.1"\nname: alpha-secret-ledger\ncontext:\n  scaffold_script: setup.sh', true, { 'setup.sh': 'true\n' }],
+  ['file', 'case.yaml', 'schema_version: "1.1"\nname: alpha-secret-ledger\ncontext:\n  scaffold_script: -x.sh', false, { '-x.sh': 'true\n' }],
+  ['file', 'case.yaml', 'schema_version: "1.1"\nname: alpha-secret-ledger\ncontext:\n  scaffold_script: null', false, { null: 'true\n' }],
+];
+test('each value rule of the case form takes its form and refuses one just outside it', async t => {
+  const f = await setup(t);
+  const A = PRIVATE[1];
+  const files = { prompt: `${A.name}/prompt.md`, grader: `${A.name}/graders/done.md`, 'case.yaml': `${A.name}/case.yaml` };
+  const wrong = [];
+  for (const [i, [rule, file, lines, accepted, others = {}]] of VALUE_RULES.entries()) {
+    const dir = `rule-${i}`;
+    f.writeFolder(dir, [A]);
+    f.write(`${dir}/cases/${A.name}/case.yaml`, `schema_version: "1.1"\nname: ${A.name}\ncontext:\n  scaffold_script: fixture.sh\n`);
+    f.write(`${dir}/cases/${A.name}/fixture.sh`, 'true\n', 0o755);
+    for (const [name, contents] of Object.entries(others)) f.write(`${dir}/cases/${A.name}/${name}`, contents, 0o755);
+    const text = file === 'case.yaml' ? `${lines}\n` : file === 'prompt' ? `---\n${lines}\n---\n${A.prompt}\n` : `---\n${lines}\n---\n`;
+    f.write(`${dir}/cases/${files[file]}`, text);
+    const r = await f.run(['unpublished', `./${dir}`]);
+    const refusedAtFile = r.status === 1 && r.stderr.includes(`${dir}/cases/${files[file]}`);
+    if (accepted ? r.status !== 0 : !refusedAtFile) wrong.push(`${rule} ${JSON.stringify(lines.split('\n').pop())}: ${accepted ? 'refused' : 'accepted'}; ${r.stderr.trim().split('\n').pop()}`);
+  }
+  assert.deepEqual(wrong, []);
+  assert.deepEqual([...new Set(VALUE_RULES.filter(r => r[3]).map(r => r[0]))].sort(), [...new Set(VALUE_RULES.map(r => r[0]))].sort(), 'each rule has an accepted example');
+  assert.deepEqual([...new Set(VALUE_RULES.filter(r => !r[3]).map(r => r[0]))].sort(), [...new Set(VALUE_RULES.map(r => r[0]))].sort(), 'each rule has a refused example');
+});
+
+// The fifth review, finding 5: with --eval-dir evals the runner's loader searched the whole run folder, so an archive's own
+// evals folder, or a run folder named evals holding case files at its top, could run in place of or beside the folder's cases.
+// With --eval-dir unpublished-cases it opens exactly that folder of the run folder (Claude Code 2.1.321, Od and Aa).
+test('the runner is pointed at the folder\'s cases only: another evals folder in the archive, or a run folder named evals, is not read', async t => {
+  const f = await setup(t);
+  const serve = (slug, files) => { const zip = zipOf(files); f.routes[`/builds/${slug}.json`] = build => JSON.stringify(build(slug, zip)); f.routes[`/dl/${slug}.zip`] = zip; };
+  const archiveCase = { 'prompt.md': '---\ntags: [safety]\nruns: 1\nallowed_tools: [Write]\n---\nOnly say archive data.\n', 'graders/done.md': "---\ntype: regex\npattern: 'done'\n---\n" };
+  const at = (prefix, files) => Object.fromEntries(Object.entries(files).map(([k, v]) => [`${prefix}/${k}`, v]));
+  serve('archive-build', { ...buildFiles('archive-build'), ...at('archive-build/extras/evals/archive-case', archiveCase) });
+  serve('rooted-build', { ...buildFiles('rooted-build'), ...at('rooted-build', archiveCase) });
+  for (const [slug, workDir] of [['archive-build', 'archive-run'], ['rooted-build', 'evals']]) {
+    const calls = f.claudeCalls().length;
+    const r = await f.run(['test', slug, '--trial', 'sample-trial', '--unpublished', './private-folder-q7', '--model', MODEL, '--runner', 'tester', '--work-dir', workDir, '--raw-out', `${slug}-raw.json`, '--out', `${slug}-record.json`]);
+    assert.equal(r.status, 0, `${slug}: ${r.stderr}`);
+    const [call] = f.claudeCalls().slice(calls);
+    assert.deepEqual(call.cases, PRIVATE.map(c => c.name).sort(), `${slug}: only the folder's cases ran`);
+    assert.ok(!call.prompts.some(prompt => prompt.includes('archive data')), `${slug}: the archive's prompt did not run`);
+    assert.deepEqual(f.json(`${slug}-raw.json`).cases.map(c => c.dir), PRIVATE.map(c => `unpublished-cases/${c.name}`).sort());
+    assert.equal(f.json(`${slug}-record.json`).hiddenSlice, true);
+  }
 });
