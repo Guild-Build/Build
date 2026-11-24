@@ -391,8 +391,9 @@ test('the help text and the README name the mode, the flags it accepts and the c
   const r = spawnSync(process.execPath, [cli, 'help'], { encoding: 'utf8' });
   assert.equal(r.status, 0);
   assert.match(r.stdout, /test <published-build> --trial <published-slug> --unpublished <trial-folder> --model <id> --runner <login>\n +--raw-out <new-file> --work-dir <new-folder> \[--out <new-file>\] \[--role guild\] \[--max-cost-usd 5\] \[-j n\] \[--rep k\] \[--keep-temp\]/);
-  assert.match(r.stdout, /The preflight refuses everything it checks \(listed in cli\/README\.md\) before anything is\n +downloaded, run or written; what the runner's loader accepts is the runner's to decide/);
-  assert.match(r.stdout, /the runner is told --eval-dir unpublished-cases/);
+  const said = r.stdout.replace(/\s+/g, ' ');
+  assert.ok(said.includes("The preflight refuses everything it checks (listed in cli/README.md) before the build's archive is downloaded or anything is run or written; what the runner's loader accepts is the runner's to decide"), 'the help states the two-part promise');
+  assert.ok(said.includes('the runner is told --eval-dir unpublished-cases'));
   assert.match(r.stdout, /node cli\/buildguild\.mjs unpublished <trial-folder>/);
   assert.match(r.stdout, /refuses a local run and a hidden-slice record/);
   const readme = readFileSync(fileURLToPath(new URL('../cli/README.md', import.meta.url)), 'utf8');

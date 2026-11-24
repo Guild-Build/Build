@@ -1233,14 +1233,14 @@ Run from a checkout of https://github.com/Guild-Build/Build; the buildguild npm 
                                         --raw-out <new-file> --work-dir <new-folder> [--out <new-file>] [--role guild] [--max-cost-usd 5] [-j n] [--rep k] [--keep-temp]
                                         a guild maintainer's run of a private folder of cases, in the public trial's form, as the unpublished part
                                         (hidden slice) of a published trial, with a published build only; any other flag (--runs among them) is
-                                        refused. The preflight refuses everything it checks (listed in cli/README.md) before anything is
-                                        downloaded, run or written; what the runner's loader accepts is the runner's to decide, so rehearse
-                                        first against a stand-in for the model. It creates its outputs (new files, a new run folder) and
-                                        overwrites and deletes nothing; the runner is told --eval-dir unpublished-cases; a record is written only
-                                        for a complete run of exactly the folder's cases, with the build loaded, whose report this run wrote, and
-                                        the record (default evidence-unpublished.json) is a guild record with hiddenSlice true, its cases named
-                                        unpublished-1 to -n, unpublishedCases {count, sha256} and results.bareOverallScore. The run folder and
-                                        raw report hold the cases' names and prompts: never commit, upload or paste them
+                                        refused. The preflight refuses everything it checks (listed in cli/README.md) before the build's archive
+                                        is downloaded or anything is run or written; what the runner's loader accepts is the runner's to decide,
+                                        so rehearse first against a stand-in for the model. It creates its outputs (new files, a new run folder)
+                                        and overwrites and deletes nothing; the runner is told --eval-dir unpublished-cases; a record is written
+                                        only for a complete run of exactly the folder's cases, with the build loaded, whose report this run wrote,
+                                        and the record (default evidence-unpublished.json) is a guild record with hiddenSlice true, its cases
+                                        named unpublished-1 to -n, unpublishedCases {count, sha256} and results.bareOverallScore. The run folder
+                                        and raw report hold the cases' names and prompts: never commit, upload or paste them
   node cli/buildguild.mjs unpublished <trial-folder>
                                         print the count and checksum of a folder's unpublished cases, running nothing, so both can be published first
   node cli/buildguild.mjs wrap <aggregate.json> --build <slug> --trial <slug|path> --model <id> [--build-version v] [--runner login]
