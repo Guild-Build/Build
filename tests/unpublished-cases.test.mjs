@@ -109,6 +109,8 @@ const damage = (process.env.STUB_DAMAGE || '').split(',').filter(Boolean);
 if (damage.includes('no-report')) process.exit(90);
 const names = readdirSync('evals').sort();
 appendFileSync(${JSON.stringify(join(root, 'claude.log'))}, JSON.stringify({ args, cases: names }) + '\\n');
+// A runner that finishes without writing its report.
+if (damage.includes('silent')) process.exit(0);
 const scores = ${JSON.stringify(scores)};
 // An attempt as the runner reports it: every grader of the case, scored, and no paid grader skipped.
 const graded = (name, score) => ({ score, passed: score >= 1, error: null, skippedPaidGraders: false,
@@ -474,7 +476,7 @@ function snapshot(dir) {
   walk('');
   return files;
 }
-test('every refusal of the preflight runs, creates, downloads and writes nothing, and every named refusal has a row', async t => {
+test('every refusal of the preflight runs, creates and writes nothing and fetches no archive, and every named refusal has a row', async t => {
   const f = await setup(t);
   const marker = join(f.root, 'refused-fixture-ran');
   const withFixture = (dir, cases) => {
@@ -563,6 +565,7 @@ test('every refusal of the preflight runs, creates, downloads and writes nothing
     row('output-in-folder', () => run('local-build', './good', ['--out', './good/record.json']), /--out .*good\/record\.json is inside the unpublished folder/),
     row('output-in-folder', () => f.run(['test', 'local-build', '--trial', 'sample-trial', '--unpublished', './good', '--model', MODEL, '--runner', 'tester', '--work-dir', './good/run', '--raw-out', 'new-raw.json']), /--work-dir .*good\/run is inside the unpublished folder/),
     row('output-same', () => run('local-build', './good', ['--out', 'new-raw.json']), /--out and --raw-out are the same path/),
+    row('output-same', () => run('local-build', './good', ['--out', 'NEW-RAW.json']), /--out and --raw-out are the same path where case is ignored \(.*NEW-RAW\.json and .*new-raw\.json\)/),
     row('trial-lookup', () => f.run(['test', 'local-build', '--trial', 'no-such-trial', '--unpublished', './good', ...base]), /the published trial no-such-trial could not be read from .* \(\/trials\/no-such-trial\.json returned 404\); nothing was run/),
     row('shared-name', () => run('local-build', './shared'), /a case in .*shared has the name of a case of the published trial sample-trial \(case-name\)/),
     row('build-lookup', () => run('no-such-build', './good'), /the published build no-such-build could not be read from .* \(\/builds\/no-such-build\.json returned 404\)/),
@@ -589,7 +592,7 @@ test('every refusal of the preflight runs, creates, downloads and writes nothing
     const result = await r.go();
     check({ row: r, r: result, before, after: snapshot(f.root), requests: f.requests.slice(requests) });
     // Put things back for the next row, so a row that wrote something cannot spoil the rows after it.
-    for (const p of ['evidence-unpublished.json', 'raw-hard.json', 'empty-evidence.json', 'new-raw.json', 'record-new.json', 'new-run']) rmSync(join(f.root, p), { recursive: true, force: true });
+    for (const p of ['evidence-unpublished.json', 'raw-hard.json', 'empty-evidence.json', 'new-raw.json', 'NEW-RAW.json', 'record-new.json', 'new-run']) rmSync(join(f.root, p), { recursive: true, force: true });
     rmSync(marker, { force: true });
     rmSync(join(f.root, 'good'), { recursive: true, force: true });
     cpSync(pristine, join(f.root, 'good'), { recursive: true });
@@ -622,6 +625,21 @@ test('the report read after the run is the one this run wrote', async t => {
   assert.ok(!existsSync(join(f.root, 'stale-record.json')));
   assert.ok(!existsSync(join(f.root, 'stale-run/buildguild-raw.json')), 'the shipped report was never written');
   assert.ok(!existsSync(join(f.root, 'stale-run/evals/old-case')), 'the shipped evals/ was never written');
+  // An entry named otherwise that lands on the report's path or in evals/ (here through a "." in its path) stops the run before
+  // the runner starts: a report the archive ships and a runner that writes none, or cases the archive adds to evals/.
+  const shipped = { 'buildguild-raw.json': { './buildguild-raw.json': readFileSync(join(f.root, good.raw)) }, evals: { './evals/old-case/prompt.md': 'cases the archive adds' } };
+  for (const [name, entries] of Object.entries(shipped)) {
+    const slug = `dot-${name.replace(/[^a-z]+/g, '-')}`;
+    const zip = zipOf({ ...Object.fromEntries(Object.entries(BUILD_FILES).map(([k, v]) => [k.replace(/^local-build/, slug), v])), ...Object.fromEntries(Object.entries(entries).map(([k, v]) => [`${slug}/${k}`, v])) });
+    f.routes[`/builds/${slug}.json`] = build => JSON.stringify(build(slug, zip));
+    f.routes[`/dl/${slug}.zip`] = zip;
+    const calls = f.claudeCalls().length;
+    const r = await f.run(['test', slug, '--trial', 'sample-trial', '--unpublished', './private-folder-q7', '--model', MODEL, '--runner', 'tester', '--work-dir', `${slug}-run`, '--raw-out', `${slug}-raw.json`, '--out', `${slug}-record.json`], { STUB_DAMAGE: 'silent' });
+    assert.equal(r.status, 1, `${name}: ${r.stderr}`);
+    assert.match(r.stderr, new RegExp(`the build's archive holds an entry that lands on ${name.replace('.', '\\.')} in the run folder .*; the runner was not started, and no record was written`), name);
+    assert.equal(f.claudeCalls().length, calls, `${name}: the runner was not started`);
+    assert.ok(!existsSync(join(f.root, `${slug}-record.json`)) && !existsSync(join(f.root, `${slug}-raw.json`)), `${name}: nothing was written outside the run folder`);
+  }
 });
 
 test('the cases are numbered, and the checksum ordered, by the bytes of the names, not by locale', async t => {

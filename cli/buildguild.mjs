@@ -339,8 +339,9 @@ function refuseOutsideForm(root, names, files) {
 const CASE_PATH_NAME = /^[A-Za-z0-9._-]+$/;
 // --unpublished <folder> (a path: onlyFlags has refused the flag without one), read without running anything: the roster
 // (trial.json lists each case once, by name, and its list is exactly the folders under cases/), the structure (every check
-// `check` runs on a trial folder except running its fixtures), the names under cases/, the public trial's form, then the cases'
-// bytes, their checksum and each case's graders (its graders/*.md, by file name).
+// `check` runs on a trial folder except running its fixtures), the names under cases/, then the cases' bytes, read once: the
+// public trial's form is checked on them, and their checksum and each case's graders (its graders/*.md, by file name) are
+// taken from them.
 function unpublishedFolder(value) {
   const root = resolve(value);
   if (!existsSync(root) || !statSync(root).isDirectory()) refuse('folder-absent', `no trial folder at ${root}; nothing was run`);
@@ -651,9 +652,10 @@ async function test(slug) {
 
 
 // Every check of test --unpublished that needs nothing to run, in one place, in this order: the flags and their values, the
-// role, the published trial's slug, the build's slug, the folder (argument, roster, structure, names under cases/, the public
-// trial's form, checksum), the three outputs, the published trial and its case names, the published build and its archive,
-// and Claude Code. Only when all pass may anything be run, created, downloaded or written.
+// role, the published trial's slug, the build's slug, the folder (argument, roster, structure, names under cases/, then on the
+// cases' bytes the public trial's form and the checksum), the three outputs, the published trial and its case names, the
+// published build and its archive record, and Claude Code. Only when all pass may anything be run, created or written, or the
+// archive downloaded.
 async function unpublishedPreflight(slug) {
   onlyFlags('test');
   const model = flag('model') ?? process.env.ANTHROPIC_MODEL;
@@ -678,7 +680,9 @@ async function unpublishedPreflight(slug) {
   const rawOut = newOutput('--raw-out', flag('raw-out'), folder.root);
   const workDir = newOutput('--work-dir', flag('work-dir'), folder.root);
   const outputs = [['--out', outPath], ['--raw-out', rawOut], ['--work-dir', workDir]];
-  for (const [name, p] of outputs) for (const [other, q] of outputs) if (name < other && p === q) refuse('output-same', `${name} and ${other} are the same path, ${p}; each output needs its own. Nothing was run.`);
+  // Paths that differ only in case or in Unicode normalization are one path on a file system that ignores them, as macOS's does.
+  const pathKey = p => p.normalize('NFC').toLowerCase();
+  for (const [name, p] of outputs) for (const [other, q] of outputs) if (name < other && pathKey(p) === pathKey(q)) refuse('output-same', `${name} and ${other} are the same path${p === q ? `, ${p}` : ` where case is ignored (${p} and ${q})`}; each output needs its own. Nothing was run.`);
   const published = await lookUp(`/trials/${publishedSlug}.json`, 'trial-lookup', `the published trial ${publishedSlug}`);
   refuseSharedNames(folder, published);
   const build = await lookUp(`/builds/${slug}.json`, 'build-lookup', `the published build ${slug}`);
@@ -705,6 +709,9 @@ async function testUnpublished(slug) {
     if (rel === 'buildguild-raw.json' || rel === 'evals' || rel.startsWith('evals/')) continue;
     const target = safeJoin(p.workDir, rel); mkdirSync(dirname(target), { recursive: true }); writeFileSync(target, e.data, { mode: modeFor(rel) });
   }
+  // An entry named otherwise that still lands there (through a "." in its path, or a name that differs only in case on a file
+  // system that ignores case) is found by the file system's own lookup, and the runner is not started.
+  for (const name of ['buildguild-raw.json', 'evals']) if (existsSync(join(p.workDir, name))) die(`the build's archive holds an entry that lands on ${name} in the run folder ${p.workDir}, where only this run's ${name === 'evals' ? 'cases go' : 'report goes'}; the runner was not started, and no record was written`);
   const modules = await modulePins(p.workDir);
   const t = p.published;
   out(`unpublished cases of ${t.name} v${t.version}: ${p.folder.count} from ${p.folder.root}\n  sha256 ${p.folder.sha256}`);
