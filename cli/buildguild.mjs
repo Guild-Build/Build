@@ -441,9 +441,10 @@ function refuseOutsideForm(root, names, files, entries) {
 // The folder of the run folder the cases are written to, and the --eval-dir value the runner is given. In Claude Code 2.1.321
 // the loader treats the one value "evals" as a search: it opens every folder of that name below the plugin root, and takes the
 // plugin root itself for the suite when that root's path holds a folder of that name. Any other relative value opens exactly
-// <frame root>/<value> and walks only the folders on the way to it; for `plugin eval .` the frame root is the plugin root,
-// the run folder. Only where no plugin root is found does it start from the target instead, and then a target whose path ends
-// with the value is taken for the suite, so a run folder named like this one is refused.
+// <frame root>/<value> and walks only the folders on the way to it. For `plugin eval .` the frame root is the plugin root the
+// runner resolves for the target (Ng), the run folder, or none when it does not trust that folder yet; with none, the value
+// is taken from the target, the run folder again, and a target whose path ends with the value is taken for the suite, so a
+// run folder named like this one is refused.
 const EVAL_FOLDER = 'unpublished-cases';
 // The names allowed anywhere under cases/: letters, digits, ".", "_" and "-", and neither "." nor "..". Every later step (the
 // checksum's lines, the paths the run writes) can take such a name.
