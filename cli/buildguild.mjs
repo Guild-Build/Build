@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // buildguild: the BuildGuild command-line companion. Node 22+, zero dependencies.
 // list | show | add | remove | doctor | trial | unpublished | test | wrap | submit
-import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, rmdirSync, readdirSync, statSync, lstatSync, realpathSync, cpSync, mkdtempSync } from 'node:fs';
-import { join, dirname, basename, resolve, relative, parse, sep } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, rmdirSync, readdirSync, statSync, lstatSync, realpathSync, cpSync, mkdtempSync, accessSync, constants } from 'node:fs';
+import { join, dirname, basename, resolve, relative, parse, sep, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { homedir, platform, release, tmpdir } from 'node:os';
@@ -12,7 +12,7 @@ import { compare } from './compare.mjs';
 import { prepareComparison } from './comparison-preparation.mjs';
 import { trialTemplateFiles } from './trial-templates.mjs';
 import { checkExamples } from './grader-examples.mjs';
-import { attemptStatus } from './comparison-results.mjs';
+import { attemptStatus, pluginLoaded } from './comparison-results.mjs';
 
 const ORIGIN = process.env.BUILDGUILD_ORIGIN || 'https://buildguild.gg';
 const args = process.argv.slice(2);
@@ -288,60 +288,156 @@ function casesDigest(files, count) {
   const lines = paths.map(rel => `${modeFor(rel).toString(8)} ${createHash('sha256').update(files[rel]).digest('hex')} cases/${rel}\n`).join('');
   return { count, sha256: createHash('sha256').update(lines).digest('hex') };
 }
-// The top-level keys of a YAML mapping written as plain `key: value` lines, with their values unquoted; null when a top-level
-// line is anything else (a flow mapping, a quoted or complex key), whose keys could not be read this way.
-function plainKeys(text) {
+// The files that define a case, in the public trial's form only (as content/trials/client-deployment-v1/cases/ writes them),
+// checked line by line before anything runs. The runner (Claude Code 2.1.321) reads case.yaml, and the front matter of
+// prompt.md and of each grader, with Bun.YAML.parse. It takes a case's name from case.yaml, or from a `name` in prompt.md's
+// front matter, which overrides it, else from the folder; names a grader after its file unless its front matter sets `name`;
+// skips a grader file with no front matter; closes front matter at the first "---" it meets, even inside a line; loads a
+// case's `plugins` and a plugin manifest it finds in a case folder; and leaves a with-only grader (an `arm` of with-only, a
+// tool_used grader of the Skill tool, a grader of mock_calls) out of the bare arm. So this mode takes a small exact subset, in
+// which the runner reads every case as this check does: named after its folder, each grader after its file, every grader
+// scoring both arms, the build the only plugin. Anything outside it is refused, never interpreted.
+// A plain value a YAML reader takes as text: not a boolean, a null, a number or a date in either YAML 1.1 or 1.2.
+const YAML_WORDS = new Set(['true', 'false', 'null', 'yes', 'no', 'on', 'off', 'y', 'n']);
+const yamlText = v => !YAML_WORDS.has(v.toLowerCase())
+  && !/^[-+]?(\d[\d_]*|0x[\da-f]+|0o[0-7]+|0b[01]+|(\d+\.?\d*|\.\d+)(e[-+]?\d+)?|\.inf|\.nan)$/i.test(v) && !/^\d{4}-\d\d?-\d\d?$/.test(v);
+const WORD = v => /^[a-z0-9][a-z0-9-]*$/.test(v) && yamlText(v);
+const TOOL = v => /^[A-Za-z][A-Za-z0-9_]*$/.test(v) && yamlText(v);
+const LIST = item => v => { const m = v.match(/^\[(.+)\]$/); return m !== null && m[1].split(', ').every(item); };
+const WHOLE = (low, high) => v => /^(0|[1-9]\d*)$/.test(v) && Number(v) >= low && Number(v) <= high;
+const WEIGHT = v => /^(0|[1-9]\d*)(\.\d+)?$/.test(v) && Number(v) > 0;
+// One single-quoted line with no quote and no control or line-separator character inside: YAML reads its text exactly.
+const UNQUOTED_BREAKS = [0x2028, 0x2029, 0xfeff].map(code => String.fromCharCode(code));
+const QUOTED = v => /^'[^']*'$/.test(v) && !/[\x00-\x1f\x7f-\x9f]/.test(v) && !UNQUOTED_BREAKS.some(c => v.includes(c));
+const RELATIVE_PATH = v => v.split('/').every(s => CASE_PATH_NAME.test(s) && s !== '.' && s !== '..') && yamlText(v);
+// The keys of each file, each value's one form, and what that form is, for the refusal. They are the keys the public trial's
+// eight cases use; a tool_used grader only as the one public grader of that type writes it (of the Read tool).
+const PROMPT_KEYS = {
+  tags: { value: LIST(WORD), says: 'a list of lower-case words, as [safety, deployment]' },
+  runs: { value: WHOLE(1, 50), says: 'a whole number from 1 to 50' },
+  max_turns: { value: WHOLE(1, 200), says: 'a whole number from 1 to 200' },
+  timeout_seconds: { value: WHOLE(1, 3600), says: 'a whole number from 1 to 3600' },
+  allowed_tools: { value: LIST(TOOL), says: 'a list of tool names, as [Read, Write]' },
+};
+const GRADER_KEYS = {
+  type: { value: v => v === 'regex' || v === 'tool_used', says: 'regex, or tool_used as the public trial writes it' },
+  pattern: { value: QUOTED, says: 'one single-quoted line with no quote inside' },
+  flags: { value: v => /^[dgimsuvy]+$/.test(v), says: 'regular expression flags (d, g, i, m, s, u, v, y)' },
+  match: { value: v => v === 'contains' || v === 'not_contains', says: 'contains or not_contains' },
+  target: { value: v => v === 'last_message', nested: [['source', v => v === 'file'], ['path', RELATIVE_PATH]], says: 'last_message, or no value and then "  source: file" and "  path: <a relative path>"' },
+  weight: { value: WEIGHT, says: 'a number above 0' },
+  tool: { value: v => v === 'Read', says: 'Read, the one tool a tool_used grader names in the public trial' },
+  input_match: { value: QUOTED, says: 'one single-quoted line with no quote inside' },
+  min: { value: WHOLE(0, Number.MAX_SAFE_INTEGER), says: 'a whole number' },
+  max: { value: WHOLE(0, Number.MAX_SAFE_INTEGER), says: 'a whole number' },
+};
+const GRADER_TYPES = {
+  regex: { keys: ['type', 'pattern', 'flags', 'match', 'target', 'weight'], needs: ['pattern'] },
+  tool_used: { keys: ['type', 'tool', 'input_match', 'min', 'max', 'weight'], needs: ['tool'] },
+};
+// The runner's blank `init` templates, which it refuses to run (Claude Code 2.1.321).
+const PROMPT_TEMPLATE = 'TODO: describe what the agent should do';
+const GRADER_TEMPLATE = 'TODO: describe what a successful response looks like';
+// The lines of prompt.md's or a grader's front matter, and its body: the file opens with a line that is exactly "---" and the
+// front matter runs to the next line that is exactly "---", with no "---" anywhere in between. null otherwise.
+function frontMatter(text) {
+  const lines = text.split('\n');
+  if (lines[0] !== '---') return null;
+  const close = lines.indexOf('---', 1);
+  if (close < 0 || lines.slice(1, close).some(line => line.includes('---'))) return null;
+  return { lines: lines.slice(1, close), body: lines.slice(close + 1).join('\n') };
+}
+// Reads lines in the exact form, or refuses at the first line outside it: each is "key: value", the key a bare lower-case word
+// from spec given once, the value one its form takes. A key with `nested` may instead have no value, and is then followed by
+// exactly its nested keys' lines, in that order, each indented by two spaces. first is the file's line number of lines[0].
+function readExact(lines, spec, where, first) {
   const keys = {};
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.trim() || /^\s/.test(line) || line.startsWith('#')) continue;
-    const m = line.match(/^([A-Za-z_][A-Za-z0-9_-]*):(?:\s+(.*))?$/);
-    if (!m) return null;
-    keys[m[1]] = (m[2] ?? '').replace(/\s+#.*$/, '').trim().replace(/^(['"])(.*)\1$/, '$2');
+  for (let i = 0; i < lines.length; i++) {
+    const at = `${where}, line ${first + i}`;
+    const m = lines[i].match(/^([a-z_]+):(?: (.*))?$/);
+    if (m === null) refuse('form-line', `${at} is not a "key: value" line of the form this mode takes; nothing was run`);
+    const [, key, value] = m, form = spec[key];
+    if (form === undefined) refuse('form-line', `${at}: ${key} is not a key this mode takes there (it takes ${Object.keys(spec).join(', ')}); nothing was run`);
+    if (key in keys) refuse('form-line', `${at}: ${key} is given twice; nothing was run`);
+    if (value !== undefined) {
+      if (!form.value?.(value)) refuse('form-line', `${at}: the value of ${key} is not ${form.says}; nothing was run`);
+      keys[key] = value;
+      continue;
+    }
+    if (form.nested === undefined) refuse('form-line', `${at}: ${key} has no value; it takes ${form.says}. Nothing was run.`);
+    keys[key] = {};
+    for (const [sub, accepts] of form.nested) {
+      i += 1;
+      const n = (lines[i] ?? '').match(/^ {2}([a-z_]+): (.*)$/);
+      if (n === null || n[1] !== sub || !accepts(n[2])) refuse('form-line', `${where}, line ${first + i}: ${key} takes ${form.says}; nothing was run`);
+      keys[key][sub] = n[2];
+    }
   }
   return keys;
 }
-const frontMatterOf = text => (String(text).match(/^---\r?\n([\s\S]*?)\r?\n---/) || [])[1];
-// The public trial's form, which is the only form this mode takes, so that each case's name is its folder's and each grader's
-// name its file's, the same in both arms. The runner (Claude Code 2.1.321) takes a case's name from case.yaml, or from a `name`
-// in prompt.md's front matter, which overrides it; joins a `graders` list in case.yaml to the files under graders/; names a
-// grader file by its file name unless its front matter sets `name`; and leaves a grader out of the bare arm when it is
-// with-only: one with `arm: with-only`, a tool_used grader of the Skill tool with no `arm`, or a grader of mock_calls. So a
-// case.yaml must name the case after its folder and list no graders; prompt.md's front matter sets no `name`; a grader sets
-// no `name` and no `arm`, and is neither of those with-only kinds; and each is written as plain `key: value` lines.
-function refuseOutsideForm(root, names, files) {
-  const text = rel => files[rel]?.toString('utf8');
+const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+function refuseOutsideForm(root, names, files, entries) {
+  const at = rel => `${root}/cases/${rel}`;
+  const textOf = rel => {
+    let text = null;
+    try { text = UTF8.decode(files[rel]); } catch {}
+    if (text === null || text.includes('\r')) refuse('form-text', `${at(rel)} is not UTF-8 text without carriage returns, the form this mode takes; nothing was run`);
+    return text;
+  };
+  // cases/ holds the case folders and nothing else; no case folder holds a plugin manifest, which the runner would load for that
+  // case in place of the build; and graders/ holds grader files, <name>.md, only.
+  for (const rel of entries) {
+    const parts = rel.split('/');
+    if (parts.length === 1 && files[rel] !== undefined) refuse('form-file', `${at(rel)} is a file at the top of cases/, which holds only the case folders; nothing was run`);
+    if (parts.length === 2 && (parts[1] === 'plugin.json' || parts[1] === '.claude-plugin')) refuse('form-file', `${at(rel)} would make the runner load the case folder as a plugin in place of the build; nothing was run`);
+    if (parts.length >= 3 && parts[1] === 'graders' && (parts.length > 3 || !parts[2].endsWith('.md') || files[rel] === undefined)) refuse('form-file', `${at(rel)}: graders/ holds grader files only, each <name>.md; nothing was run`);
+  }
   for (const n of names) {
-    const caseYaml = text(`${n}/case.yaml`);
-    if (caseYaml !== undefined) {
-      const keys = plainKeys(caseYaml);
-      if (keys === null) refuse('form-yaml', `${root}/cases/${n}/case.yaml is not written as plain "key: value" lines; nothing was run`);
-      if ('graders' in keys) refuse('form-inline-graders', `${root}/cases/${n}/case.yaml lists graders; in this mode graders are files under graders/ only. Nothing was run.`);
-      if (keys.name !== n) refuse('form-case-name', `${root}/cases/${n}/case.yaml names the case ${JSON.stringify(keys.name ?? null)}; it must be its folder's name, ${n}. Nothing was run.`);
+    if (files[`${n}/case.yaml`] !== undefined) {
+      const rel = `${n}/case.yaml`;
+      const keys = readExact(textOf(rel).replace(/\n$/, '').split('\n'), {
+        schema_version: { value: v => v === '"1.1"', says: '"1.1"' },
+        name: { value: v => v === n, says: `the folder's name, ${n}` },
+        context: { nested: [['scaffold_script', v => CASE_PATH_NAME.test(v) && yamlText(v) && files[`${n}/${v}`] !== undefined]], says: '"  scaffold_script: <a file of this case>" on the next line' },
+      }, at(rel), 1);
+      for (const key of ['schema_version', 'name']) if (!(key in keys)) refuse('form-missing', `${at(rel)} has no ${key}; nothing was run`);
     }
-    const prompt = text(`${n}/prompt.md`);
-    const promptFront = prompt === undefined ? undefined : frontMatterOf(prompt);
-    if (promptFront !== undefined) {
-      const keys = plainKeys(promptFront);
-      if (keys === null) refuse('form-yaml', `${root}/cases/${n}/prompt.md's front matter is not written as plain "key: value" lines; nothing was run`);
-      if ('name' in keys) refuse('form-prompt-name', `${root}/cases/${n}/prompt.md's front matter names the case; in this mode a case's name is its folder's. Nothing was run.`);
-    }
-    for (const rel of Object.keys(files).filter(rel => rel.startsWith(`${n}/graders/`) && rel.endsWith('.md') && rel.split('/').length === 3).sort(byteOrder)) {
-      const keys = plainKeys(frontMatterOf(text(rel)) ?? '');
-      if (keys === null) refuse('form-yaml', `${root}/cases/${rel}'s front matter is not written as plain "key: value" lines; nothing was run`);
-      if ('name' in keys) refuse('form-grader-name', `${root}/cases/${rel} sets a grader name; in this mode a grader's name is its file's. Nothing was run.`);
-      if ('arm' in keys) refuse('form-grader-arm', `${root}/cases/${rel} sets an arm; in this mode every grader scores both arms. Nothing was run.`);
-      if ((keys.type === 'tool_used' && keys.tool === 'Skill') || keys.target === 'mock_calls' || keys.focus === 'mock_calls') refuse('form-with-only', `${root}/cases/${rel} is a grader the runner treats as with-only (a tool_used grader of the Skill tool, or a grader of mock_calls); in this mode every grader scores both arms. Nothing was run.`);
+    const promptRel = `${n}/prompt.md`;
+    if (files[promptRel] === undefined) refuse('form-missing', `${at(n)} has no prompt.md; in this mode each case has one, its front matter and then its prompt. Nothing was run.`);
+    const prompt = frontMatter(textOf(promptRel));
+    if (prompt === null) refuse('form-front-matter', `${at(promptRel)} does not open with a line that is exactly "---" and close its front matter with the next such line, with no other "---" between; nothing was run`);
+    readExact(prompt.lines, PROMPT_KEYS, at(promptRel), 2);
+    if (!prompt.body.trim() || prompt.body.includes(PROMPT_TEMPLATE)) refuse('form-missing', `${at(promptRel)} has no prompt after its front matter, or only the runner's blank template; nothing was run`);
+    for (const rel of Object.keys(files).filter(rel => rel.startsWith(`${n}/graders/`)).sort(byteOrder)) {
+      const grader = frontMatter(textOf(rel));
+      if (grader === null) refuse('form-front-matter', `${at(rel)} does not open with a line that is exactly "---" and close its front matter with the next such line, with no other "---" between (the runner skips a grader file without front matter); nothing was run`);
+      const keys = readExact(grader.lines, GRADER_KEYS, at(rel), 2);
+      const kind = GRADER_TYPES[keys.type];
+      if (kind === undefined) refuse('form-missing', `${at(rel)} has no type; nothing was run`);
+      for (const key of Object.keys(keys)) if (!kind.keys.includes(key)) refuse('form-line', `${at(rel)}: ${key} is not a key of a ${keys.type} grader here (it takes ${kind.keys.join(', ')}); nothing was run`);
+      for (const key of kind.needs) if (!(key in keys)) refuse('form-missing', `${at(rel)}: a ${keys.type} grader needs ${key}; nothing was run`);
+      for (const key of ['pattern', 'input_match']) {
+        if (!(key in keys)) continue;
+        const text = keys[key].slice(1, -1);
+        try { new RegExp(text, key === 'pattern' ? keys.flags ?? '' : ''); } catch { refuse('form-line', `${at(rel)}: ${key} is not a valid regular expression${key === 'pattern' && keys.flags ? ` with the flags ${keys.flags}` : ''}; nothing was run`); }
+        if (key === 'pattern' && text.includes(GRADER_TEMPLATE)) refuse('form-missing', `${at(rel)}: pattern is still the runner's blank template; nothing was run`);
+      }
     }
   }
 }
 // The names allowed anywhere under cases/: letters, digits, ".", "_" and "-", and neither "." nor "..". Every later step (the
 // checksum's lines, the paths the run writes) can take such a name.
 const CASE_PATH_NAME = /^[A-Za-z0-9._-]+$/;
+// A case folder's name: lower-case letters, digits and hyphens, starting with a letter or digit, text to YAML, and none of the
+// names the runner's case discovery skips (Claude Code 2.1.321 skips node_modules, .claude, results and mocks, and .git in any
+// case; the pattern already leaves out all but results and mocks).
+const SKIPPED_BY_DISCOVERY = new Set(['node_modules', '.claude', 'results', 'mocks', '.git']);
+const caseNameOk = name => WORD(name) && !SKIPPED_BY_DISCOVERY.has(name);
 // --unpublished <folder> (a path: onlyFlags has refused the flag without one), read without running anything: the roster
-// (trial.json lists each case once, by name, and its list is exactly the folders under cases/), the structure (every check
-// `check` runs on a trial folder except running its fixtures), the names under cases/, then the cases' bytes, read once: the
-// public trial's form is checked on them, and their checksum and each case's graders (its graders/*.md, by file name) are
-// taken from them.
+// (trial.json lists each case once, by name, and its list is exactly the folders under cases/), the case names, the structure
+// (every check `check` runs on a trial folder except running its fixtures), the names under cases/, then the cases' bytes,
+// read once: the public trial's form is checked on them, and their checksum and each case's graders (its graders/*.md, by file
+// name) are taken from them.
 function unpublishedFolder(value) {
   const root = resolve(value);
   if (!existsSync(root) || !statSync(root).isDirectory()) refuse('folder-absent', `no trial folder at ${root}; nothing was run`);
@@ -357,13 +453,16 @@ function unpublishedFolder(value) {
   if (twice.length) refuse('roster-twice', `${root}/trial.json lists ${twice.join(', ')} more than once; each case is listed once. Nothing was run.`);
   const listed = [...names].sort(byteOrder), found = [...dirs].sort(byteOrder);
   if (listed.join('\n') !== found.join('\n')) refuse('roster-mismatch', `${root}/trial.json lists ${listed.length} cases and cases/ holds ${found.length} folders, and the two do not match; nothing was run`);
+  const badCase = listed.find(n => !caseNameOk(n));
+  if (badCase !== undefined) refuse('case-name', `${casesDir}/${badCase} is not a case name this mode takes: lower-case letters, digits and hyphens, starting with a letter or digit; not a word YAML reads as other than text (true, false, null, yes, no, on, off, y, n, a number or a date); and not a name the runner's case discovery skips (results, mocks, node_modules, .claude, .git). Rename it. Nothing was run.`);
   const problems = folderProblems(root, 'trial', { structuralOnly: true });
   if (problems.length) refuse('structure', `trial ${root}: ${problems.length} problem(s)\n  - ${problems.join('\n  - ')}`);
-  const badName = walk(casesDir).find(rel => { const name = rel.split('/').pop(); return !CASE_PATH_NAME.test(name) || name === '.' || name === '..'; });
+  const entries = walk(casesDir);
+  const badName = entries.find(rel => { const name = rel.split('/').pop(); return !CASE_PATH_NAME.test(name) || name === '.' || name === '..'; });
   if (badName !== undefined) refuse('file-name', `${casesDir} holds a name outside the allowed ones (letters, digits, ".", "_" and "-"): ${JSON.stringify(badName)}; rename it. Nothing was run.`);
   const files = filesIn(casesDir);
-  refuseOutsideForm(root, names, files);
-  const graders = Object.fromEntries(names.map(n => [n, Object.keys(files).filter(rel => rel.startsWith(`${n}/graders/`) && rel.endsWith('.md') && rel.split('/').length === 3).map(rel => basename(rel, '.md')).sort(byteOrder)]));
+  refuseOutsideForm(root, names, files, entries);
+  const graders = Object.fromEntries(names.map(n => [n, Object.keys(files).filter(rel => rel.startsWith(`${n}/graders/`)).map(rel => basename(rel, '.md')).sort(byteOrder)]));
   return { root, record, files, graders, ...casesDigest(files, names.length) };
 }
 // With --unpublished, --trial names the published trial the cases belong to, by slug; a folder is refused.
@@ -406,10 +505,10 @@ function onlyFlags(command) {
     if (VALUE_FLAGS.includes(name) && flag(name) === true) refuse('flag-value', `${a} needs a value; nothing was run`);
   }
 }
-// A path this mode creates: a file (--out, --raw-out) or the run folder (--work-dir). It must not exist yet, its parent folder
-// must, and it may not lie inside the unpublished folder. Files are created with exclusive creation ('wx') and the run folder
-// with mkdir, so a path that appears in the meantime fails instead of being written through: this mode overwrites and deletes
-// nothing.
+// A path this mode creates: a file (--out, --raw-out) or the run folder (--work-dir). It must not exist yet; its parent folder
+// must, and this user must be able to create a file in it; and it may not lie inside the unpublished folder. Files are created
+// with exclusive creation ('wx', in createNew) and the run folder with mkdir, so a path that appears in the meantime fails
+// instead of being written through: this mode overwrites and deletes nothing.
 function newOutput(name, value, folderRoot) {
   const p = resolve(String(value));
   let exists = true;
@@ -420,7 +519,16 @@ function newOutput(name, value, folderRoot) {
   if (parent === null || !statSync(parent).isDirectory()) refuse('output-parent', `${name} ${p} is not in an existing folder; nothing was run`);
   const real = join(parent, basename(p)), folder = realpathSync.native(folderRoot);
   if (real.startsWith(folder + sep)) refuse('output-in-folder', `${name} ${p} is inside the unpublished folder ${folder}; this mode writes nothing there. Nothing was run.`);
+  try { accessSync(parent, constants.W_OK | constants.X_OK); } catch { refuse('output-unwritable', `${name} ${p} is in a folder this user cannot create files in, ${parent}; nothing was run`); }
   return real;
+}
+// Creates an output with exclusive creation. A file that appeared at the path after the preflight is left as it is, and the
+// command stops; `then` says what was kept.
+function createNew(name, path, text, then) {
+  try { writeFileSync(path, text, { flag: 'wx' }); } catch (err) {
+    if (err?.code !== 'EEXIST') throw err;
+    die(`${name} ${path} appeared after the checks and was left as it is; ${then}`);
+  }
 }
 // A record from the site, read before anything runs; a failed read is a refusal.
 async function lookUp(path, why, what) {
@@ -472,9 +580,10 @@ function wrap(rawPath, { build, buildVersion, trialRecord, local = false, sha256
 
 // The raw report of a run with --unpublished carries a marker, unpublishedRun, with every fact its record needs from the run:
 // the published trial and version, the cases (their real names, their dimensions and their graders at the run: the report is
-// private), their count and checksum, the build, its version and archive checksum, the runner, the date, the --rep suffix, the
-// environment and the runner's exit status. test writes it; wrap rebuilds the record from it alone, so the two records are the
-// same apart from the id's random part, and both apply the same rules to it.
+// private), their count and checksum, the build, its version and archive checksum, the plugin the run loads (the name and version
+// its manifest gives, and the run folder it loads from), the runner, the date, the --rep suffix, the environment and the runner's
+// exit status. test writes it; wrap rebuilds the record from it alone, so the two records are the same apart from the id's random
+// part, and both apply the same rules to it.
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const isText = v => typeof v === 'string' && v.length > 0;
 const uniqueTexts = list => Array.isArray(list) && list.length > 0 && list.every(isText) && new Set(list).size === list.length;
@@ -486,14 +595,17 @@ function validMarker(run) {
     && isText(run.build) && isText(run.buildVersion) && typeof run.archiveSha256 === 'string' && SHA256_HEX.test(run.archiveSha256) && isText(run.runner)
     && typeof run.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(run.date) && typeof run.idSuffix === 'string'
     && (Number.isInteger(run.runnerExit) || isText(run.runnerExit))
+    && typeof run.plugin === 'object' && run.plugin !== null && isText(run.plugin.name) && isText(run.plugin.version) && isText(run.plugin.path) && isAbsolute(run.plugin.path)
     && typeof run.environment === 'object' && run.environment !== null && ['os', 'claudeCode', 'model'].every(k => isText(run.environment[k])) && Array.isArray(run.environment.modules);
 }
 // A record is written only for a complete run on exactly the folder's cases. The runner (Claude Code 2.1.321) exits 0 when it
 // finished; 1 when a case scored under --threshold (0 here, so no case can), a case did not load, the harness failed, a run
 // ended on an API error, or its git check failed; 2 for a partial report (the cost ceiling, an interruption, a failed sign-in);
 // 130 when interrupted before any case ran. Only 0 is taken. The report must not be partial; it must have run with and
-// without the build, on the model the record names (when it says which); it holds one result for each case and no other, with
-// totals that agree; each arm of each case holds exactly the runs the case declares; and each run is complete, as attemptStatus
+// without the build, on the model the record names (when it says which); it must show the build loaded in the arm with it, as
+// pluginLoaded in comparison-results.mjs reads a report (one plugin, the build's name and version from its manifest, from the
+// run folder, which is the suite's root, and no problem reported for it); it holds one result for each case and no other, each
+// from the run folder's evals/<name> where the report says where a case came from, with totals that agree; each arm of each case holds exactly the runs the case declares; and each run is complete, as attemptStatus
 // in comparison-results.mjs classifies runs, with gradedErrors: the runner graded it (every grader of the case scored, a score
 // from 0 to 1, no paid grader skipped) and did not abort it. A run that ended in an ordinary error (out of turns, say) and was
 // still graded is a measurement, as in every record; a run the runner aborted, or that never reached grading (an API error, a
@@ -511,6 +623,10 @@ function unpublishedRunProblems(raw, run) {
   const suite = raw.suite && typeof raw.suite === 'object' ? raw.suite : {};
   if (suite.ablation !== undefined && suite.ablation !== 'with-without') problems.push(`the run did not compare the build with the bare runtime (ablation ${JSON.stringify(suite.ablation)})`);
   if (suite.modelOverride !== undefined && suite.modelOverride !== run.environment.model) problems.push(`the runner ran ${suite.modelOverride}, not ${run.environment.model}`);
+  if (!pluginLoaded(suite, run.plugin)) {
+    const said = Array.isArray(suite.plugins) && suite.plugins.length ? suite.plugins.map(entry => `${entry?.name} ${entry?.version ?? '(no version)'}${entry?.problem ? ` with the problem ${entry.problem}` : ''}`).join(', ') : 'none';
+    problems.push(`the report does not show the build loaded in the run with it: it must name one plugin, ${run.plugin.name} ${run.plugin.version}, loaded from the run folder with no problem reported for it (it names ${said})`);
+  }
   const numberOf = new Map(run.cases.map(c => c.name).sort(byteOrder).map((name, i) => [name, `unpublished-${i + 1}`]));
   const gradersOf = new Map(run.cases.map(c => [c.name, c.graders]));
   const cases = Array.isArray(raw.cases) ? raw.cases : [];
@@ -528,6 +644,7 @@ function unpublishedRunProblems(raw, run) {
     // A result for a case the folder does not list is reported above, once; its runs are not checked.
     if (!numberOf.has(c?.name)) continue;
     const where = numberOf.get(c.name);
+    if (c.dir !== undefined && c.dir !== `evals/${c.name}`) problems.push(`${where}: the report says the case was read from another folder than the run folder's evals/`);
     const declared = Number.isInteger(c.runsPerCase) && c.runsPerCase > 0 ? c.runsPerCase : null;
     if (declared === null) problems.push(`${where}: the report does not say how many runs the case declares`);
     const scores = {};
@@ -652,8 +769,9 @@ async function test(slug) {
 
 
 // Every check of test --unpublished that needs nothing to run, in one place, in this order: the flags and their values, the
-// role, the published trial's slug, the build's slug, the folder (argument, roster, structure, names under cases/, then on the
-// cases' bytes the public trial's form and the checksum), the three outputs, the published trial and its case names, the
+// role, the published trial's slug, the build's slug, the folder (argument, roster, case names, structure, names under cases/,
+// then on the cases' bytes the public trial's form and the checksum), the three outputs (each new, in an existing folder this
+// user can create files in, outside the unpublished folder, no two one path), the published trial and its case names, the
 // published build and its archive record, and Claude Code. Only when all pass may anything be run, created or written, or the
 // archive downloaded.
 async function unpublishedPreflight(slug) {
@@ -691,6 +809,24 @@ async function unpublishedPreflight(slug) {
   if (!claude) refuse('claude', 'claude is not installed; install Claude Code 2.1.269 or later. Nothing was run.');
   return { model, runner, repSuffix, published, build, folder, claude, outPath, rawOut, workDir };
 }
+// The plugin the run loads, from the build's own manifest in the run folder. The runner is told --eval-dir evals, and an archive
+// whose manifest names an eval folder of its own (experimental.evals, or a top-level evals, which the runner ignores) is refused
+// before the runner starts, as is one whose manifest does not name this build with a version. The check that the build loaded
+// compares the report with this name, version and folder.
+function buildPlugin(workDir, slug) {
+  const stop = why => die(`${why}; the runner was not started, and no record was written`);
+  const read = path => { try { const m = JSON.parse(readFileSync(path, 'utf8')); return m && typeof m === 'object' && !Array.isArray(m) ? m : null; } catch { return null; } };
+  const main = join(workDir, '.claude-plugin', 'plugin.json');
+  const manifest = existsSync(main) ? read(main) : null;
+  if (manifest === null) stop(`the build's archive has no .claude-plugin/plugin.json that is a JSON object`);
+  for (const path of [main, join(workDir, 'plugin.json')].filter(path => existsSync(path))) {
+    const m = read(path);
+    if (m === null) stop(`the build's archive holds ${relative(workDir, path)}, which is not a JSON object`);
+    if ('evals' in m || (m.experimental !== null && typeof m.experimental === 'object' && 'evals' in m.experimental)) stop(`the build's plugin manifest ${relative(workDir, path)} names an eval folder of its own; in this mode the runner reads only the cases this run writes to evals/`);
+  }
+  if (manifest.name !== slug || !isText(manifest.version)) stop(`the build's plugin manifest names ${JSON.stringify(manifest.name ?? null)} version ${JSON.stringify(manifest.version ?? null)}, not the build ${slug} with a version`);
+  return { name: manifest.name, version: manifest.version, path: workDir };
+}
 // test --unpublished: the preflight, then the folder's fixtures, then the run in a new run folder on the build's verified archive,
 // then a record only for a complete run whose report this run wrote.
 async function testUnpublished(slug) {
@@ -712,13 +848,16 @@ async function testUnpublished(slug) {
   // An entry named otherwise that still lands there (through a "." in its path, or a name that differs only in case on a file
   // system that ignores case) is found by the file system's own lookup, and the runner is not started.
   for (const name of ['buildguild-raw.json', 'evals']) if (existsSync(join(p.workDir, name))) die(`the build's archive holds an entry that lands on ${name} in the run folder ${p.workDir}, where only this run's ${name === 'evals' ? 'cases go' : 'report goes'}; the runner was not started, and no record was written`);
+  const plugin = buildPlugin(p.workDir, slug);
   const modules = await modulePins(p.workDir);
   const t = p.published;
   out(`unpublished cases of ${t.name} v${t.version}: ${p.folder.count} from ${p.folder.root}\n  sha256 ${p.folder.sha256}`);
   writeTree(join(p.workDir, 'evals'), p.folder.files);
   const rawPath = join(p.workDir, 'buildguild-raw.json');
-  // The runner arguments of any other run; --runs is refused in this mode, so each case runs as often as it declares.
-  const argv = ['plugin', 'eval', '.', '--scaffold', '--allow-tools', 'Bash', 'Write', 'Edit', '--json', 'buildguild-raw.json', '--no-publish', '--trust-plugin', '--ablation', 'with-without', '--max-cost-usd', String(flag('max-cost-usd', '5')), '--threshold', '0'];
+  // The runner arguments of any other run, and --eval-dir evals, so the runner reads its cases only from the evals/ this run
+  // wrote, never from a folder the build's manifest names; --runs is refused in this mode, so each case runs as often as it
+  // declares.
+  const argv = ['plugin', 'eval', '.', '--eval-dir', 'evals', '--scaffold', '--allow-tools', 'Bash', 'Write', 'Edit', '--json', 'buildguild-raw.json', '--no-publish', '--trust-plugin', '--ablation', 'with-without', '--max-cost-usd', String(flag('max-cost-usd', '5')), '--threshold', '0'];
   if (flag('j')) argv.push('-j', String(flag('j')));
   argv.push('--model', p.model);
   if (flag('keep-temp')) argv.push('--keep-temp');
@@ -731,18 +870,18 @@ async function testUnpublished(slug) {
   raw.trialSource = 'unpublished';
   raw.unpublishedRun = { trial: t.slug, trialVersion: t.version, count: p.folder.count, sha256: p.folder.sha256,
     cases: p.folder.record.cases.map(c => ({ name: c.name, dimension: c.dimension, graders: p.folder.graders[c.name] })),
-    build: slug, buildVersion: p.build.version, archiveSha256, runner: p.runner, date: new Date().toISOString().slice(0, 10), idSuffix: p.repSuffix,
+    build: slug, buildVersion: p.build.version, archiveSha256, plugin, runner: p.runner, date: new Date().toISOString().slice(0, 10), idSuffix: p.repSuffix,
     environment: { ...fingerprint(), claudeCode: raw.claudeVersion || fingerprint().claudeCode, modules }, runnerExit: r.status ?? `signal ${r.signal}` };
   // The report is kept, marked, whatever comes next: a plain wrap refuses it, and it shows what happened. The run folder's copy
   // is this run's own file; --raw-out is created new.
   writeFileSync(rawPath, JSON.stringify(raw, null, 2) + '\n');
-  writeFileSync(p.rawOut, JSON.stringify(raw, null, 2) + '\n', { flag: 'wx' });
+  createNew('--raw-out', p.rawOut, JSON.stringify(raw, null, 2) + '\n', `the marked raw report stays in the run folder at ${rawPath}, and no record was written`);
   if (raw.partialReason === 'auth_failed') die('the eval runner could not authenticate its agent runs ("Not logged in"). It runs `claude -p` in an isolated home, so run this from a terminal where `claude` is logged in, or set ANTHROPIC_API_KEY. No evidence file was written.', 2);
   const problems = unpublishedRunProblems(raw, raw.unpublishedRun);
   if (problems.length) die(`no record was written: the run on the unpublished cases is not complete.\n  - ${problems.join('\n  - ')}\nThe raw report ${rawPath} and its copy ${p.rawOut} are kept, marked, to work out what happened; they hold the cases' names and prompts, so keep them private.`, 2);
   gradedErrorNote(raw);
   const ev = unpublishedRecord(raw, raw.unpublishedRun);
-  writeFileSync(p.outPath, JSON.stringify(ev, null, 2) + '\n', { flag: 'wx' });
+  createNew('--out', p.outPath, JSON.stringify(ev, null, 2) + '\n', `no record was written. The raw report ${rawPath} and its copy ${p.rawOut} are kept, and wrap --unpublished can write the record to a new path`);
   out(`\nhidden-slice record: ${p.outPath}\n  overall ${Math.round(ev.results.overallScore * 100)}%, ${vsBare(ev.results.meanDelta)}, ${ev.results.casesPassed}/${ev.results.casesTotal} cases${ev.cost ? `, est. $${ev.cost.usd}` : ''}; bare runtime ${Math.round(ev.results.bareOverallScore * 100)}%\nIt names the cases only as unpublished-1 to unpublished-${p.folder.count}. A maintainer adds it to Build by pull request; submit refuses it.`);
   process.exit(0);
 }
@@ -779,7 +918,7 @@ async function wrapUnpublished(rawPath) {
   const problems = unpublishedRunProblems(raw, run);
   if (problems.length) die(`no record was written: ${rawPath} is not the report of a complete run on the unpublished cases.\n  - ${problems.join('\n  - ')}`);
   gradedErrorNote(raw);
-  writeFileSync(outPath, JSON.stringify(unpublishedRecord(raw, run), null, 2) + '\n', { flag: 'wx' });
+  createNew('--out', outPath, JSON.stringify(unpublishedRecord(raw, run), null, 2) + '\n', 'no record was written');
   out(`hidden-slice record: ${outPath}`);
 }
 
@@ -1073,12 +1212,13 @@ Run from a checkout of https://github.com/Guild-Build/Build; the buildguild npm 
                                         --raw-out <new-file> --work-dir <new-folder> [--out <new-file>] [--role guild] [--max-cost-usd 5] [-j n] [--rep k] [--keep-temp]
                                         a guild maintainer's run of a private folder of cases, in the public trial's form, as the unpublished part
                                         (hidden slice) of a published trial, with a published build only; any other flag (--runs among them) is
-                                        refused. Every check that runs nothing comes before anything runs; it creates its outputs (new files, a
-                                        new run folder) and overwrites and deletes nothing; only the folder's cases run; a record is written only
-                                        for a complete run whose report this run wrote, and the record (default evidence-unpublished.json) is a
-                                        guild record with hiddenSlice true, its cases named unpublished-1 to -n, unpublishedCases {count, sha256}
-                                        and results.bareOverallScore. The run folder and raw report hold the cases' names and prompts: never
-                                        commit, upload or paste them
+                                        refused. Every check that needs neither the build's archive nor a run comes before anything runs, and
+                                        those on the archive before the runner starts; it creates its outputs (new files, a new run folder) and
+                                        overwrites and deletes nothing; only the folder's cases run (the runner is told --eval-dir evals); a record
+                                        is written only for a complete run with the build loaded, whose report this run wrote, and the record
+                                        (default evidence-unpublished.json) is a guild record with hiddenSlice true, its cases named
+                                        unpublished-1 to -n, unpublishedCases {count, sha256} and results.bareOverallScore. The run folder and
+                                        raw report hold the cases' names and prompts: never commit, upload or paste them
   node cli/buildguild.mjs unpublished <trial-folder>
                                         print the count and checksum of a folder's unpublished cases, running nothing, so both can be published first
   node cli/buildguild.mjs wrap <aggregate.json> --build <slug> --trial <slug|path> --model <id> [--build-version v] [--runner login]

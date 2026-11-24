@@ -23,11 +23,12 @@ const PRIVATE = [
   { name: 'middle-secret-handoff', dimension: 'handoff', score: 0.5, without: 0.5, prompt: 'Hand off the middle task.' },
 ];
 
-// Two names whose byte order and locale order differ: 'B-…' before 'a-…' by bytes, after it in most locales.
+// Case names are lower-case letters, digits and hyphens, which sort the same by bytes and by locale; the file names inside a
+// case may mix cases, and there the two orders differ ('Zeta.txt' before 'alpha.txt' by bytes, after it by locale).
 const MIXED = [
   { name: 'c-lower-gauge', dimension: 'quality', score: 0.5, without: 0.5, prompt: 'Read the c gauge.' },
   { name: 'a-lower-ledger', dimension: 'handoff', score: 1, without: 0.5, prompt: 'Close the a ledger.' },
-  { name: 'B-upper-switch', dimension: 'safety', score: 0.75, without: 0.25, prompt: 'Flip the B switch.' },
+  { name: 'b-lower-switch', dimension: 'safety', score: 0.75, without: 0.25, prompt: 'Flip the b switch.' },
 ];
 
 // A stored (uncompressed) zip of { name: contents }, enough for the CLI's own reader, for the published build's archive.
@@ -47,7 +48,10 @@ function zipOf(files) {
   end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(Object.keys(files).length, 8); end.writeUInt16LE(Object.keys(files).length, 10); end.writeUInt32LE(directory.length, 12); end.writeUInt32LE(offset, 16);
   return Buffer.concat([...locals, directory, end]);
 }
-const BUILD_FILES = { 'local-build/buildguild.json': JSON.stringify({ slug: 'local-build', modules: [] }), 'local-build/README.md': 'A stand-in build for the tests.\n' };
+// A published build's archive: its manifest names the build, with a version, and no eval folder unless a test gives one.
+const buildFiles = (slug, manifest = {}) => ({ [`${slug}/buildguild.json`]: JSON.stringify({ slug, modules: [] }), [`${slug}/README.md`]: 'A stand-in build for the tests.\n',
+  [`${slug}/.claude-plugin/plugin.json`]: JSON.stringify({ name: slug, version: '0.1.0', ...manifest }) });
+const BUILD_FILES = buildFiles('local-build');
 const BUILD_ZIP = zipOf(BUILD_FILES);
 const BUILD_SHA = createHash('sha256').update(BUILD_ZIP).digest('hex');
 
@@ -78,11 +82,12 @@ async function setup(t) {
   write('private-folder-q7/cases/zeta-secret-rollout/fixture.sh', `echo ran >> ${JSON.stringify(join(root, 'fixture-ran'))}\n`, 0o755);
   // A stored ZIP holding cases/case-name/prompt.md with "Write done.\n", as tests/trial-repeats.test.mjs uses.
   const zip = Buffer.from('UEsDBBQAAAAAAAAAIVzncEO0DAAAAAwAAAAZAAAAY2FzZXMvY2FzZS1uYW1lL3Byb21wdC5tZFdyaXRlIGRvbmUuClBLAQIUAxQAAAAAAAAAIVzncEO0DAAAAAwAAAAZAAAAAAAAAAAAAACAAQAAAABjYXNlcy9jYXNlLW5hbWUvcHJvbXB0Lm1kUEsFBgAAAAABAAEARwAAAEMAAAAAAA==', 'base64');
-  const requests = [];
+  const requests = [], hooks = [];
   // The stub site: the published trial and its archive, and published builds with their archives. A test may add routes.
   const routes = {};
   const server = createServer((req, res) => {
     requests.push(req.url);
+    for (const hook of hooks) hook(req.url);
     const origin = `http://127.0.0.1:${server.address().port}`;
     const build = (slug, zip) => ({ slug, name: slug, version: '0.1.0', archive: zip ? { file: `${slug}-0.1.0.zip`, url: `${origin}/dl/${slug}.zip`, sha256: createHash('sha256').update(zip).digest('hex') } : null });
     if (req.url === '/trials/sample-trial.json') res.end(JSON.stringify({ ...published, archive: `${origin}/trial.zip` }));
@@ -101,26 +106,43 @@ async function setup(t) {
   // check runs a fixture with bash, the one real program the CLI may start besides the stubs.
   symlinkSync('/bin/bash', join(root, 'bin/bash'));
   write('bin/claude', `#!${process.execPath}
-const { appendFileSync, readdirSync, writeFileSync } = require('node:fs');
+const { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } = require('node:fs');
+const { join } = require('node:path');
 const args = process.argv.slice(2);
 if (args[0] === '--version') { console.log('2.1.322 (Claude Code)'); process.exit(0); }
 if (args[0] !== 'plugin' || args[1] !== 'eval') process.exit(90);
 const damage = (process.env.STUB_DAMAGE || '').split(',').filter(Boolean);
+// A file that appears at an output path while the run goes on.
+if (process.env.STUB_RACE) writeFileSync(process.env.STUB_RACE, 'PRESERVE');
 if (damage.includes('no-report')) process.exit(90);
-const names = readdirSync('evals').sort();
-appendFileSync(${JSON.stringify(join(root, 'claude.log'))}, JSON.stringify({ args, cases: names }) + '\\n');
+// The cases, chosen as the runner chooses them (Claude Code 2.1.321): from --eval-dir, else from the folder the plugin's
+// manifest names in experimental.evals, else from evals/.
+const manifest = existsSync('.claude-plugin/plugin.json') ? JSON.parse(readFileSync('.claude-plugin/plugin.json', 'utf8')) : {};
+const evalDir = args.includes('--eval-dir') ? args[args.indexOf('--eval-dir') + 1] : manifest.experimental?.evals ?? 'evals';
+const names = readdirSync(evalDir).sort();
+appendFileSync(${JSON.stringify(join(root, 'claude.log'))}, JSON.stringify({ args, cases: names, prompts: names.map(n => readFileSync(join(evalDir, n, 'prompt.md'), 'utf8')) }) + '\\n');
 // A runner that finishes without writing its report.
 if (damage.includes('silent')) process.exit(0);
 const scores = ${JSON.stringify(scores)};
 // An attempt as the runner reports it: every grader of the case, scored, and no paid grader skipped.
+const graderNames = name => (existsSync(join(evalDir, name, 'graders')) ? readdirSync(join(evalDir, name, 'graders')) : []).filter(n => n.endsWith('.md')).sort().map(n => n.slice(0, -3));
 const graded = (name, score) => ({ score, passed: score >= 1, error: null, skippedPaidGraders: false,
-  graders: (require('node:fs').existsSync(require('node:path').join('evals', name, 'graders')) ? readdirSync(require('node:path').join('evals', name, 'graders')) : []).filter(n => n.endsWith('.md')).sort().map(n => ({ name: n.slice(0, -3), passed: score >= 1, weight: 1, explanation: '', withOnly: false, scored: true })) });
-let cases = names.map(name => { const [score, without] = scores[name] || [1, 0]; return { name, runsPerCase: 1, arms: { with: [graded(name, score)], without: [graded(name, without)] }, aggregates: { score, passRate: score === 1 ? 1 : 0, scoreWithout: without, passRateWithout: without === 1 ? 1 : 0, delta: score - without } }; });
+  graders: graderNames(name).map(n => ({ name: n, passed: score >= 1, weight: 1, explanation: '', withOnly: false, scored: true })) });
+let cases = names.map((name, i) => {
+  let [score, without] = scores[name] || [1, 0];
+  // Runs that score zero are graded like any other: both arms at zero, or the arm with the build at zero and the bare one at one.
+  if (i === 0 && damage.includes('zero-both')) [score, without] = [0, 0];
+  if (i === 0 && damage.includes('zero-with')) [score, without] = [0, 1];
+  return { name, dir: damage.includes('other-dir') ? 'alternate/' + name : evalDir + '/' + name, source: 'mixed', runsPerCase: 1, arms: { with: [graded(name, score)], without: [graded(name, without)] }, aggregates: { score, passRate: score === 1 ? 1 : 0, scoreWithout: without, passRateWithout: without === 1 ? 1 : 0, delta: score - without } };
+});
 const failed = { score: null, error: 'synthetic runner error' };
 if (damage.includes('aborted')) cases[0].arms.with[0].aborted = true;
 if (damage.includes('unscored')) cases[0].arms.with[0].graders[0].scored = false;
-// The runner grades a run that ended in an ordinary error, such as running out of turns (Claude Code 2.1.321).
+// The runner grades a run that ended in an ordinary error (Claude Code 2.1.321): out of turns, out of time, or an agent that
+// exited non-zero.
 if (damage.includes('max-turns')) cases[0].arms.with[0].error = 'exit 1: Reached maximum number of turns (2)';
+if (damage.includes('timeout')) cases[0].arms.with[0].error = 'timed out after 300s';
+if (damage.includes('agent-exit')) cases[0].arms.with[0].error = 'exit 2: the agent stopped';
 if (damage.includes('short-runs')) cases[0].runsPerCase = 2;
 if (damage.includes('arm-error')) { cases[0].arms.without = [failed]; cases[0].aggregates.scoreWithout = null; }
 if (damage.includes('no-score')) cases[0].arms.with = [{ score: null, error: null }];
@@ -134,7 +156,10 @@ const aggregates = { casesTotal: cases.length, casesPassed: cases.filter(c => c.
 if (damage.includes('bad-total')) aggregates.casesTotal += 1;
 if (damage.includes('bad-overall')) aggregates.overallScore += 0.125;
 if (damage.includes('skipped-graders')) cases[0].arms.with[0].skippedPaidGraders = true;
-const suite = { ablation: damage.includes('no-ablation') ? 'none' : args[args.indexOf('--ablation') + 1], modelOverride: damage.includes('other-model') ? 'claude-haiku-5-5' : args[args.indexOf('--model') + 1] };
+// The plugin under test, as the runner reports it: the build from the run folder, which is the suite's root; a manifest with
+// defaultEnabled: false gives the problem disabled_by_default, and the arm with the build then runs without it.
+const plugins = damage.includes('no-plugin') ? [] : [{ name: manifest.name, version: manifest.version, path: process.cwd(), ...(damage.includes('disabled-plugin') && { problem: 'disabled_by_default' }) }];
+const suite = { root: process.cwd(), ablation: damage.includes('no-ablation') ? 'none' : args[args.indexOf('--ablation') + 1], modelOverride: damage.includes('other-model') ? 'claude-haiku-5-5' : args[args.indexOf('--model') + 1], plugins };
 writeFileSync(args[args.indexOf('--json') + 1], JSON.stringify({ schemaVersion: 1, claudeVersion: '2.1.322', durationSeconds: 5, costUsd: 0.3, partial: damage.includes('partial'), suite, cases, aggregates }));
 if (damage.includes('exit-2')) process.exit(2);
 `, 0o700);
@@ -152,7 +177,7 @@ if (damage.includes('exit-2')) process.exit(2);
   };
   const json = name => JSON.parse(readFileSync(join(root, name), 'utf8'));
   const claudeCalls = () => existsSync(join(root, 'claude.log')) ? readFileSync(join(root, 'claude.log'), 'utf8').trim().split('\n').map(JSON.parse) : [];
-  return { root, write, writeFolder, run, testRun, hidden, json, claudeCalls, requests, routes };
+  return { root, write, writeFolder, run, testRun, hidden, json, claudeCalls, requests, routes, hooks };
 }
 
 // The checksum as the pull request tells a reader to recompute it by hand, with standard shell tools.
@@ -167,7 +192,7 @@ const digestOf = stdout => JSON.parse(stdout.match(/^unpublishedCases (.*)$/m)[1
 const withoutId = record => JSON.stringify({ ...record, id: record.id.replace(/-[a-z0-9]{1,6}(-rep\d+)?$/, '$1') });
 const wrapOf = (raw, out, extra = [], folder = './private-folder-q7') => ['wrap', raw, '--model', MODEL, '--trial', 'sample-trial', '--unpublished', folder, '--out', out, ...extra];
 
-test('only the folder\'s cases run, with the runner arguments of any other run, and the record names them only by number', async t => {
+test('only the folder\'s cases run, with the runner arguments of any other run and --eval-dir evals, and the record names them only by number', async t => {
   const f = await setup(t);
   const normal = await f.testRun(['--trial', 'sample-trial']);
   assert.equal(normal.status, 0, normal.stderr + normal.stdout);
@@ -176,13 +201,17 @@ test('only the folder\'s cases run, with the runner arguments of any other run, 
   const [first, second] = f.claudeCalls();
   assert.deepEqual(first.cases, ['case-name']);
   assert.deepEqual(second.cases, PRIVATE.map(c => c.name).sort(), 'the published case does not run, every folder case does');
-  const sameButFlags = second.args.join(' ').replace('--max-cost-usd 2', '--max-cost-usd 5').replace(' -j 2', '');
+  assert.deepEqual(second.prompts, PRIVATE.map(c => c.name).sort().map(name => readFileSync(join(f.root, 'private-folder-q7/cases', name, 'prompt.md'), 'utf8')), 'the runner reads the folder\'s own prompts');
+  assert.deepEqual(second.args.slice(2, 5), ['.', '--eval-dir', 'evals'], 'the runner is told which folder holds the cases');
+  const sameButFlags = second.args.join(' ').replace(' --eval-dir evals', '').replace('--max-cost-usd 2', '--max-cost-usd 5').replace(' -j 2', '');
   assert.equal(sameButFlags, first.args.join(' '), 'the runner gets the arguments of any other run');
   assert.ok(existsSync(join(f.root, 'fixture-ran')), 'test runs every check, fixtures included, as for a local trial folder');
 
   const record = f.json(r.out);
   const digest = digestOf((await f.run(['unpublished', './private-folder-q7'])).stdout);
   assert.deepEqual(Object.keys(record), ['schema', 'id', 'build', 'buildVersion', 'archiveSha256', 'trial', 'trialVersion', 'hiddenSlice', 'date', 'runner', 'role', 'gist', 'environment', 'results', 'unpublishedCases', 'cost', 'durationSeconds']);
+  assert.equal(record.schema, 'buildguild.evidence.v1');
+  assert.equal(record.environment.model, MODEL);
   assert.equal(record.trial, 'sample-trial');
   assert.equal(record.trialVersion, '1.0.1', 'the published record\'s current version, not the folder\'s');
   assert.equal(record.hiddenSlice, true);
@@ -192,6 +221,8 @@ test('only the folder\'s cases run, with the runner arguments of any other run, 
   assert.equal(record.buildVersion, '0.1.0');
   assert.equal(record.archiveSha256, BUILD_SHA);
   assert.deepEqual(record.unpublishedCases, { count: 3, sha256: digest.sha256 });
+  assert.match(record.unpublishedCases.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(record.results.casesPassed, 1);
   // alpha 1, middle 2, zeta 3, whatever order they ran in; scores and gaps kept.
   assert.deepEqual(record.results.cases, [
     { name: 'unpublished-1', score: 1, delta: 0.5 },
@@ -213,10 +244,11 @@ test('only the folder\'s cases run, with the runner arguments of any other run, 
   const raw = f.json(r.raw);
   assert.equal(raw.trialSource, 'unpublished');
   assert.deepEqual(raw.unpublishedRun, { trial: 'sample-trial', trialVersion: '1.0.1', count: 3, sha256: digest.sha256,
-    cases: PRIVATE.map(c => ({ name: c.name, dimension: c.dimension, graders: ['done'] })), build: 'local-build', buildVersion: '0.1.0', archiveSha256: BUILD_SHA, runner: 'tester',
+    cases: PRIVATE.map(c => ({ name: c.name, dimension: c.dimension, graders: ['done'] })), build: 'local-build', buildVersion: '0.1.0', archiveSha256: BUILD_SHA,
+    plugin: { name: 'local-build', version: '0.1.0', path: join(realpathSync(f.root), r.work) }, runner: 'tester',
     date: record.date, idSuffix: '', environment: record.environment, runnerExit: 0 });
   assert.deepEqual(f.json(`${r.work}/buildguild-raw.json`), raw);
-  assert.match(r.stdout, /hidden-slice record: .*evidence-\d+\.json\n  overall 75%, \+33 pts over bare, 1\/3 cases, est\. \$0\.3; bare runtime 42%\nIt names the cases only as unpublished-1 to unpublished-3\./);
+  assert.match(r.stdout, /hidden-slice record: .*evidence-\d+\.json\n  overall 75%, \+33 pts over bare, 1\/3 cases, est\. \$0\.3; bare runtime 42%\nIt names the cases only as unpublished-1 to unpublished-3\. A maintainer adds it to Build by pull request; submit refuses it\./);
 });
 
 test('--role guild is accepted, and --rep names the default record', async t => {
@@ -292,7 +324,10 @@ test('wrap --unpublished writes the same record as test into a new --out, and re
   assert.equal(w.stdout, `hidden-slice record: ${join(realpathSync(f.root), 'wrapped.json')}\n`);
   assert.equal(withoutId(f.json('wrapped.json')), withoutId(f.json(r.out)));
   assert.notEqual(f.json('wrapped.json').id, f.json(r.out).id);
+  mkdirSync(join(f.root, 'locked'));
+  chmodSync(join(f.root, 'locked'), 0o500);
   const refusals = [
+    [wrapOf(r.raw, 'locked/w.json'), /--out .*locked\/w\.json is in a folder this user cannot create files in/],
     [['wrap', r.raw, '--model', MODEL, '--build', 'local-build', '--trial', 'sample-trial'], /is the report of a run on unpublished cases; wrap it with --unpublished <the same folder> --trial <the published slug>/],
     [['wrap', r.raw, '--model', MODEL, '--trial', 'sample-trial', '--unpublished', './private-folder-q7'], /wrap --unpublished needs --out <new-file> for the record; nothing was written/],
     [wrapOf(r.raw, 'wrapped.json'), /--out .*wrapped\.json already exists; this mode creates its outputs and overwrites nothing/],
@@ -306,14 +341,15 @@ test('wrap --unpublished writes the same record as test into a new --out, and re
     assert.match(x.stderr, message, args.join(' '));
   }
   assert.ok(!existsSync(join(f.root, 'w2.json')));
+  assert.deepEqual(readdirSync(join(f.root, 'locked')), []);
   writeFileSync(join(f.root, 'raw-plain.json'), JSON.stringify({ ...f.json(r.raw), trialSource: undefined, unpublishedRun: undefined }));
   const plain = await f.run(wrapOf('raw-plain.json', 'w3.json'));
   assert.equal(plain.status, 1);
-  assert.match(plain.stderr, /raw-plain\.json is not the report of a run with --unpublished/);
+  assert.match(plain.stderr, /raw-plain\.json is not the report of a run with --unpublished, so it cannot become a hidden-slice record/);
   f.write('private-folder-q7/cases/alpha-secret-ledger/prompt.md', '---\ntags: [safety]\nallowed_tools: [Write]\n---\nBalance the ledger twice.\n');
   const changed = await f.run(wrapOf(r.raw, 'w4.json'));
   assert.equal(changed.status, 1);
-  assert.match(changed.stderr, /private-folder-q7 no longer holds the cases that run used/);
+  assert.match(changed.stderr, /private-folder-q7 no longer holds the cases that run used \(it has 3 with sha256 [0-9a-f]{64}; the run had 3 with sha256 [0-9a-f]{64}\); no record was written/);
 });
 
 test('submit refuses a hidden-slice record before it looks for gh', async t => {
@@ -326,15 +362,19 @@ test('submit refuses a hidden-slice record before it looks for gh', async t => {
     assert.equal(s.status, 1, file);
     assert.equal(s.stderr, `buildguild: ${file} is a run on a trial's unpublished cases (a hidden-slice record). A maintainer adds it to Build by pull request; it is never sent as a Gist. Nothing was sent.\n`);
   }
+  assert.ok(!f.requests.some(u => u.startsWith('/api/')), 'nothing was posted');
 });
 
 test('the help text and the README name the mode, the flags it accepts and the checksum command', () => {
   const r = spawnSync(process.execPath, [cli, 'help'], { encoding: 'utf8' });
   assert.equal(r.status, 0);
   assert.match(r.stdout, /test <published-build> --trial <published-slug> --unpublished <trial-folder> --model <id> --runner <login>\n +--raw-out <new-file> --work-dir <new-folder> \[--out <new-file>\] \[--role guild\] \[--max-cost-usd 5\] \[-j n\] \[--rep k\] \[--keep-temp\]/);
+  assert.match(r.stdout, /only the folder's cases run \(the runner is told --eval-dir evals\)/);
   assert.match(r.stdout, /node cli\/buildguild\.mjs unpublished <trial-folder>/);
   assert.match(r.stdout, /refuses a local run and a hidden-slice record/);
-  assert.match(readFileSync(fileURLToPath(new URL('../cli/README.md', import.meta.url)), 'utf8'), /## Run unpublished cases as a hidden slice/);
+  const readme = readFileSync(fileURLToPath(new URL('../cli/README.md', import.meta.url)), 'utf8');
+  assert.match(readme, /## Run unpublished cases as a hidden slice/);
+  assert.match(readme, /Only after the preflight do the folder's fixtures run/);
 });
 
 test('the unpublished command refuses a folder that is not one of cases, and any flag', async t => {
@@ -373,6 +413,9 @@ const DAMAGES = [
   ['unscored', 'unpublished-1: a run with the build was not graded (a grader went unscored or missing, its score is not from 0 to 1, or paid graders were skipped)'],
   ['all-error', 'unpublished-1: a run with the build was not graded (a grader went unscored or missing, its score is not from 0 to 1, or paid graders were skipped)'],
   ['exit-2', 'the runner exited 2 (a partial report: the cost ceiling, an interruption or a failed sign-in), not 0'],
+  ['disabled-plugin', 'the report does not show the build loaded in the run with it: it must name one plugin, local-build 0.1.0, loaded from the run folder with no problem reported for it (it names local-build 0.1.0 with the problem disabled_by_default)'],
+  ['no-plugin', 'the report does not show the build loaded in the run with it: it must name one plugin, local-build 0.1.0, loaded from the run folder with no problem reported for it (it names none)'],
+  ['other-dir', "unpublished-1: the report says the case was read from another folder than the run folder's evals/"],
 ];
 
 test('test --unpublished writes no record for a run that is not complete, and keeps the raw report, marked', async t => {
@@ -382,23 +425,36 @@ test('test --unpublished writes no record for a run that is not complete, and ke
     assert.equal(r.status, 2, `${damage}: ${r.stderr}`);
     assert.ok(r.stderr.includes('buildguild: no record was written: the run on the unpublished cases is not complete.\n'), `${damage}: ${r.stderr}`);
     assert.ok(r.stderr.includes(`\n  - ${problem}\n`), `${damage}: ${r.stderr}`);
-    assert.match(r.stderr, /The raw report .*buildguild-raw\.json and its copy .*raw-\d+\.json are kept, marked, to work out what happened/);
+    assert.match(r.stderr, /The raw report .*buildguild-raw\.json and its copy .*raw-\d+\.json are kept, marked, to work out what happened; they hold the cases' names and prompts, so keep them private\./);
     assert.ok(!existsSync(join(f.root, r.out)), `${damage}: no record`);
     assert.equal(f.json(r.raw).trialSource, 'unpublished');
+    assert.equal(f.json(r.raw).unpublishedRun.count, 3);
   }
 });
 
-// Review 6031674797, finding 3: the runner grades a run that ran out of turns, and so does this mode: a record, with a note.
-test('a run that ended in an ordinary error and was still graded gives a record through test and wrap, with a note', async t => {
+// A run the runner graded is a measurement, whatever its score or error text: out of turns, out of time, an agent that exited
+// non-zero, both arms at zero, the arm with the build at zero and the bare one at one. Each gives a record through test and wrap.
+const SOUND = [
+  ['max-turns', { name: 'unpublished-1', score: 1, delta: 0.5 }, true],
+  ['timeout', { name: 'unpublished-1', score: 1, delta: 0.5 }, true],
+  ['agent-exit', { name: 'unpublished-1', score: 1, delta: 0.5 }, true],
+  ['zero-both', { name: 'unpublished-1', score: 0, delta: 0 }, false],
+  ['zero-with', { name: 'unpublished-1', score: 0, delta: -1 }, false],
+];
+test('a run the runner graded gives a record through test and wrap, whatever its score, with a note when it ended in an error', async t => {
   const f = await setup(t);
-  const r = await f.hidden([], { STUB_DAMAGE: 'max-turns' });
-  assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stderr, /note: 1 of 6 runs ended in an error and were still graded; the record counts them as measured, as any record does/);
-  assert.equal(f.json(r.out).hiddenSlice, true);
-  const w = await f.run(wrapOf(r.raw, 'wrapped.json'));
-  assert.equal(w.status, 0, w.stderr);
-  assert.match(w.stderr, /note: 1 of 6 runs ended in an error and were still graded/);
-  assert.equal(withoutId(f.json('wrapped.json')), withoutId(f.json(r.out)));
+  for (const [shape, first, errored] of SOUND) {
+    const r = await f.hidden([], { STUB_DAMAGE: shape });
+    assert.equal(r.status, 0, `${shape}: ${r.stderr}`);
+    const note = /note: 1 of 6 runs ended in an error and were still graded; the record counts them as measured, as any record does/;
+    assert.equal(note.test(r.stderr), errored, `${shape}: ${r.stderr}`);
+    assert.equal(f.json(r.out).hiddenSlice, true);
+    assert.deepEqual(f.json(r.out).results.cases[0], first, shape);
+    const w = await f.run(wrapOf(r.raw, `wrapped-${shape}.json`));
+    assert.equal(w.status, 0, `${shape}: ${w.stderr}`);
+    assert.equal(note.test(w.stderr), errored, `${shape}: ${w.stderr}`);
+    assert.equal(withoutId(f.json(`wrapped-${shape}.json`)), withoutId(f.json(r.out)), shape);
+  }
 });
 
 test('an ordinary run with the same damage behaves as it always has', async t => {
@@ -406,9 +462,11 @@ test('an ordinary run with the same damage behaves as it always has', async t =>
   const partial = await f.testRun(['--trial', 'sample-trial'], { STUB_DAMAGE: 'partial' });
   assert.equal(partial.status, 0, partial.stderr);
   assert.equal(f.json('evidence.json').results.partial, true);
+  assert.match(partial.stdout, /\(PARTIAL: cost ceiling hit\)/);
   const errored = await f.testRun(['--trial', 'sample-trial', '--out', 'errored.json'], { STUB_DAMAGE: 'arm-error' });
   assert.equal(errored.status, 0, errored.stderr);
   assert.match(errored.stderr, /note: 1 of 2 agent runs ended in an error; first: synthetic runner error/);
+  assert.equal(f.json('errored.json').results.cases[0].name, 'case-name');
 });
 
 // Review 6031674797, finding 4, with the earlier ones: wrap applies the same rules, the runner's exit status among them.
@@ -420,6 +478,7 @@ test('wrap --unpublished refuses a report that is not complete, by the same chec
     assert.equal(w.status, 1, `${damage}: ${w.stdout}`);
     assert.ok(w.stderr.startsWith(`buildguild: no record was written: ${r.raw} is not the report of a complete run on the unpublished cases.\n`), `${damage}: ${w.stderr}`);
     assert.ok(w.stderr.includes(`\n  - ${problem}`), `${damage}: ${w.stderr}`);
+    assert.equal(w.stdout, '');
     assert.ok(!existsSync(join(f.root, `wrapped-${damage}.json`)));
   }
 });
@@ -436,12 +495,15 @@ test('a case listed twice in trial.json is refused by unpublished, test and wrap
     const r = await f.run(args);
     assert.equal(r.status, 1, args.join(' '));
     assert.match(r.stderr, message);
+    assert.equal(r.stdout, '');
   }
   const calls = f.claudeCalls().length;
+  rmSync(join(f.root, 'fixture-ran'), { force: true });
   const run = await f.hidden();
   assert.equal(run.status, 1);
   assert.match(run.stderr, message);
   assert.equal(f.claudeCalls().length, calls, 'nothing ran');
+  assert.ok(!existsSync(join(f.root, 'fixture-ran')), 'no fixture ran');
 });
 
 test('wrap keeps the dimensions the cases had at the run, and says so when trial.json has changed', async t => {
@@ -495,17 +557,30 @@ test('every refusal of the preflight runs, creates and writes nothing and fetche
   withFixture('bad-json', [A]); f.write('bad-json/trial.json', '{ not json');
   withFixture('line-break', [A]); f.write(`line-break/cases/${A.name}/notes\n.txt`, 'a name with a line break');
   withFixture('backslash', [A]); f.write(`backslash/cases/${A.name}/notes\\x.txt`, 'a name with a backslash');
-  // The public form, and the reviewer's shapes outside it.
+  // The public form, and shapes outside it: the earlier reviews' and the fourth review's.
   const grader = (dir, file, front) => f.write(`${dir}/cases/${A.name}/graders/${file}`, `---\n${front}\n---\n`);
   withFixture('quoted-key', [A]); grader('quoted-key', 'done.md', "type: regex\npattern: 'done'\n\"name\": renamed");
   withFixture('inline-graders', [A]); f.write(`inline-graders/cases/${A.name}/case.yaml`, `schema_version: "1.1"\nname: ${A.name}\ngraders:\n  - name: extra\n    type: regex\n    pattern: done\ncontext:\n  scaffold_script: fixture.sh\n`);
   withFixture('case-renamed', [A]); f.write(`case-renamed/cases/${A.name}/case.yaml`, `schema_version: "1.1"\nname: logical-case\ncontext:\n  scaffold_script: fixture.sh\n`);
   withFixture('prompt-named', [A]); f.write(`prompt-named/cases/${A.name}/prompt.md`, `---\nname: logical-case\ntags: [${A.dimension}]\nallowed_tools: [Write]\n---\n${A.prompt}\n`);
   withFixture('grader-named', [A]); grader('grader-named', 'done.md', "type: regex\npattern: 'done'\nname: renamed");
-  withFixture('grader-arm', [A]); grader('grader-arm', 'indicator.md', 'type: tool_used\ntool: Write\narm: with-only');
+  withFixture('grader-arm', [A]); grader('grader-arm', 'indicator.md', "type: regex\npattern: 'done'\narm: with-only");
   withFixture('skill-grader', [A]); grader('skill-grader', 'indicator.md', 'type: tool_used\ntool: Skill');
   withFixture('mock-grader', [A]); grader('mock-grader', 'indicator.md', "type: regex\ntarget: mock_calls\npattern: 'done'");
+  // The fourth review's two: a quoted, escaped Skill (YAML reads "Sk\u0069ll" as Skill), and an opening delimiter with a space.
+  withFixture('escaped-skill', [A]); grader('escaped-skill', 'indicator.md', `type: tool_used\ntool: "Sk${String.fromCharCode(92)}u0069ll"`);
+  withFixture('spaced-open', [A]); f.write(`spaced-open/cases/${A.name}/prompt.md`, `--- \nname: renamed\ntags: [${A.dimension}]\nallowed_tools: [Write]\n---\n${A.prompt}\n`);
+  withFixture('carriage-return', [A]); f.write(`carriage-return/cases/${A.name}/prompt.md`, `---\r\ntags: [${A.dimension}]\r\nallowed_tools: [Write]\r\n---\r\n${A.prompt}\r\n`);
+  withFixture('no-prompt', [A]); rmSync(join(f.root, `no-prompt/cases/${A.name}/prompt.md`));
+  withFixture('top-file', [A]); f.write('top-file/cases/notes.md', 'a file beside the case folders');
+  withFixture('case-manifest', [A]); f.write(`case-manifest/cases/${A.name}/plugin.json`, '{"name":"case-plugin"}');
+  // Case folders the runner's discovery skips, or whose name YAML reads as other than text.
+  const caseNamed = (dir, name) => withFixture(dir, [{ ...A, name }]);
+  caseNamed('results-case', 'results'); caseNamed('mocks-case', 'mocks'); caseNamed('modules-case', 'node_modules'); caseNamed('claude-case', '.claude'); caseNamed('git-case', '.git');
+  caseNamed('yaml-word', 'true'); caseNamed('number-name', '1e3');
   f.writeFolder('empty', []);
+  mkdirSync(join(f.root, 'locked'));
+  chmodSync(join(f.root, 'locked'), 0o500);
   mkdirSync(join(f.root, 'no-trial'));
   mkdirSync(join(f.root, 'out-dir'));
   f.write('work/keep.txt', 'kept');
@@ -546,14 +621,27 @@ test('every refusal of the preflight runs, creates and writes nothing and fetche
     row('structure', () => run('local-build', './short-readme'), /short-readme: 1 problem\(s\)\n  - README\.md needs at least forty words/),
     row('file-name', () => run('local-build', './line-break'), /line-break\/cases holds a name outside the allowed ones \(letters, digits, "\.", "_" and "-"\): "alpha-secret-ledger\/notes\\n\.txt"/),
     row('file-name', () => run('local-build', './backslash'), /backslash\/cases holds a name outside the allowed ones .*"alpha-secret-ledger\/notes\\\\x\.txt"/),
-    row('form-yaml', () => run('local-build', './quoted-key'), /quoted-key\/cases\/alpha-secret-ledger\/graders\/done\.md's front matter is not written as plain "key: value" lines/),
-    row('form-inline-graders', () => run('local-build', './inline-graders'), /case\.yaml lists graders; in this mode graders are files under graders\/ only/),
-    row('form-case-name', () => run('local-build', './case-renamed'), /case\.yaml names the case "logical-case"; it must be its folder's name, alpha-secret-ledger/),
-    row('form-prompt-name', () => run('local-build', './prompt-named'), /prompt\.md's front matter names the case; in this mode a case's name is its folder's/),
-    row('form-grader-name', () => run('local-build', './grader-named'), /graders\/done\.md sets a grader name; in this mode a grader's name is its file's/),
-    row('form-grader-arm', () => run('local-build', './grader-arm'), /graders\/indicator\.md sets an arm; in this mode every grader scores both arms/),
-    row('form-with-only', () => run('local-build', './skill-grader'), /graders\/indicator\.md is a grader the runner treats as with-only/),
-    row('form-with-only', () => run('local-build', './mock-grader'), /graders\/indicator\.md is a grader the runner treats as with-only/),
+    row('case-name', () => run('local-build', './results-case'), /results-case\/cases\/results is not a case name this mode takes: .*not a name the runner's case discovery skips/),
+    row('case-name', () => run('local-build', './mocks-case'), /mocks-case\/cases\/mocks is not a case name this mode takes/),
+    row('case-name', () => run('local-build', './modules-case'), /modules-case\/cases\/node_modules is not a case name this mode takes/),
+    row('case-name', () => run('local-build', './claude-case'), /claude-case\/cases\/\.claude is not a case name this mode takes/),
+    row('case-name', () => run('local-build', './git-case'), /git-case\/cases\/\.git is not a case name this mode takes/),
+    row('case-name', () => run('local-build', './yaml-word'), /yaml-word\/cases\/true is not a case name this mode takes: .*not a word YAML reads as other than text/),
+    row('case-name', () => run('local-build', './number-name'), /number-name\/cases\/1e3 is not a case name this mode takes/),
+    row('form-line', () => run('local-build', './quoted-key'), /quoted-key\/cases\/alpha-secret-ledger\/graders\/done\.md, line 4 is not a "key: value" line of the form this mode takes/),
+    row('form-line', () => run('local-build', './inline-graders'), /inline-graders\/cases\/alpha-secret-ledger\/case\.yaml, line 3: graders is not a key this mode takes there \(it takes schema_version, name, context\)/),
+    row('form-line', () => run('local-build', './case-renamed'), /case-renamed\/cases\/alpha-secret-ledger\/case\.yaml, line 2: the value of name is not the folder's name, alpha-secret-ledger/),
+    row('form-line', () => run('local-build', './prompt-named'), /prompt-named\/cases\/alpha-secret-ledger\/prompt\.md, line 2: name is not a key this mode takes there \(it takes tags, runs, max_turns, timeout_seconds, allowed_tools\)/),
+    row('form-line', () => run('local-build', './grader-named'), /grader-named\/cases\/alpha-secret-ledger\/graders\/done\.md, line 4: name is not a key this mode takes there/),
+    row('form-line', () => run('local-build', './grader-arm'), /grader-arm\/cases\/alpha-secret-ledger\/graders\/indicator\.md, line 4: arm is not a key this mode takes there/),
+    row('form-line', () => run('local-build', './skill-grader'), /skill-grader\/cases\/alpha-secret-ledger\/graders\/indicator\.md, line 3: the value of tool is not Read, the one tool a tool_used grader names in the public trial/),
+    row('form-line', () => run('local-build', './mock-grader'), /mock-grader\/cases\/alpha-secret-ledger\/graders\/indicator\.md, line 3: the value of target is not last_message/),
+    row('form-line', () => run('local-build', './escaped-skill'), /escaped-skill\/cases\/alpha-secret-ledger\/graders\/indicator\.md, line 3: the value of tool is not Read/),
+    row('form-front-matter', () => run('local-build', './spaced-open'), /spaced-open\/cases\/alpha-secret-ledger\/prompt\.md does not open with a line that is exactly "---"/),
+    row('form-text', () => run('local-build', './carriage-return'), /carriage-return\/cases\/alpha-secret-ledger\/prompt\.md is not UTF-8 text without carriage returns/),
+    row('form-missing', () => run('local-build', './no-prompt'), /no-prompt\/cases\/alpha-secret-ledger has no prompt\.md/),
+    row('form-file', () => run('local-build', './top-file'), /top-file\/cases\/notes\.md is a file at the top of cases\/, which holds only the case folders/),
+    row('form-file', () => run('local-build', './case-manifest'), /case-manifest\/cases\/alpha-secret-ledger\/plugin\.json would make the runner load the case folder as a plugin in place of the build/),
     row('output-exists', () => run('local-build', './good'), /--out .*evidence-unpublished\.json already exists; this mode creates its outputs and overwrites nothing/,
       () => linkSync(join(f.root, 'good/cases', A.name, 'prompt.md'), join(f.root, 'evidence-unpublished.json'))),
     row('output-exists', () => f.run(['test', 'local-build', '--trial', 'sample-trial', '--unpublished', './good', '--model', MODEL, '--runner', 'tester', '--work-dir', 'new-run', '--raw-out', 'raw-hard.json', '--out', 'record-new.json']), /--raw-out .*raw-hard\.json already exists/,
@@ -564,6 +652,9 @@ test('every refusal of the preflight runs, creates and writes nothing and fetche
     row('output-parent', () => f.run(['test', 'local-build', '--trial', 'sample-trial', '--unpublished', './good', '--model', MODEL, '--runner', 'tester', '--work-dir', 'new-run', '--raw-out', 'absent/raw.json']), /--raw-out .*absent\/raw\.json is not in an existing folder/),
     row('output-in-folder', () => run('local-build', './good', ['--out', './good/record.json']), /--out .*good\/record\.json is inside the unpublished folder/),
     row('output-in-folder', () => f.run(['test', 'local-build', '--trial', 'sample-trial', '--unpublished', './good', '--model', MODEL, '--runner', 'tester', '--work-dir', './good/run', '--raw-out', 'new-raw.json']), /--work-dir .*good\/run is inside the unpublished folder/),
+    row('output-unwritable', () => run('local-build', './good', ['--out', 'locked/record.json']), /--out .*locked\/record\.json is in a folder this user cannot create files in/),
+    row('output-unwritable', () => f.run(['test', 'local-build', '--trial', 'sample-trial', '--unpublished', './good', '--model', MODEL, '--runner', 'tester', '--work-dir', 'new-run', '--raw-out', 'locked/raw.json']), /--raw-out .*locked\/raw\.json is in a folder this user cannot create files in/),
+    row('output-unwritable', () => f.run(['test', 'local-build', '--trial', 'sample-trial', '--unpublished', './good', '--model', MODEL, '--runner', 'tester', '--work-dir', 'locked/run', '--raw-out', 'new-raw.json']), /--work-dir .*locked\/run is in a folder this user cannot create files in/),
     row('output-same', () => run('local-build', './good', ['--out', 'new-raw.json']), /--out and --raw-out are the same path/),
     row('output-same', () => run('local-build', './good', ['--out', 'NEW-RAW.json']), /--out and --raw-out are the same path where case is ignored \(.*NEW-RAW\.json and .*new-raw\.json\)/),
     row('trial-lookup', () => f.run(['test', 'local-build', '--trial', 'no-such-trial', '--unpublished', './good', ...base]), /the published trial no-such-trial could not be read from .* \(\/trials\/no-such-trial\.json returned 404\); nothing was run/),
@@ -616,7 +707,7 @@ test('the report read after the run is the one this run wrote', async t => {
   const f = await setup(t);
   const good = await f.hidden();
   assert.equal(good.status, 0, good.stderr);
-  const staleZip = zipOf({ ...Object.fromEntries(Object.entries(BUILD_FILES).map(([k, v]) => [k.replace(/^local-build/, 'stale-build'), v])), 'stale-build/buildguild-raw.json': readFileSync(join(f.root, good.raw)), 'stale-build/evals/old-case/prompt.md': 'an evals/ the cases replace' });
+  const staleZip = zipOf({ ...buildFiles('stale-build'), 'stale-build/buildguild-raw.json': readFileSync(join(f.root, good.raw)), 'stale-build/evals/old-case/prompt.md': 'an evals/ the cases replace' });
   f.routes['/builds/stale-build.json'] = build => JSON.stringify(build('stale-build', staleZip));
   f.routes['/dl/stale-build.zip'] = staleZip;
   const stale = await f.run(['test', 'stale-build', '--trial', 'sample-trial', '--unpublished', './private-folder-q7', '--model', MODEL, '--runner', 'tester', '--work-dir', 'stale-run', '--raw-out', 'stale-raw.json', '--out', 'stale-record.json'], { STUB_DAMAGE: 'no-report' });
@@ -630,7 +721,7 @@ test('the report read after the run is the one this run wrote', async t => {
   const shipped = { 'buildguild-raw.json': { './buildguild-raw.json': readFileSync(join(f.root, good.raw)) }, evals: { './evals/old-case/prompt.md': 'cases the archive adds' } };
   for (const [name, entries] of Object.entries(shipped)) {
     const slug = `dot-${name.replace(/[^a-z]+/g, '-')}`;
-    const zip = zipOf({ ...Object.fromEntries(Object.entries(BUILD_FILES).map(([k, v]) => [k.replace(/^local-build/, slug), v])), ...Object.fromEntries(Object.entries(entries).map(([k, v]) => [`${slug}/${k}`, v])) });
+    const zip = zipOf({ ...buildFiles(slug), ...Object.fromEntries(Object.entries(entries).map(([k, v]) => [`${slug}/${k}`, v])) });
     f.routes[`/builds/${slug}.json`] = build => JSON.stringify(build(slug, zip));
     f.routes[`/dl/${slug}.zip`] = zip;
     const calls = f.claudeCalls().length;
@@ -642,20 +733,85 @@ test('the report read after the run is the one this run wrote', async t => {
   }
 });
 
+// The fourth review, finding 1: an archive whose manifest names an eval folder of its own (experimental.evals) had the runner read
+// that folder's cases in place of the folder's. The runner is told --eval-dir evals, and such an archive is refused before the
+// runner starts; so is one whose manifest does not name the build, with a version.
+test('the runner reads only the cases this run writes: an archive that names its own eval folder is refused before it starts', async t => {
+  const f = await setup(t);
+  const serve = (slug, files) => { const zip = zipOf(files); f.routes[`/builds/${slug}.json`] = build => JSON.stringify(build(slug, zip)); f.routes[`/dl/${slug}.zip`] = zip; };
+  // The reviewer's archive: experimental.evals names alternate/, holding cases of the same names with other prompts.
+  const alternate = Object.fromEntries(PRIVATE.flatMap(c => [[`alternate-build/alternate/${c.name}/prompt.md`, `---\ntags: [${c.dimension}]\nallowed_tools: [Write]\n---\nOnly say done.\n`], [`alternate-build/alternate/${c.name}/graders/done.md`, "---\ntype: regex\npattern: 'done'\n---\n"]]));
+  serve('alternate-build', { ...buildFiles('alternate-build', { experimental: { evals: 'alternate' } }), ...alternate });
+  serve('top-evals-build', buildFiles('top-evals-build', { evals: 'alternate' }));
+  serve('renamed-build', { ...buildFiles('renamed-build'), 'renamed-build/.claude-plugin/plugin.json': JSON.stringify({ name: 'another-build', version: '0.1.0' }) });
+  const bare = buildFiles('bare-build');
+  delete bare['bare-build/.claude-plugin/plugin.json'];
+  serve('bare-build', bare);
+  for (const [slug, message] of [
+    ['alternate-build', /the build's plugin manifest \.claude-plugin\/plugin\.json names an eval folder of its own; in this mode the runner reads only the cases this run writes to evals\/; the runner was not started, and no record was written/],
+    ['top-evals-build', /the build's plugin manifest \.claude-plugin\/plugin\.json names an eval folder of its own/],
+    ['renamed-build', /the build's plugin manifest names "another-build" version "0\.1\.0", not the build renamed-build with a version/],
+    ['bare-build', /the build's archive has no \.claude-plugin\/plugin\.json that is a JSON object/],
+  ]) {
+    const calls = f.claudeCalls().length;
+    const r = await f.run(['test', slug, '--trial', 'sample-trial', '--unpublished', './private-folder-q7', '--model', MODEL, '--runner', 'tester', '--work-dir', `${slug}-run`, '--raw-out', `${slug}-raw.json`, '--out', `${slug}-record.json`]);
+    assert.equal(r.status, 1, `${slug}: ${r.stderr}`);
+    assert.match(r.stderr, message, slug);
+    assert.equal(f.claudeCalls().length, calls, `${slug}: the runner was not started`);
+    assert.ok(!existsSync(join(f.root, `${slug}-record.json`)) && !existsSync(join(f.root, `${slug}-raw.json`)), `${slug}: no record and no raw copy`);
+  }
+});
+
+// The fourth review, finding 6: the outputs are created with exclusive creation. A file that appears at an output path while the
+// command runs is left as it is, and the command stops: for the record, the raw copy and wrap's record.
+test('a file that appears at an output path during the run is left as it is, and the command stops', async t => {
+  const f = await setup(t);
+  for (const [flag, file] of [['--out', 'race-record.json'], ['--raw-out', 'race-raw.json']]) {
+    const paths = { '--out': 'race-out-record.json', '--raw-out': 'race-out-raw.json', [flag]: file };
+    const r = await f.run(['test', 'local-build', '--trial', 'sample-trial', '--unpublished', './private-folder-q7', '--model', MODEL, '--runner', 'tester', '--work-dir', `run-${file}`, '--raw-out', paths['--raw-out'], '--out', paths['--out']], { STUB_RACE: join(f.root, file) });
+    assert.equal(r.status, 1, `${flag}: ${r.stderr}`);
+    assert.match(r.stderr, new RegExp(`${flag} .*${file.replace('.', '\\.')} appeared after the checks and was left as it is`), flag);
+    assert.equal(readFileSync(join(f.root, file), 'utf8'), 'PRESERVE', `${flag}: the file that appeared is kept`);
+  }
+  assert.ok(existsSync(join(f.root, 'race-out-raw.json')), 'with the record\'s path taken, the raw copy was written before it');
+  assert.ok(!existsSync(join(f.root, 'race-out-record.json')), 'with the raw copy\'s path taken, no record was written');
+  // wrap: the file appears while wrap reads the published trial from the site, after its checks.
+  const good = await f.hidden();
+  assert.equal(good.status, 0, good.stderr);
+  const target = join(f.root, 'race-wrapped.json');
+  f.hooks.push(url => { if (url === '/trials/sample-trial.json' && !existsSync(target)) writeFileSync(target, 'PRESERVE'); });
+  const w = await f.run(wrapOf(good.raw, 'race-wrapped.json'));
+  assert.equal(w.status, 1, w.stderr);
+  assert.match(w.stderr, /--out .*race-wrapped\.json appeared after the checks and was left as it is; no record was written/);
+  assert.equal(readFileSync(target, 'utf8'), 'PRESERVE');
+});
+
 test('the cases are numbered, and the checksum ordered, by the bytes of the names, not by locale', async t => {
   const f = await setup(t);
   f.writeFolder('mixed', MIXED);
-  assert.ok('a-lower-ledger'.localeCompare('B-upper-switch') < 0, 'the locale here puts a before B');
+  // File names inside a case may mix cases, and there the byte order and the locale order differ.
+  f.write('mixed/cases/a-lower-ledger/Zeta.txt', 'first by bytes\n');
+  f.write('mixed/cases/a-lower-ledger/alpha.txt', 'first by locale\n');
+  assert.ok('alpha.txt'.localeCompare('Zeta.txt') < 0 && Buffer.compare(Buffer.from('Zeta.txt'), Buffer.from('alpha.txt')) < 0, 'the two orders differ here');
   const sum = await f.run(['unpublished', './mixed']);
   assert.equal(sum.status, 0, sum.stderr);
-  assert.equal(digestOf(sum.stdout).sha256, shellChecksum(join(f.root, 'mixed')), 'the LC_ALL=C recipe and the CLI agree');
-  assert.equal(digestOf(sum.stdout).sha256, '706dff047c21677f4e609fa550e6e8a7589185371c4ed0287f9cdde7f1b2d2cb');
+  const digest = digestOf(sum.stdout).sha256;
+  assert.equal(digest, shellChecksum(join(f.root, 'mixed')), 'the LC_ALL=C recipe and the CLI agree');
+  assert.equal(digest, 'c43e0fc3bc98846da520cdb21cb82a23940614ff932103ab603b3ece092b1a53');
+  // The same lines in locale order give another checksum.
+  const listed = [];
+  const walkCases = rel => { for (const name of readdirSync(join(f.root, 'mixed/cases', rel))) { const r = rel ? `${rel}/${name}` : name; if (lstatSync(join(f.root, 'mixed/cases', r)).isDirectory()) walkCases(r); else listed.push(r); } };
+  walkCases('');
+  const lineOf = rel => `${rel.endsWith('.sh') ? 755 : 644} ${createHash('sha256').update(readFileSync(join(f.root, 'mixed/cases', rel))).digest('hex')} cases/${rel}\n`;
+  const digestIn = order => createHash('sha256').update([...listed].sort(order).map(lineOf).join('')).digest('hex');
+  assert.equal(digestIn((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))), digest);
+  assert.notEqual(digestIn((a, b) => a.localeCompare(b)), digest, 'in locale order the lines give another checksum');
   const r = await f.hidden([], undefined, { folder: './mixed' });
   assert.equal(r.status, 0, r.stderr);
-  // Byte order: B-upper-switch, a-lower-ledger, c-lower-gauge.
+  // a-lower-ledger, b-lower-switch, c-lower-gauge: the names' byte order, which for case names is their locale order too.
   assert.deepEqual(f.json(r.out).results.cases, [
-    { name: 'unpublished-1', score: 0.75, delta: 0.5 },
-    { name: 'unpublished-2', score: 1, delta: 0.5 },
+    { name: 'unpublished-1', score: 1, delta: 0.5 },
+    { name: 'unpublished-2', score: 0.75, delta: 0.5 },
     { name: 'unpublished-3', score: 0.5, delta: 0 },
   ]);
 });
@@ -693,4 +849,9 @@ test('wrap takes every fact from the run\'s report and refuses a flag that says 
   const old = await f.run(wrapOf('raw-old-marker.json', 'w-old.json'));
   assert.equal(old.status, 1);
   assert.match(old.stderr, /raw-old-marker\.json is not the report of a run with --unpublished, so it cannot become a hidden-slice record/);
+  const { plugin, ...noPlugin } = raw.unpublishedRun;
+  writeFileSync(join(f.root, 'raw-no-plugin.json'), JSON.stringify({ ...raw, unpublishedRun: noPlugin }));
+  const unloaded = await f.run(wrapOf('raw-no-plugin.json', 'w-no-plugin.json'));
+  assert.equal(unloaded.status, 1);
+  assert.match(unloaded.stderr, /raw-no-plugin\.json is not the report of a run with --unpublished, so it cannot become a hidden-slice record/);
 });

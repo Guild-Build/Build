@@ -40,14 +40,23 @@ function summarizeAttempt(arm, number, graderNames) {
   return status === 'accepted' || status === 'failed' ? { ...attempt, score: arm.score, status } : { ...attempt, status };
 }
 
-function matchesSuite(suite, plugin, model) {
-  if (!suite || !plugin || typeof model !== 'string' || suite.modelOverride !== model
-    || suite.ablation !== 'none' || suite.concurrency !== 1
-    || !Array.isArray(suite.plugins) || suite.plugins.length !== 1) return false;
+// Whether a runner report shows the planned plugin loaded, for every reader of those reports (comparison runs here, runs on
+// unpublished cases in buildguild.mjs): exactly one plugin under test, with the planned name and version, at the planned
+// absolute path, which is also the suite's root, and no problem reported for it. Claude Code 2.1.321 reports a plugin's
+// problem as manifest_invalid, disabled_by_default, identity_unverified, archive_not_probed or will_not_load, and runs the
+// arm with the plugin without it for each of them but identity_unverified, where the child decides at load time.
+export function pluginLoaded(suite, plugin) {
+  if (!suite || !plugin || !Array.isArray(suite.plugins) || suite.plugins.length !== 1) return false;
   const [loaded] = suite.plugins;
   const samePath = value => typeof value === 'string' && isAbsolute(value) && resolve(value) === resolve(plugin.path);
   return loaded?.name === plugin.name && loaded.version === plugin.version
     && !loaded.problem && samePath(loaded.path) && samePath(suite.root);
+}
+
+function matchesSuite(suite, plugin, model) {
+  if (!suite || !plugin || typeof model !== 'string' || suite.modelOverride !== model
+    || suite.ablation !== 'none' || suite.concurrency !== 1) return false;
+  return pluginLoaded(suite, plugin);
 }
 
 export function normalizeRun(raw, { cases, runs, exitCode, runnerVersion, plugin, model }) {
