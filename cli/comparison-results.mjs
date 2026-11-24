@@ -11,24 +11,24 @@ const uniqueNames = list => list.length > 0 && list.every(name => typeof name ==
   && new Set(list).size === list.length;
 
 // The state of one attempt in a runner report, for every reader of those reports (comparison runs here, runs on unpublished
-// cases in buildguild.mjs), so the two cannot drift: 'missing'; 'error' for an error or an abort, whatever its score;
-// 'ungraded' when its graders are not exactly the planned ones, one that counts was not scored, its score is not a fraction,
-// or paid graders were skipped; otherwise 'accepted' (score 1 and every grader that counts passed) or 'failed'. Under the
-// with-without ablation the runner marks some graders with-only: a plugin-fired indicator, not part of the score, reported
-// unscored. withOnlyExempt (for reports with that ablation) lets such a grader go unscored; every other grader must be scored.
-export function attemptStatus(arm, graderNames, { withOnlyExempt = false } = {}) {
+// cases in buildguild.mjs): 'missing'; 'error' for an error or an abort, whatever its score; 'ungraded' when its graders are not
+// exactly the planned ones, one was not scored, its score is not a fraction, or paid graders were skipped; otherwise 'accepted'
+// (score 1 and every grader passed) or 'failed'. The runner grades a run that ended in an ordinary error (out of turns, say)
+// like any other, and leaves ungraded only a run it aborted or one that never reached grading. With gradedErrors (runs on
+// unpublished cases), an error on a fully graded run is a result, not an incomplete run; only an abort is an 'error' then.
+export function attemptStatus(arm, graderNames, { gradedErrors = false } = {}) {
   if (arm == null) return 'missing';
-  if (arm.error || arm.aborted) return 'error';
+  if (arm.aborted || (arm.error && !gradedErrors)) return 'error';
   const reportedNames = names(arm.graders);
   const complete = uniqueNames(graderNames) && uniqueNames(reportedNames)
     && reportedNames.length === graderNames.length && reportedNames.every(name => graderNames.includes(name));
-  const counts = grade => !(withOnlyExempt && grade?.withOnly === true);
+  const errorOk = arm.error === null || (gradedErrors && typeof arm.error === 'string');
   if (!complete || !fraction(arm.score)
-    || arm.error !== null || arm.skippedPaidGraders !== false
-    || !arm.graders.every(grade => !counts(grade) || (grade.scored === true && typeof grade.passed === 'boolean'))) return 'ungraded';
+    || !errorOk || arm.skippedPaidGraders !== false
+    || !arm.graders.every(grade => grade.scored === true && typeof grade.passed === 'boolean')) return 'ungraded';
   // Do not use the runner's suite-level pass count. Full acceptance means every
   // grader passed.
-  return arm.score === 1 && arm.graders.every(grade => !counts(grade) || grade.passed) ? 'accepted' : 'failed';
+  return arm.score === 1 && arm.graders.every(grade => grade.passed) ? 'accepted' : 'failed';
 }
 
 function summarizeAttempt(arm, number, graderNames) {
