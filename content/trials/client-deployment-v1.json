@@ -68,7 +68,8 @@
     "dimension": 0.25
   },
   "hiddenSlice": {
-    "count": 0,
+    "count": 4,
+    "sha256": "b64e6b7072f78b4726df7a6a1b2004a9c296e51b58ec04419bc1b46cd1839e15",
     "published": null
   },
   "runner": "claude plugin eval",
