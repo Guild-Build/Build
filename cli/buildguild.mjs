@@ -873,6 +873,9 @@ async function wrapUnpublished(rawPath) {
   out(`hidden-slice record: ${outPath}`);
 }
 
+// What submit tells the runner about the role: the record's role is only a hint, and the guild decides it from the account.
+const roleDecided = login => `The guild decides at acceptance whether this record is the build author's own run or a reproduction, from the GitHub account that publishes it ("${login}"); the role below is only a hint.`;
+
 async function submit(path) {
   if (!path) die('usage: buildguild submit <evidence.json> [--yes]');
   const ev = JSON.parse(readFileSync(path, 'utf8'));
@@ -883,7 +886,8 @@ async function submit(path) {
   const login = version('gh', ['api', 'user', '--jq', '.login']); if (!login) die('gh is not logged in (gh auth login)');
   ev.runner = login;
   const summary = { schema: ev.schema, build: ev.build, buildVersion: ev.buildVersion, trial: ev.trial, trialVersion: ev.trialVersion, runner: ev.runner, role: ev.role, results: ev.results, environment: ev.environment, cost: ev.cost, date: ev.date };
-  out(`About to publish a PUBLIC Gist from GitHub account "${login}" with this evidence file, then send this summary to ${ORIGIN}/api/evidence:\n`);
+  out(`About to publish a PUBLIC Gist from GitHub account "${login}" with this evidence file, then send this summary to ${ORIGIN}/api/evidence.`);
+  out(`${roleDecided(login)}\n`);
   out(JSON.stringify(summary, null, 2));
   if (!flag('yes')) {
     process.stdout.write('\nProceed? [y/N] ');
@@ -1159,6 +1163,8 @@ Run from a checkout of https://github.com/Guild-Build/Build; the buildguild npm 
                                         --model names the model it runs on (the hosted season trial: claude-sonnet-5-5); ANTHROPIC_MODEL may stand in
                                         --work-dir is deleted first, so it may not be /, home, the current directory or above, or in or around the build or trial folder
                                         --rep k marks run k of several of the same build on the same trial: the evidence id and the default file name end in -rep<k>
+                                        --role author (the default) or assayer is only a hint the record carries: the guild decides at acceptance
+                                        whether a run is the author's own or a reproduction, from the GitHub account that publishes it
   node cli/buildguild.mjs test <published-build> --trial <published-slug> --unpublished <trial-folder> --model <id> --runner <login>
                                         --raw-out <new-file> --work-dir <new-folder> [--out <new-file>] [--role guild] [--max-cost-usd 5] [-j n] [--rep k] [--keep-temp]
                                         a guild maintainer's run of a private folder of cases, in the public trial's form, as the unpublished part
@@ -1178,7 +1184,8 @@ Run from a checkout of https://github.com/Guild-Build/Build; the buildguild npm 
                                         with --unpublished <folder> --trial <published-slug> --out <new-file>: rebuild the record test --unpublished
                                         wrote, every fact from its raw report
   node cli/buildguild.mjs submit <evidence.json> [--yes]
-                                        publish as a public Gist from your GitHub account and send the summary; refuses a local run and a hidden-slice record
+                                        publish as a public Gist from your GitHub account and send the summary; refuses a local run and a hidden-slice record.
+                                        The guild decides at acceptance whether the record is the author's own run or a reproduction, from that account
 `;
 
 (async () => {

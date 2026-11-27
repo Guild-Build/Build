@@ -39,6 +39,8 @@ The hosted Season trial workflow (`.github/workflows/trial.yml`) passes `--rep` 
 
 `submit` publishes that file as a public Gist from your own GitHub account (`gh gist create`) after showing you exactly what will be sent, then posts the summary and the Gist link to the guild. It refuses a record marked local, and a hidden-slice record (below), before it calls `gh`, so no Gist is made.
 
+The guild decides at acceptance whether a submitted record is the build author's own run or a reproduction, from the GitHub account that publishes it: a run from one of the build's author accounts is the author's own, and a run from any other account is a reproduction. So run `test` as a page gives it and `submit` from your own account; you need no `--role`. The record still carries a role, `author` unless `test` or `wrap` is given `--role assayer`, and `submit` shows it, but it is only a hint and never decides. It stays so that no command and no record changes shape. `--role guild` is the guild's own runs' and is unchanged.
+
 ## Run unpublished cases as a hidden slice
 
 A published trial can have an unpublished part, its hidden slice: cases no build author has seen, run by a guild maintainer so a build cannot be tuned to them. The cases sit in a private trial folder of the usual shape (`trial.json`, `README.md`, `LICENSE`, `cases/<name>/`), and a maintainer runs them on the maintainer's own machine, because a hosted run would publish its traces and so the cases:
