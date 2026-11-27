@@ -1173,7 +1173,7 @@ test('the record lists eight cases with one dimension each, matching the case fo
   assert.equal(record.version, '1.0.1');
   assert.equal(record.kind, 'guild');
   assert.equal(record.author, 'GuildBuild');
-  assert.deepEqual(record.hiddenSlice, { count: 0, published: null });
+  assert.deepEqual(record.hiddenSlice, { count: 4, sha256: 'b64e6b7072f78b4726df7a6a1b2004a9c296e51b58ec04419bc1b46cd1839e15', published: null });
   assert.deepEqual(record.tolerance, { overall: 0.1, dimension: 0.25 });
   assert.equal(record.cases.length, 8);
   assert.deepEqual(readdirSync(casesDir).sort(), record.cases.map(c => c.name).sort());
