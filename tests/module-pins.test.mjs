@@ -225,3 +225,30 @@ test('submit prints the module pins in its summary before cancellation, without 
   assert.match(result.stderr, /cancelled/);
   assert.ok(f.requests.every(request => request.startsWith('GET ')));
 });
+
+// cli/README.md and the help text say the record's role is author unless test or wrap is given --role, which sets it to the
+// value given. Both commands, on a trial folder and on a published trial.
+test('test and wrap write the role --role gives, and author without it', async t => {
+  const f = await setup(t);
+  f.runner();
+  const testRole = async (published, extra) => {
+    const result = await f.invoke(['test', './build', '--trial', published ? 'sample-trial' : './trial', '--model', 'claude-sonnet-5-5', '--runner', 'tester', '--work-dir', './work', ...extra]);
+    assert.equal(result.status, 0, result.stderr + result.stdout);
+    return f.record(published).role;
+  };
+  assert.equal(await testRole(false, []), 'author');
+  assert.equal(await testRole(false, ['--role', 'guild']), 'guild');
+  assert.equal(await testRole(true, []), 'author');
+  assert.equal(await testRole(true, ['--role', 'assayer']), 'assayer');
+  assert.equal(await testRole(true, ['--role', 'guild']), 'guild');
+  f.write('raw.json', raw);
+  const wrapRole = async (published, extra) => {
+    const result = await f.invoke(['wrap', './raw.json', '--build', 'local-build', '--trial', published ? 'sample-trial' : './trial', '--model', 'claude-sonnet-5-5', ...extra]);
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout).role;
+  };
+  assert.equal(await wrapRole(true, []), 'author');
+  assert.equal(await wrapRole(true, ['--role', 'assayer']), 'assayer');
+  assert.equal(await wrapRole(true, ['--role', 'guild']), 'guild');
+  assert.equal(await wrapRole(false, ['--role', 'guild']), 'guild');
+});
