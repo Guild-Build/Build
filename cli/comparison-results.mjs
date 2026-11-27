@@ -10,36 +10,53 @@ const names = entries => Array.isArray(entries) ? entries.map(entry => entry?.na
 const uniqueNames = list => list.length > 0 && list.every(name => typeof name === 'string' && name.length > 0)
   && new Set(list).size === list.length;
 
+// The state of one attempt in a runner report, for every reader of those reports (comparison runs here, runs on unpublished
+// cases in buildguild.mjs): 'missing'; 'error' for an error or an abort, whatever its score; 'ungraded' when its graders are not
+// exactly the planned ones, one was not scored, its score is not a fraction, or paid graders were skipped; otherwise 'accepted'
+// (score 1 and every grader passed) or 'failed'. The runner grades a run that ended in an ordinary error (out of turns, say)
+// like any other, and leaves ungraded only a run it aborted or one that never reached grading. With gradedErrors (runs on
+// unpublished cases), an error on a fully graded run is a result, not an incomplete run; only an abort is an 'error' then.
+export function attemptStatus(arm, graderNames, { gradedErrors = false } = {}) {
+  if (arm == null) return 'missing';
+  if (arm.aborted || (arm.error && !gradedErrors)) return 'error';
+  const reportedNames = names(arm.graders);
+  const complete = uniqueNames(graderNames) && uniqueNames(reportedNames)
+    && reportedNames.length === graderNames.length && reportedNames.every(name => graderNames.includes(name));
+  const errorOk = arm.error === null || (gradedErrors && typeof arm.error === 'string');
+  if (!complete || !fraction(arm.score)
+    || !errorOk || arm.skippedPaidGraders !== false
+    || !arm.graders.every(grade => grade.scored === true && typeof grade.passed === 'boolean')) return 'ungraded';
+  // Do not use the runner's suite-level pass count. Full acceptance means every
+  // grader passed.
+  return arm.score === 1 && arm.graders.every(grade => grade.passed) ? 'accepted' : 'failed';
+}
+
 function summarizeAttempt(arm, number, graderNames) {
   const attempt = { number, status: 'missing', score: null, costUsd: null, durationSeconds: null };
   if (arm == null) return attempt;
   attempt.costUsd = addKnown(nonnegative(arm.costUsd), nonnegative(arm.judgeCostUsd));
   attempt.durationSeconds = nonnegative(arm.durationSeconds);
-  if (arm.error || arm.aborted) return { ...attempt, status: 'error' };
-
-  const reportedNames = names(arm.graders);
-  const complete = uniqueNames(graderNames) && uniqueNames(reportedNames)
-    && reportedNames.length === graderNames.length && reportedNames.every(name => graderNames.includes(name));
-  if (!complete || !fraction(arm.score)
-    || arm.error !== null || arm.skippedPaidGraders !== false
-    || !arm.graders.every(grade => grade.scored === true && typeof grade.passed === 'boolean')) {
-    return { ...attempt, status: 'ungraded' };
-  }
-
-  // Do not use the runner's suite-level pass count. Full acceptance means every
-  // grader passed.
-  const accepted = arm.score === 1 && arm.graders.every(grade => grade.passed);
-  return { ...attempt, score: arm.score, status: accepted ? 'accepted' : 'failed' };
+  const status = attemptStatus(arm, graderNames);
+  return status === 'accepted' || status === 'failed' ? { ...attempt, score: arm.score, status } : { ...attempt, status };
 }
 
-function matchesSuite(suite, plugin, model) {
-  if (!suite || !plugin || typeof model !== 'string' || suite.modelOverride !== model
-    || suite.ablation !== 'none' || suite.concurrency !== 1
-    || !Array.isArray(suite.plugins) || suite.plugins.length !== 1) return false;
+// Whether a runner report shows the planned plugin loaded, for every reader of those reports (comparison runs here, runs on
+// unpublished cases in buildguild.mjs): exactly one plugin under test, with the planned name and version, at the planned
+// absolute path, which is also the suite's root, and no problem reported for it. Claude Code 2.1.321 reports a plugin's
+// problem as manifest_invalid, disabled_by_default, identity_unverified, archive_not_probed or will_not_load, and runs the
+// arm with the plugin without it for each of them but identity_unverified, where the child decides at load time.
+export function pluginLoaded(suite, plugin) {
+  if (!suite || !plugin || !Array.isArray(suite.plugins) || suite.plugins.length !== 1) return false;
   const [loaded] = suite.plugins;
   const samePath = value => typeof value === 'string' && isAbsolute(value) && resolve(value) === resolve(plugin.path);
   return loaded?.name === plugin.name && loaded.version === plugin.version
     && !loaded.problem && samePath(loaded.path) && samePath(suite.root);
+}
+
+function matchesSuite(suite, plugin, model) {
+  if (!suite || !plugin || typeof model !== 'string' || suite.modelOverride !== model
+    || suite.ablation !== 'none' || suite.concurrency !== 1) return false;
+  return pluginLoaded(suite, plugin);
 }
 
 export function normalizeRun(raw, { cases, runs, exitCode, runnerVersion, plugin, model }) {
