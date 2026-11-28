@@ -75,8 +75,12 @@ with `node cli/buildguild.mjs publish <folder>`; a maintainer who accepts it ope
 ## Season trials
 
 Guild-run evidence comes from the Season trial workflow in this repository,
-[`.github/workflows/trial.yml`](.github/workflows/trial.yml). Each run tests one build from `bundles/` on one trial as
-buildguild.gg publishes it, with the official eval runner, one run at a time and a cost ceiling.
+[`.github/workflows/trial.yml`](.github/workflows/trial.yml), or from a hidden-slice run. Each run of the workflow tests
+one build from `bundles/` on one trial as buildguild.gg publishes it, with the official eval runner, one run at a time
+and a cost ceiling. A hidden-slice run is a guild maintainer's run of a trial's unpublished cases, made where its traces
+stay private, on the maintainer's own machine or in a private workflow
+([`cli/README.md`](cli/README.md#run-unpublished-cases-as-a-hidden-slice)); a maintainer adds its record to this
+repository by pull request.
 
 A maintainer queues runs with a pull request that changes [`.github/trial-queue.json`](.github/trial-queue.json):
 increase `run` by one and list the requests, each naming a `build`, a `trial`, a `max_cost_usd` ceiling and a pinned
@@ -182,10 +186,12 @@ seccomp helper from starting any command with each of the three Claude Code rele
 Moving to `ubuntu-26.04` also needs its `bwrap-userns-restrict` profile out of the way, which is a change to the
 runner's security settings. That pull request must name the change and give its reason.
 
-A guild record's attestation is the public URL of the run that produced it,
-`https://github.com/Guild-Build/Build/actions/runs/<run id>`. Anyone signed in to GitHub can read the run's log there
-and download its files. The files are the evidence record, the raw report, the results and the agent traces, all
-scanned for the key before upload.
+A record from a run of the Season trial workflow in this repository carries an attestation: the public URL of the run
+that produced it, `https://github.com/Guild-Build/Build/actions/runs/<run id>`. Anyone signed in to GitHub can read the
+run's log there and download its files. The files are the evidence record, the raw report, the results and the agent
+traces, all scanned for the key before upload. A hidden-slice record carries no attestation: its run's traces hold the
+unpublished cases, so the run's log and files stay private, and the pull request that adds the record describes the run
+in words.
 
 [buildguild.gg](https://buildguild.gg/) is built from these records and bundles. Licensed under the Apache License 2.0
 ([`LICENSE`](LICENSE)).

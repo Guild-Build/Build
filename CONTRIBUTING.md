@@ -12,10 +12,12 @@
 
    `check` runs the manifest, skill, hook, grader and fixture checks on the build or trial you add. The bundle
    validation applies to any bundle you add or change and needs Claude Code.
-4. Evidence comes only from the trial workflow: `node cli/buildguild.mjs test` runs a published trial and writes the
-   record, `node cli/buildguild.mjs submit` sends it, and a maintainer accepts it into `content/evidence/`. Guild runs
-   come from this repository's [Season trial workflow](README.md#season-trials). Do not add or edit an evidence file in
-   a pull request; a wrong record is withdrawn, never edited.
+4. Evidence comes only from trial runs: `node cli/buildguild.mjs test` runs a published trial and writes the record,
+   `node cli/buildguild.mjs submit` sends it, and a maintainer accepts it into `content/evidence/`. Guild runs come
+   from this repository's [Season trial workflow](README.md#season-trials), or are hidden-slice runs: a guild
+   maintainer runs a trial's unpublished cases where the run's traces stay private, on the maintainer's own machine or
+   in a private workflow, and adds the record by pull request, since `submit` refuses it. Do not add or edit an
+   evidence file in a pull request of your own; a wrong record is withdrawn, never edited.
 5. Never type a tier, a medal or a score into a file. The site computes tiers and medals from the evidence, and every
    score comes from a trial run.
 
